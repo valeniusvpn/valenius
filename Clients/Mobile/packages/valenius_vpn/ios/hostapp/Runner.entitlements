@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the Runner (host app) target. Copy into ios/Runner/ and attach
+  in "Signing & Capabilities". `aps-environment` is `development` for debug/TestFlight
+  and switched to `production` for App Store builds (Xcode manages this per-config
+  when the Push Notifications capability is added).
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.developer.networking.networkextension</key>
+  <array>
+    <string>packet-tunnel-provider</string>
+  </array>
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.com.stranto.valenius</string>
+  </array>
+  <key>aps-environment</key>
+  <string>development</string>
+</dict>
+</plist>

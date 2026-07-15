@@ -1,0 +1,150 @@
+@page "{id:int}"
+@model Valenius.Backend.Pages.Admin.ConfigCardModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VPN Config — @Model.Hostname</title>
+    <link rel="stylesheet" href="/lib/inter/inter.css" />
+    <link rel="stylesheet" href="/lib/bootstrap/5.3.3/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/lib/bootstrap-icons/1.11.3/bootstrap-icons.min.css" />
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #f0f4f8; }
+        .card-wrap { max-width: 620px; margin: 2rem auto; }
+        .brand-bar { background: #0F4E66; color: #fff; padding: .85rem 1.5rem; border-radius: 10px 10px 0 0; }
+        .qr-box { display: inline-block; padding: 12px; background: #fff; border: 1px solid #dee2e6; border-radius: 8px; }
+        .conf-pre {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: .78rem;
+            background: #f8fafb;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 1rem;
+            white-space: pre;
+            overflow-x: auto;
+            margin-bottom: 0;
+        }
+        .warning-box {
+            background: #fff8e1;
+            border: 1px solid #ffc107;
+            border-radius: 6px;
+            padding: .75rem 1rem;
+            font-size: .82rem;
+        }
+        @@media print {
+            body { background: #fff !important; }
+            .no-print { display: none !important; }
+            .card-wrap { max-width: 100%; margin: 0; box-shadow: none !important; }
+            .brand-bar { border-radius: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .warning-box { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+    </style>
+</head>
+<body>
+    <div class="card-wrap shadow-sm">
+
+        <!-- Brand bar -->
+        <div class="brand-bar d-flex align-items-center gap-3">
+            <img src="/img/app.png" alt="Valenius" style="height:2rem;flex-shrink:0;" />
+            <div>
+                <div class="fw-semibold" style="font-size:1.05rem;">Valenius</div>
+                <div style="font-size:.78rem;opacity:.7;">VPN Configuration Card</div>
+            </div>
+            <div class="ms-auto no-print d-flex gap-2">
+                <button onclick="window.print()" class="btn btn-sm btn-light">
+                    <i class="bi bi-printer me-1"></i>Print / Save PDF
+                </button>
+                <button onclick="window.close()" class="btn btn-sm btn-outline-light">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Body -->
+        <div class="bg-white border border-top-0 p-4" style="border-radius:0 0 10px 10px;">
+
+            <!-- Client info -->
+            <dl class="row mb-4 pb-3 border-bottom">
+                <dt class="col-4 text-muted small fw-normal">Client</dt>
+                <dd class="col-8 fw-semibold mb-1">@Model.Hostname</dd>
+                <dt class="col-4 text-muted small fw-normal">Customer</dt>
+                <dd class="col-8 mb-1">@Model.CustomerName</dd>
+                <dt class="col-4 text-muted small fw-normal">VPN Profile</dt>
+                <dd class="col-8 mb-1"><code>@Model.ProfileName</code></dd>
+                <dt class="col-4 text-muted small fw-normal">VPN IP</dt>
+                <dd class="col-8 mb-0"><code>@Model.VpnIp</code></dd>
+            </dl>
+
+            <!-- QR code -->
+            <div class="text-center mb-4">
+                <div class="qr-box mb-2 d-inline-block">
+                    <img src="data:image/png;base64,@Model.QrBase64"
+                         alt="WireGuard® QR code"
+                         style="width:220px;height:220px;display:block;image-rendering:pixelated;" />
+                </div>
+                <div class="text-muted small mt-2">
+                    <i class="bi bi-phone me-1"></i>
+                    Scan with the <strong>WireGuard®</strong> mobile app to import this profile
+                </div>
+            </div>
+
+            <!-- Config file -->
+            <div class="mb-3">
+                <div class="d-flex align-items-center justify-content-between mb-1">
+                    <span class="small fw-semibold text-muted text-uppercase" style="letter-spacing:.05em;">
+                        <i class="bi bi-file-earmark-code me-1"></i>Configuration file
+                    </span>
+                    <button class="btn btn-outline-secondary btn-sm no-print"
+                            onclick="copyConf()" id="btnCopy"
+                            style="font-size:.75rem;padding:.2rem .6rem;">
+                        <i class="bi bi-clipboard me-1"></i>Copy
+                    </button>
+                </div>
+                <pre id="confPre" class="conf-pre">@Model.Config</pre>
+            </div>
+
+            <!-- Warning -->
+            <div class="warning-box mb-3">
+                <i class="bi bi-exclamation-triangle-fill text-warning me-2"></i>
+                <strong>Sensitive credentials.</strong>
+                This card contains a WireGuard® private key.
+                Share only with the intended user and delete after successful setup.
+            </div>
+            @if (Model.MfaGated)
+            {
+                <div class="warning-box mb-4" style="background:#fff3cd;border-color:#e0a800;">
+                    <i class="bi bi-shield-exclamation text-warning me-2"></i>
+                    <strong>MFA bypass risk.</strong>
+                    This client is protected by MFA, but any device holding this config can connect
+                    as this peer whenever an active MFA session exists — including sessions opened by
+                    the Valenius desktop client. A mobile device importing this config bypasses the
+                    per-device authentication prompt.
+                    If this peer should never require MFA (e.g. a managed mobile device), set
+                    <strong>Peer type</strong> to <strong>Machine</strong> on the client details page.
+                </div>
+            }
+
+            <!-- Footer -->
+            <div class="text-center text-muted no-print" style="font-size:.75rem;">
+                Generated by Valenius &mdash; Stranto Business Solutions GmbH
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        function copyConf() {
+            navigator.clipboard.writeText(document.getElementById('confPre').textContent).then(function () {
+                var btn = document.getElementById('btnCopy');
+                var orig = btn.innerHTML;
+                btn.innerHTML = '<i class="bi bi-clipboard-check me-1"></i>Copied';
+                setTimeout(function () { btn.innerHTML = orig; }, 1500);
+            });
+        }
+    </script>
+</body>
+</html>

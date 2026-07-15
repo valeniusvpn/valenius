@@ -1,0 +1,12 @@
+# Shell scripts must always use LF, never CRLF. A CRLF shebang breaks execution
+# ("bad interpreter: /bin/sh^M"), and CRLF in a dpkg maintainer script fails the
+# package install — so pin these regardless of any core.autocrlf setting or the
+# platform they're checked out on.
+*.sh text eol=lf
+
+# Debian maintainer scripts are shell but have no extension.
+Clients/Linux/packaging/debian/preinst  text eol=lf
+Clients/Linux/packaging/debian/postinst text eol=lf
+Clients/Linux/packaging/debian/prerm    text eol=lf
+Clients/Linux/packaging/debian/postrm   text eol=lf
+Clients/Linux/packaging/debian/control  text eol=lf

@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Resources\logo.ico</ApplicationIcon>
+    <AssemblyTitle>Valenius</AssemblyTitle>
+    <Product>Valenius</Product>
+    <FileDescription>Valenius</FileDescription>
+    <PublishReadyToRun>false</PublishReadyToRun>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\app.png" />
+    <EmbeddedResource Include="Resources\app-connected.ico" />
+    <EmbeddedResource Include="Resources\app-disconnected.ico" />
+    <EmbeddedResource Include="Resources\stranto-logo-full.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Resources\logo.ico">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\Shared\Valenius.Shared\Valenius.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

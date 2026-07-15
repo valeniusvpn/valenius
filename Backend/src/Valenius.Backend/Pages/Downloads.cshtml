@@ -1,0 +1,69 @@
+@page "/downloads"
+@model Valenius.Backend.Pages.DownloadsModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Downloads — Valenius</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <link rel="stylesheet" href="/lib/inter/inter.css" />
+    <link rel="stylesheet" href="/lib/bootstrap/5.3.3/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/lib/bootstrap-icons/1.11.3/bootstrap-icons.min.css" />
+    <style>
+        :root {
+            --brand-primary:      #0F4E66;
+            --brand-primary-dark: #0a3a4d;
+            --brand-accent:       #1DABDA;
+        }
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f0f4f8;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2.5rem 1rem;
+        }
+        .dl-wrap { width: 100%; max-width: 780px; }
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: .75rem;
+            margin-bottom: .5rem;
+            text-decoration: none;
+        }
+        .brand img { width: 40px; height: 40px; border-radius: 9px; }
+        .brand-name { font-weight: 700; font-size: 1.15rem; color: var(--brand-primary); letter-spacing: -.01em; }
+        .subtitle { text-align: center; color: #6c757d; font-size: .9rem; margin-bottom: 2rem; }
+        .dl-os-icon { font-size: 2.6rem; line-height: 1; color: var(--brand-primary); }
+        .dl-card { border: 1px solid #e0e8ef; border-radius: 12px; background: #fff; transition: box-shadow .15s ease, transform .15s ease; }
+        .dl-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.08); transform: translateY(-2px); }
+        .btn-primary { background: var(--brand-primary); border-color: var(--brand-primary); font-weight: 500; border-radius: 7px; }
+        .btn-primary:hover { background: var(--brand-primary-dark); border-color: var(--brand-primary-dark); }
+        .foot { text-align: center; color: #adb5bd; font-size: .78rem; margin-top: 2rem; }
+    </style>
+</head>
+<body>
+<div class="dl-wrap">
+
+    <a class="brand" href="/">
+        <img src="/img/app.png" alt="Valenius" />
+        <span class="brand-name">Valenius</span>
+    </a>
+    <div class="subtitle">Download the Valenius client for your operating system.</div>
+
+    <partial name="_DownloadsList" model="Model.Items" />
+
+    <div class="foot">
+        Installers are the current stable release. After installing, the client keeps itself up to date automatically.
+    </div>
+
+</div>
+</body>
+</html>

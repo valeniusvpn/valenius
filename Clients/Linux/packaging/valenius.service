@@ -1,0 +1,30 @@
+[Unit]
+Description=Valenius VPN daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/valenius/venv/bin/python3 -m daemon
+WorkingDirectory=/usr/lib/valenius
+Restart=on-failure
+RestartSec=5
+# Safety net: the daemon exits promptly on SIGTERM (see __main__._main), but cap the
+# stop timeout so a hung shutdown can never stall an auto-update `systemctl restart`
+# long enough to fail the restart and strand the fleet on a half-configured package.
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=valenius
+
+# Security hardening
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/run /var/lib/valenius /etc/wireguard
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

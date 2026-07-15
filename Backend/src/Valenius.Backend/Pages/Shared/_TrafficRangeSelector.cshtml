@@ -1,0 +1,14 @@
+@using Valenius.Backend.Services
+@*
+    Time-frame selector for a .traffic-auto panel. The shared layout JS (see _Layout.cshtml)
+    reads the active [data-tf-range] button, appends &range=<key> to the panel's data-traffic-url,
+    and re-fetches on click. Keep the default active button in sync with TrafficRange.Default.
+*@
+<div class="btn-group btn-group-sm" role="group" aria-label="Time frame" data-tf-ranges>
+    @foreach (var r in TrafficRange.All)
+    {
+        <button type="button"
+                class="btn btn-outline-secondary@(r.Key == TrafficRange.Default.Key ? " active" : "")"
+                data-tf-range="@r.Key">@r.Label</button>
+    }
+</div>

@@ -1,0 +1,565 @@
+@page
+@model Valenius.Backend.Pages.Admin.HelpModel
+@{
+    ViewData["Title"] = "Help";
+}
+
+<style>
+    .help-section h5 { color: var(--brand-primary); font-weight: 600; margin-top: 1.5rem; margin-bottom: .5rem; }
+    .help-section h5:first-child { margin-top: 0; }
+    .help-section p, .help-section li { font-size: .9rem; line-height: 1.65; }
+    .help-section ul { padding-left: 1.25rem; }
+    .help-section code { font-size: .8rem; background: #f0f4f7; padding: .1rem .35rem; border-radius: 4px; }
+    .help-section pre { background: #f0f4f7; border-radius: 8px; padding: .9rem 1.1rem; font-size: .8rem; overflow-x: auto; }
+    .help-section .table { font-size: .83rem; }
+    .alert-info { background: #e8f4f8; border-color: #b8dce8; color: #0a3a4d; }
+    .help-sep { border: none; border-top: 1px solid #e8ecf0; margin: 1.5rem 0; }
+    /* Outer audience tabs */
+    .nav-tabs .nav-link { color: #495057; font-weight: 500; }
+    .nav-tabs .nav-link.active { color: var(--brand-primary); font-weight: 600; }
+    .tab-content.card-tabs { border: 1px solid #dee2e6; border-top: 0; border-radius: 0 0 10px 10px; background: #fff; padding: 1.5rem; }
+    /* Inner language tabs */
+    .lang-tabs { border-bottom: 1px solid #dee2e6; margin-bottom: 1.25rem; }
+    .lang-tabs .nav-link { color: #495057; font-size: .85rem; padding: .4rem .85rem; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; margin-bottom: -1px; }
+    .lang-tabs .nav-link:hover { background: #f0f4f7; border-color: #dee2e6 #dee2e6 transparent; }
+    .lang-tabs .nav-link.active { color: var(--brand-primary); font-weight: 600; background: #fff; border-color: #dee2e6 #dee2e6 #fff; }
+    .flag { font-size: 1.1em; line-height: 1; }
+</style>
+
+<h1 class="page-title mb-3">Help &amp; Documentation</h1>
+
+<!-- Audience tabs -->
+<ul class="nav nav-tabs mb-0" id="audienceTabs">
+    <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#sec-admin" type="button">
+            <i class="bi bi-shield-lock me-1"></i>Administrators
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#sec-user" type="button">
+            <i class="bi bi-person-badge me-1"></i>App Users
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#sec-client" type="button">
+            <i class="bi bi-pc-display me-1"></i>Client Users
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content card-tabs" id="audienceTabContent">
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         ADMINISTRATORS
+    ══════════════════════════════════════════════════════════════════ -->
+    <div class="tab-pane fade show active" id="sec-admin">
+        <ul class="nav lang-tabs" id="lang-admin" role="tablist">
+            <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#admin-en" data-lang="en" type="button"><span class="flag">🇬🇧</span> English</button></li>
+            <li class="nav-item"><button class="nav-link"        data-bs-toggle="tab" data-bs-target="#admin-de" data-lang="de" type="button"><span class="flag">🇦🇹</span> Deutsch</button></li>
+            <li class="nav-item"><button class="nav-link"        data-bs-toggle="tab" data-bs-target="#admin-sk" data-lang="sk" type="button"><span class="flag">🇸🇰</span> Slovenčina</button></li>
+        </ul>
+        <div class="tab-content">
+
+            <div class="tab-pane fade show active help-section" id="admin-en">
+                <h5><i class="bi bi-diagram-3 me-2"></i>Architecture</h5>
+                <p>Valenius has four components:</p>
+                <ul>
+                    <li><strong>Backend</strong> (ASP.NET Core, Docker) — central management: database, admin UI, REST API for Windows clients.</li>
+                    <li><strong>WireGuard® Sidecar</strong> (Go, Docker) — runs on the WireGuard® host; manages peers via the <code>wg</code> CLI. Exposes a small HTTP API on port 9002.</li>
+                    <li><strong>Windows Service</strong> (runs as SYSTEM) — controls <code>wireguard.exe</code> on client machines; heartbeats to the backend every 5 minutes.</li>
+                    <li><strong>Tray App</strong> (runs as the logged-in user) — the end-user menu; communicates with the Windows Service over a named pipe.</li>
+                </ul>
+                <p>The service and tray app are installed together on client machines via the Inno Setup installer. The backend and sidecar run on Docker on your server infrastructure.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-server me-2"></i>Backend Installation</h5>
+                <p>Requirements: Linux server with Docker &amp; Docker Compose, and an HTTPS reverse proxy (e.g. Nginx Proxy Manager) pointing to port 8080.</p>
+                <ol>
+                    <li>Place <code>docker-compose.yml</code> and <code>src/Valenius.Backend/appsettings.json</code> on the server.</li>
+                    <li>In <code>docker-compose.yml</code> set <code>POSTGRES_PASSWORD</code>, <code>ADMIN_EMAIL</code>, and <code>ADMIN_PASSWORD</code>.</li>
+                    <li>In <code>appsettings.json</code> set a strong <code>Valenius:ApiKey</code> — this same key must be set in the Windows service's <code>appsettings.json</code>.</li>
+                    <li>Run <code>docker compose up -d</code>.</li>
+                    <li>Point your reverse proxy to port 8080.</li>
+                </ol>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>The API key is baked into the Docker image via <code>appsettings.json</code>. Do not set it as an environment variable — Docker Compose interpolates <code>$</code> characters and corrupts keys. To change it, update the file and run <code>docker compose up --build -d</code>.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-hdd-network me-2"></i>WireGuard® Sidecar Installation</h5>
+                <p>The sidecar must run on the same host as the WireGuard® interface. It does not need to run on the same host as the backend. All communication between the backend and sidecar is secured with mutual TLS (mTLS).</p>
+                <p><strong>One-time host setup:</strong></p>
+                <pre>echo "net.ipv4.ip_forward=1"          | sudo tee /etc/sysctl.d/99-wireguard.conf
+echo "net.ipv6.conf.all.forwarding=1"  | sudo tee -a /etc/sysctl.d/99-wireguard.conf
+sudo sysctl --system</pre>
+                <p>Create a WireGuard® conf at <code>/opt/wg-sidecar/wireguard/wgX.conf</code>. The <code>[Interface]</code> section must include an <code>Address</code> line (e.g. <code>Address = 172.16.0.1/24</code>) and <code>PostUp</code> / <code>PostDown</code> iptables rules. See <code>server/wireguard/wg0.conf.example</code> for a full template.</p>
+                <table class="table table-bordered">
+                    <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>WG_INTERFACE</code></td><td><code>wg0</code></td><td>WireGuard® interface name (e.g. <code>wg10</code>)</td></tr>
+                        <tr><td><code>MANAGEMENT_PORT</code></td><td><code>8443</code></td><td>HTTPS management port (use 8444, 8445 for additional instances on the same host)</td></tr>
+                        <tr><td><code>BACKEND_URL</code></td><td>—</td><td>Backend URL used during enrollment, e.g. <code>https://twister.example.com</code></td></tr>
+                        <tr><td><code>ENROLLMENT_TOKEN</code></td><td>—</td><td>One-time token generated in <strong>Admin → Customers → WireGuard® → mTLS enrollment</strong>. Clear after enrollment.</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>First-time enrollment:</strong></p>
+                <ol>
+                    <li>Generate an enrollment token in the admin panel: <strong>Customers → [customer] → WireGuard® tab → mTLS enrollment → Generate enrollment token</strong>.</li>
+                    <li>Copy the token and set <code>ENROLLMENT_TOKEN</code> and <code>BACKEND_URL</code> in the sidecar's <code>docker-compose.yml</code> (or Portainer stack env vars).</li>
+                    <li>Start the sidecar: <code>docker compose up -d</code>. It will contact the backend, obtain a signed certificate, and save it to the <code>valenius-certs</code> Docker volume.</li>
+                    <li>After successful enrollment the token is consumed. You can clear <code>ENROLLMENT_TOKEN</code> from the env vars (the volume now holds the cert).</li>
+                    <li>Update <strong>Sidecar URL</strong> in the admin panel to <code>https://&lt;sidecar-host&gt;:8443</code>.</li>
+                </ol>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>Firewall port 8443 on the sidecar host to the backend only. The sidecar's <code>/health</code> endpoint (used by Windows clients for connectivity checks) does not require a client certificate, so port 8443 must also be reachable by client machines.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-door-open me-2"></i>First Login &amp; Authentication</h5>
+                <p>Navigate to your backend URL and sign in with <code>ADMIN_EMAIL</code> / <code>ADMIN_PASSWORD</code>. This creates the bootstrap admin account, which always remains available as a fallback regardless of your auth settings.</p>
+                <p>To configure OIDC (Authentik, Azure AD, etc.), go to <strong>Settings</strong> after logging in. Both OIDC and local auth can be active simultaneously.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-building me-2"></i>Customers</h5>
+                <ul>
+                    <li><strong>Client prefix</strong> (3 chars) — machines whose hostname starts with this prefix are auto-assigned on first registration.</li>
+                    <li><strong>Heartbeat interval</strong> — how frequently clients check in (default 5 min, range 1–60).</li>
+                    <li><strong>Server mode</strong> — <em>External</em>: you manage WireGuard® manually; <em>Valenius</em>: peers are provisioned automatically via the sidecar.</li>
+                    <li><strong>Trusted networks</strong> — subnets (CIDR) where auto-connect is suppressed.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-people me-2"></i>App Users</h5>
+                <ul>
+                    <li><strong>Admin</strong> — full access to all customers, clients, and system settings.</li>
+                    <li><strong>User</strong> — can only see clients of their assigned customer.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-arrow-repeat me-2"></i>Client Lifecycle</h5>
+                <ol>
+                    <li><strong>Registration</strong> — the Windows service registers automatically after install. The client appears as <em>Pending</em>.</li>
+                    <li><strong>Activation</strong> — click <em>Activate</em> on the Details page. In Valenius mode, a peer is provisioned and a config is pushed automatically.</li>
+                    <li><strong>Heartbeat</strong> — the service checks in at the configured interval. Pending flags (config push, remote connect, profile delete) are acted on within ~1 second via long-polling.</li>
+                    <li><strong>Deactivation</strong> — the peer is removed from the server and the VPN profile is scheduled for deletion on the client.</li>
+                    <li><strong>Soft delete</strong> — clients are never hard-deleted. Re-registering a deleted machine restores it as Pending.</li>
+                </ol>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-shield-check me-2"></i>Valenius Mode — Setup</h5>
+                <ol>
+                    <li>Enroll the sidecar (see <em>WireGuard® Sidecar Installation</em> above). The certificate is issued automatically on first boot.</li>
+                    <li>Enter the <strong>Sidecar URL</strong> (e.g. <code>https://your-wg-host:8443</code>).</li>
+                    <li>Enter the <strong>Management port</strong> (default 8443; must match <code>MANAGEMENT_PORT</code> on the sidecar).</li>
+                    <li>Optionally enter the <strong>Sidecar API key</strong> for a secondary auth layer.</li>
+                    <li>Enter the <strong>Server endpoint</strong> — the public hostname or IP that clients connect to (WireGuard® port is read from the sidecar automatically).</li>
+                    <li>Optionally set a <strong>VPN prefix</strong> (letters only, e.g. <code>Acme</code> → profile named <code>Acme-VPN</code>).</li>
+                    <li>Click <strong>Test mTLS connection</strong> to verify the backend can reach the sidecar with mutual TLS.</li>
+                </ol>
+                <p><strong>AllowedIPs and DNS</strong> can be set per-customer and overridden per-client. Default AllowedIPs: <code>0.0.0.0/0, ::/0</code>.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wifi me-2"></i>Auto-Connect</h5>
+                <p>Auto-connect activates the VPN automatically when the client is <em>not</em> on a trusted network. Configure trusted networks (CIDR + optional primary DNS) on the Customer Details page.</p>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>The admin setting is authoritative and overrides any local user toggle on every heartbeat.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-cloud-upload me-2"></i>Remote Management</h5>
+                <ul>
+                    <li><strong>Upload config</strong> — push a <code>.conf</code> file; the client downloads it within ~1 second via long-poll.</li>
+                    <li><strong>Connect now</strong> — triggers the client to connect on the next communication cycle.</li>
+                    <li><strong>Delete profile</strong> — schedules deletion; confirmed once the client stops reporting the profile.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wrench me-2"></i>Troubleshooting</h5>
+                <ul>
+                    <li><strong>Client stuck as Pending</strong> — verify the backend URL in the Windows service <code>appsettings.json</code>; check port 443 from the client.</li>
+                    <li><strong>Sidecar test fails</strong> — the test calls <code>/info</code> with mTLS from the backend container. Verify port 8443 is reachable from the backend. If the sidecar was previously running without mTLS, delete the old volume and re-enroll: <code>docker compose down -v &amp;&amp; docker compose up -d</code>.</li>
+                    <li><strong>"TLS certificates not found and ENROLLMENT_TOKEN is not set"</strong> — generate an enrollment token in Admin → Customers → WireGuard® → mTLS enrollment, set it as <code>ENROLLMENT_TOKEN</code> and restart the sidecar container.</li>
+                    <li><strong>Re-enrollment alert in Admin → Security Alerts</strong> — a sidecar submitted a new CSR for a customer that already had a certificate. Review the enrolling IP and acknowledge the alert once verified.</li>
+                    <li><strong>"sidecar did not return a valid IPv4 interface address"</strong> — redeploy with <code>docker compose up --build -d</code>.</li>
+                    <li><strong>Client connected but cannot reach remote subnet</strong> — verify <code>net.ipv4.ip_forward=1</code>; check PostUp/PostDown iptables rules in the conf file.</li>
+                    <li><strong>Profile not deleted after deactivation</strong> — the client needs at least one successful heartbeat after deactivation.</li>
+                    <li><strong>Tray shows "Connecting…" but never reaches "Connected"</strong> — the post-connect health probe through the VPN tunnel failed. Check that the sidecar is reachable on its VPN IP (the <code>Address</code> in <code>wgX.conf</code>) on port 8443.</li>
+                </ul>
+            </div>
+
+            <div class="tab-pane fade help-section" id="admin-de">
+                <h5><i class="bi bi-diagram-3 me-2"></i>Architektur</h5>
+                <p>Valenius besteht aus vier Komponenten:</p>
+                <ul>
+                    <li><strong>Backend</strong> (ASP.NET Core, Docker) — zentrale Verwaltung: Datenbank, Admin-Oberfläche, REST-API für Windows-Clients.</li>
+                    <li><strong>WireGuard® Sidecar</strong> (Go, Docker) — läuft auf dem WireGuard®-Host; verwaltet Peers über die <code>wg</code>-CLI. Stellt eine HTTP-API auf Port 9002 bereit.</li>
+                    <li><strong>Windows-Dienst</strong> (läuft als SYSTEM) — steuert <code>wireguard.exe</code> auf Client-Rechnern; sendet alle 5 Minuten einen Heartbeat an das Backend.</li>
+                    <li><strong>Tray-App</strong> (läuft als angemeldeter Benutzer) — Benutzermenü; kommuniziert mit dem Windows-Dienst über eine Named Pipe.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-server me-2"></i>Backend-Installation</h5>
+                <ol>
+                    <li><code>docker-compose.yml</code> und <code>appsettings.json</code> auf den Server kopieren.</li>
+                    <li><code>POSTGRES_PASSWORD</code>, <code>ADMIN_EMAIL</code> und <code>ADMIN_PASSWORD</code> setzen.</li>
+                    <li>Starken <code>Valenius:ApiKey</code> in <code>appsettings.json</code> setzen.</li>
+                    <li><code>docker compose up -d</code> ausführen.</li>
+                    <li>Reverse Proxy auf Port 8080 konfigurieren.</li>
+                </ol>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>Der API-Schlüssel wird über <code>appsettings.json</code> in das Docker-Image gebrannt. Nicht als Umgebungsvariable setzen — Docker Compose interpoliert <code>$</code>-Zeichen. Bei Änderungen: <code>docker compose up --build -d</code>.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-hdd-network me-2"></i>WireGuard® Sidecar Installation</h5>
+                <p>Die gesamte Kommunikation zwischen Backend und Sidecar ist durch gegenseitiges TLS (mTLS) gesichert.</p>
+                <p><strong>Einmalige Host-Vorbereitung:</strong></p>
+                <pre>echo "net.ipv4.ip_forward=1"          | sudo tee /etc/sysctl.d/99-wireguard.conf
+echo "net.ipv6.conf.all.forwarding=1"  | sudo tee -a /etc/sysctl.d/99-wireguard.conf
+sudo sysctl --system</pre>
+                <p>WireGuard®-Konfigurationsdatei unter <code>/opt/wg-sidecar/wireguard/wgX.conf</code> anlegen. Die <code>[Interface]</code>-Sektion muss <code>Address</code> und <code>PostUp</code>/<code>PostDown</code> iptables-Regeln enthalten.</p>
+                <table class="table table-bordered">
+                    <thead><tr><th>Variable</th><th>Standard</th><th>Beschreibung</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>WG_INTERFACE</code></td><td><code>wg0</code></td><td>WireGuard®-Interfacename (z. B. <code>wg10</code>)</td></tr>
+                        <tr><td><code>MANAGEMENT_PORT</code></td><td><code>8443</code></td><td>HTTPS-Management-Port (8444, 8445 für weitere Instanzen)</td></tr>
+                        <tr><td><code>BACKEND_URL</code></td><td>—</td><td>Backend-URL für das Enrollment, z. B. <code>https://twister.example.com</code></td></tr>
+                        <tr><td><code>ENROLLMENT_TOKEN</code></td><td>—</td><td>Einmaltoken aus <strong>Admin → Kunden → WireGuard® → mTLS-Enrollment</strong></td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Erstmalige Einrichtung:</strong> Token unter <strong>Kunden → [Kunde] → Reiter WireGuard® → mTLS-Enrollment → Enrollment-Token generieren</strong> erstellen, als <code>ENROLLMENT_TOKEN</code> setzen und Sidecar starten. Nach dem Enrollment Token aus den Umgebungsvariablen entfernen.</p>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>Port 8443 auf dem Sidecar-Host zum Backend freigeben. Windows-Clients benötigen ebenfalls Zugriff auf Port 8443 für Verbindungsprüfungen.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-door-open me-2"></i>Erstanmeldung &amp; Authentifizierung</h5>
+                <p>Backend-URL aufrufen und mit <code>ADMIN_EMAIL</code> / <code>ADMIN_PASSWORD</code> anmelden. OIDC kann danach unter <strong>Einstellungen</strong> konfiguriert werden. Beide Methoden können gleichzeitig aktiv sein.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-building me-2"></i>Kunden</h5>
+                <ul>
+                    <li><strong>Client-Präfix</strong> (3 Zeichen) — Rechner mit passendem Hostnamen werden bei der Erstregistrierung automatisch zugewiesen.</li>
+                    <li><strong>Heartbeat-Intervall</strong> — Standard 5 min, Bereich 1–60.</li>
+                    <li><strong>Servermodus</strong> — <em>Extern</em>: manuelle WireGuard®-Verwaltung; <em>Valenius</em>: automatische Peer-Provisionierung über den Sidecar.</li>
+                    <li><strong>Vertrauenswürdige Netzwerke</strong> — Subnetze (CIDR), in denen Auto-Connect deaktiviert ist.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-arrow-repeat me-2"></i>Client-Lebenszyklus</h5>
+                <ol>
+                    <li><strong>Registrierung</strong> — der Dienst registriert sich automatisch. Client erscheint als <em>Ausstehend</em>.</li>
+                    <li><strong>Aktivierung</strong> — im Valenius-Modus wird automatisch ein Peer provisioniert und eine Konfiguration übertragen.</li>
+                    <li><strong>Heartbeat</strong> — Aktionen (Config-Push, Remote-Connect, Profillöschung) werden per Long-Polling in ~1 Sekunde ausgeführt.</li>
+                    <li><strong>Deaktivierung</strong> — Peer wird entfernt, VPN-Profil beim nächsten Heartbeat gelöscht.</li>
+                    <li><strong>Soft-Delete</strong> — Clients werden nicht endgültig gelöscht.</li>
+                </ol>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-shield-check me-2"></i>Valenius-Modus — Einrichtung</h5>
+                <ol>
+                    <li>Sidecar enrollen (siehe <em>WireGuard® Sidecar Installation</em>).</li>
+                    <li><strong>Sidecar-URL</strong> eingeben (z. B. <code>https://your-wg-host:8443</code>).</li>
+                    <li><strong>Management-Port</strong> eingeben (Standard 8443).</li>
+                    <li><strong>Server-Endpunkt</strong> eingeben — öffentlicher Hostname; WireGuard®-Port wird automatisch gelesen.</li>
+                    <li>Optional <strong>VPN-Präfix</strong> setzen (z. B. <code>Acme</code> → Profil <code>Acme-VPN</code>).</li>
+                    <li><strong>mTLS-Verbindung testen</strong> klicken.</li>
+                </ol>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wifi me-2"></i>Auto-Connect</h5>
+                <p>Verbindet VPN automatisch, wenn der Client sich nicht in einem vertrauenswürdigen Netzwerk befindet. Konfiguration: vertrauenswürdige Netzwerke (CIDR) auf der Kunden-Detailseite hinzufügen.</p>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>Die Admin-Einstellung ist maßgebend und überschreibt jede lokale Benutzereinstellung bei jedem Heartbeat.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wrench me-2"></i>Fehlerbehebung</h5>
+                <ul>
+                    <li><strong>Client bleibt „Ausstehend"</strong> — Backend-URL in <code>appsettings.json</code> prüfen; Port 443 vom Client aus testen.</li>
+                    <li><strong>Sidecar-Verbindungstest schlägt fehl</strong> — Port 8443 vom Backend-Container aus prüfen. War der Sidecar zuvor ohne mTLS aktiv: Volume löschen und neu enrollen (<code>docker compose down -v &amp;&amp; docker compose up -d</code>).</li>
+                    <li><strong>„TLS certificates not found and ENROLLMENT_TOKEN is not set"</strong> — Token unter Admin → Kunden → WireGuard® → mTLS-Enrollment generieren, als <code>ENROLLMENT_TOKEN</code> setzen und Sidecar neu starten.</li>
+                    <li><strong>Sicherheitsalarm unter Admin → Sicherheitswarnungen</strong> — ein Sidecar hat einen neuen CSR eingereicht. Enrolling-IP prüfen und Alarm bestätigen.</li>
+                    <li><strong>„sidecar did not return a valid IPv4 interface address"</strong> — mit <code>docker compose up --build -d</code> neu deployen.</li>
+                    <li><strong>Client verbunden, aber Remote-Subnetz nicht erreichbar</strong> — <code>net.ipv4.ip_forward=1</code> und PostUp/PostDown-Regeln prüfen.</li>
+                    <li><strong>Tray zeigt „Verbinde…" ohne Fortschritt</strong> — die Verbindungsprüfung durch den VPN-Tunnel ist fehlgeschlagen. Sidecar auf seiner VPN-IP auf Port 8443 erreichbar?</li>
+                </ul>
+            </div>
+
+            <div class="tab-pane fade help-section" id="admin-sk">
+                <h5><i class="bi bi-diagram-3 me-2"></i>Architektúra</h5>
+                <p>Valenius pozostáva zo štyroch komponentov:</p>
+                <ul>
+                    <li><strong>Backend</strong> (ASP.NET Core, Docker) — centrálna správa: databáza, administrátorské rozhranie, REST API pre Windows klientov.</li>
+                    <li><strong>WireGuard® Sidecar</strong> (Go, Docker) — beží na WireGuard® hostiteľovi; spravuje peers cez CLI <code>wg</code>. HTTP API na porte 9002.</li>
+                    <li><strong>Windows Služba</strong> (beží ako SYSTEM) — ovláda <code>wireguard.exe</code>; každých 5 minút posiela heartbeat backendu.</li>
+                    <li><strong>Tray App</strong> (beží ako prihlásený používateľ) — menu pre koncových používateľov; komunikuje so Službou cez named pipe.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-server me-2"></i>Inštalácia Backendu</h5>
+                <ol>
+                    <li>Skopírovať <code>docker-compose.yml</code> a <code>appsettings.json</code> na server.</li>
+                    <li>Nastaviť <code>POSTGRES_PASSWORD</code>, <code>ADMIN_EMAIL</code> a <code>ADMIN_PASSWORD</code>.</li>
+                    <li>Nastaviť silný <code>Valenius:ApiKey</code> v <code>appsettings.json</code>.</li>
+                    <li>Spustiť <code>docker compose up -d</code>.</li>
+                    <li>Nakonfigurovať reverzný proxy na port 8080.</li>
+                </ol>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>API kľúč je zabudovaný do Docker image cez <code>appsettings.json</code>. Nenastavujte ho ako premennú prostredia. Pri zmene: <code>docker compose up --build -d</code>.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-hdd-network me-2"></i>Inštalácia WireGuard® Sidecar</h5>
+                <p>Všetka komunikácia medzi backendom a sidecarom je zabezpečená vzájomným TLS (mTLS).</p>
+                <p><strong>Jednorazová príprava hostiteľa:</strong></p>
+                <pre>echo "net.ipv4.ip_forward=1"          | sudo tee /etc/sysctl.d/99-wireguard.conf
+echo "net.ipv6.conf.all.forwarding=1"  | sudo tee -a /etc/sysctl.d/99-wireguard.conf
+sudo sysctl --system</pre>
+                <p>Vytvoriť konfiguračný súbor <code>/opt/wg-sidecar/wireguard/wgX.conf</code> so sekciou <code>[Interface]</code> obsahujúcou <code>Address</code> a <code>PostUp</code>/<code>PostDown</code> iptables pravidlá.</p>
+                <table class="table table-bordered">
+                    <thead><tr><th>Premenná</th><th>Predvolená</th><th>Popis</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>WG_INTERFACE</code></td><td><code>wg0</code></td><td>Názov WireGuard® rozhrania (napr. <code>wg10</code>)</td></tr>
+                        <tr><td><code>MANAGEMENT_PORT</code></td><td><code>8443</code></td><td>HTTPS port správy (8444, 8445 pre ďalšie inštancie)</td></tr>
+                        <tr><td><code>BACKEND_URL</code></td><td>—</td><td>URL backendu pre enrollment, napr. <code>https://twister.example.com</code></td></tr>
+                        <tr><td><code>ENROLLMENT_TOKEN</code></td><td>—</td><td>Jednorazový token z <strong>Admin → Zákazníci → WireGuard® → mTLS enrollment</strong></td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Prvé spustenie:</strong> Vygenerovať token pod <strong>Zákazníci → [zákazník] → Záložka WireGuard® → mTLS enrollment</strong>, nastaviť ako <code>ENROLLMENT_TOKEN</code> a spustiť sidecar. Po enrollmente token odstraniť.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-door-open me-2"></i>Prvé prihlásenie &amp; Autentifikácia</h5>
+                <p>Otvoriť URL backendu a prihlásiť sa s <code>ADMIN_EMAIL</code> / <code>ADMIN_PASSWORD</code>. OIDC možno nakonfigurovať v <strong>Nastaveniach</strong>. Oba spôsoby môžu byť aktívne súčasne.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-building me-2"></i>Zákazníci</h5>
+                <ul>
+                    <li><strong>Prefix klienta</strong> (3 znaky) — počítače s príslušným hostname sa automaticky priradia pri prvej registrácii.</li>
+                    <li><strong>Interval heartbeatu</strong> — predvolene 5 min, rozsah 1–60.</li>
+                    <li><strong>Režim servera</strong> — <em>Externý</em>: manuálna správa; <em>Valenius</em>: automatická provizioning peers cez Sidecar.</li>
+                    <li><strong>Dôveryhodné siete</strong> — podsiete (CIDR), kde je automatické pripojenie vypnuté.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-arrow-repeat me-2"></i>Životný cyklus klienta</h5>
+                <ol>
+                    <li><strong>Registrácia</strong> — Služba sa zaregistruje automaticky. Klient sa zobrazí ako <em>Čakajúci</em>.</li>
+                    <li><strong>Aktivácia</strong> — v režime Valenius sa automaticky vytvorí peer a odošle konfigurácia.</li>
+                    <li><strong>Heartbeat</strong> — čakajúce akcie sa vykonajú do ~1 sekundy cez long-polling.</li>
+                    <li><strong>Deaktivácia</strong> — peer sa odstráni, VPN profil sa zmaže pri ďalšom heartbeate.</li>
+                    <li><strong>Soft-delete</strong> — klienti sa nikdy natrvalo neodstraňujú.</li>
+                </ol>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-shield-check me-2"></i>Režim Valenius — Nastavenie</h5>
+                <ol>
+                    <li>Enrollovať sidecar (pozri <em>Inštalácia WireGuard® Sidecar</em>).</li>
+                    <li>Zadať <strong>URL Sidecaru</strong> (napr. <code>https://your-wg-host:8443</code>).</li>
+                    <li>Zadať <strong>Management port</strong> (predvolene 8443).</li>
+                    <li>Zadať <strong>Endpoint servera</strong> — verejný hostname; WireGuard® port sa načíta automaticky.</li>
+                    <li>Voliteľne nastaviť <strong>VPN prefix</strong> (napr. <code>Acme</code> → profil <code>Acme-VPN</code>).</li>
+                    <li>Kliknúť <strong>Otestovať mTLS pripojenie</strong>.</li>
+                </ol>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wifi me-2"></i>Automatické pripojenie</h5>
+                <p>VPN sa automaticky spustí, keď klient nie je v dôveryhodnej sieti. Konfigurácia: pridať dôveryhodné siete (CIDR) na stránke detailu zákazníka.</p>
+                <div class="alert alert-info py-2 px-3 small"><i class="bi bi-info-circle me-1"></i>Nastavenie administrátora je záväzné a prepíše lokálne nastavenie používateľa pri každom heartbeate.</div>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wrench me-2"></i>Riešenie problémov</h5>
+                <ul>
+                    <li><strong>Klient zostáva „Čakajúci"</strong> — overiť URL backendu v <code>appsettings.json</code>; otestovať port 443 z klienta.</li>
+                    <li><strong>Test pripojenia Sidecaru zlyhá</strong> — overiť port 8443 z backend kontajnera. Ak bol sidecar predtým bez mTLS: zmazať volume a enrollovať znova (<code>docker compose down -v &amp;&amp; docker compose up -d</code>).</li>
+                    <li><strong>„TLS certificates not found and ENROLLMENT_TOKEN is not set"</strong> — vygenerovať token pod Admin → Zákazníci → WireGuard® → mTLS enrollment, nastaviť ako <code>ENROLLMENT_TOKEN</code> a reštartovať sidecar.</li>
+                    <li><strong>„sidecar did not return a valid IPv4 interface address"</strong> — znovu nasadiť pomocou <code>docker compose up --build -d</code>.</li>
+                    <li><strong>Klient pripojený, ale vzdialená podsieť nedostupná</strong> — overiť <code>net.ipv4.ip_forward=1</code> a PostUp/PostDown pravidlá.</li>
+                    <li><strong>Tray zobrazuje „Pripájam…" bez zmeny</strong> — overenie cez VPN tunel zlyhalo. Sidecar dostupný na VPN IP na porte 8443?</li>
+                </ul>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         APP USERS
+    ══════════════════════════════════════════════════════════════════ -->
+    <div class="tab-pane fade" id="sec-user">
+        <ul class="nav lang-tabs" id="lang-user" role="tablist">
+            <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#user-en" data-lang="en" type="button"><span class="flag">🇬🇧</span> English</button></li>
+            <li class="nav-item"><button class="nav-link"        data-bs-toggle="tab" data-bs-target="#user-de" data-lang="de" type="button"><span class="flag">🇦🇹</span> Deutsch</button></li>
+            <li class="nav-item"><button class="nav-link"        data-bs-toggle="tab" data-bs-target="#user-sk" data-lang="sk" type="button"><span class="flag">🇸🇰</span> Slovenčina</button></li>
+        </ul>
+        <div class="tab-content">
+
+            <div class="tab-pane fade show active help-section" id="user-en">
+                <h5><i class="bi bi-info-circle me-2"></i>Overview</h5>
+                <p>As an app user with the <em>User</em> role, you can view and manage clients belonging to your assigned customer. System settings, customer configuration, and user management are handled by an Admin.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-speedometer2 me-2"></i>Dashboard</h5>
+                <p>The dashboard lists all clients for your customer. Summary counts show: <strong>Active</strong> (VPN access granted), <strong>Pending</strong> (registered but not yet activated), <strong>Online</strong> (communicated within the last few minutes).</p>
+                <p>Use the filter buttons to narrow the list. Click any hostname to open the client Details page.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-person-lines-fill me-2"></i>Client Details</h5>
+                <ul>
+                    <li><strong>Activate / Deactivate</strong> — grant or revoke VPN access. In Valenius mode, activation automatically provisions a config.</li>
+                    <li><strong>Upload config</strong> — push a <code>.conf</code> file; the client downloads it within ~1 second via long-polling.</li>
+                    <li><strong>Connect now</strong> — trigger an immediate VPN connection.</li>
+                    <li><strong>View connection history</strong> — connect/disconnect events with timestamp, username, LAN IP, and WAN IP.</li>
+                    <li><strong>Delete a profile</strong> — remove a named VPN profile from the client machine.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-clock-history me-2"></i>Connection History</h5>
+                <p>The <strong>Connection History</strong> page (sidebar) shows the latest 500 events for all clients in your customer, sorted newest-first.</p>
+            </div>
+
+            <div class="tab-pane fade help-section" id="user-de">
+                <h5><i class="bi bi-info-circle me-2"></i>Übersicht</h5>
+                <p>Als App-Benutzer mit der Rolle <em>Benutzer</em> können Sie Clients des Ihnen zugewiesenen Kunden einsehen und verwalten. Systemeinstellungen, Kundenkonfiguration und Benutzerverwaltung liegen in der Verantwortung eines Admins.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-speedometer2 me-2"></i>Dashboard</h5>
+                <p>Das Dashboard zeigt alle Clients Ihres Kunden. Zusammenfassung: <strong>Aktiv</strong> (VPN-Zugang erteilt), <strong>Ausstehend</strong> (registriert, noch nicht aktiviert), <strong>Online</strong> (in den letzten Minuten gemeldet).</p>
+                <p>Filterschaltflächen einsetzen, um die Liste einzugrenzen. Hostnamen anklicken, um die Client-Detailseite zu öffnen.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-person-lines-fill me-2"></i>Client-Details</h5>
+                <ul>
+                    <li><strong>Aktivieren / Deaktivieren</strong> — VPN-Zugang gewähren oder entziehen.</li>
+                    <li><strong>Konfiguration hochladen</strong> — <code>.conf</code>-Datei übertragen; Client lädt sie innerhalb von ~1 Sekunde herunter.</li>
+                    <li><strong>Jetzt verbinden</strong> — sofortige VPN-Verbindung auslösen.</li>
+                    <li><strong>Verbindungsverlauf anzeigen</strong> — Ereignisse mit Zeitstempel, Benutzername, LAN-IP und WAN-IP.</li>
+                    <li><strong>Profil löschen</strong> — benanntes VPN-Profil vom Client-Rechner entfernen.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-clock-history me-2"></i>Verbindungsverlauf</h5>
+                <p>Die Seite <strong>Verbindungsverlauf</strong> (Seitenleiste) zeigt die letzten 500 Ereignisse aller Clients Ihres Kunden, sortiert nach neuestem zuerst.</p>
+            </div>
+
+            <div class="tab-pane fade help-section" id="user-sk">
+                <h5><i class="bi bi-info-circle me-2"></i>Prehľad</h5>
+                <p>Ako používateľ aplikácie s rolou <em>Používateľ</em> môžete prezerať a spravovať klientov priradeného zákazníka. Systémové nastavenia, konfigurácia zákazníkov a správa používateľov patria do kompetencie Administrátora.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-speedometer2 me-2"></i>Dashboard</h5>
+                <p>Dashboard zobrazuje všetkých klientov vášho zákazníka. Prehľad: <strong>Aktívny</strong> (VPN prístup udelený), <strong>Čakajúci</strong> (zaregistrovaný, ešte neaktivovaný), <strong>Online</strong> (komunikoval v posledných minútach).</p>
+                <p>Použite tlačidlá filtrovania na zúženie zoznamu. Kliknutím na hostname otvoríte stránku detailu klienta.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-person-lines-fill me-2"></i>Detail klienta</h5>
+                <ul>
+                    <li><strong>Aktivovať / Deaktivovať</strong> — udeliť alebo odobrať VPN prístup.</li>
+                    <li><strong>Nahrať konfiguráciu</strong> — odoslať súbor <code>.conf</code>; klient ho stiahne do ~1 sekundy.</li>
+                    <li><strong>Pripojiť teraz</strong> — spustiť VPN pripojenie na klientovi.</li>
+                    <li><strong>Zobraziť históriu pripojení</strong> — udalosti s časovou pečiatkou, menom používateľa, LAN IP a WAN IP.</li>
+                    <li><strong>Zmazať profil</strong> — odstrániť pomenovaný VPN profil z klientského počítača.</li>
+                </ul>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-clock-history me-2"></i>História pripojení</h5>
+                <p>Stránka <strong>História pripojení</strong> (bočný panel) zobrazuje posledných 500 udalostí všetkých klientov vášho zákazníka, zoradených od najnovších.</p>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         CLIENT USERS (Windows end-users)
+    ══════════════════════════════════════════════════════════════════ -->
+    <div class="tab-pane fade" id="sec-client">
+        <ul class="nav lang-tabs" id="lang-client" role="tablist">
+            <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#client-en" data-lang="en" type="button"><span class="flag">🇬🇧</span> English</button></li>
+            <li class="nav-item"><button class="nav-link"        data-bs-toggle="tab" data-bs-target="#client-de" data-lang="de" type="button"><span class="flag">🇦🇹</span> Deutsch</button></li>
+            <li class="nav-item"><button class="nav-link"        data-bs-toggle="tab" data-bs-target="#client-sk" data-lang="sk" type="button"><span class="flag">🇸🇰</span> Slovenčina</button></li>
+        </ul>
+        <div class="tab-content">
+
+            <div class="tab-pane fade show active help-section" id="client-en">
+                <div class="alert alert-info py-2 px-3 small mb-4"><i class="bi bi-info-circle me-1"></i>This section is written for the Windows end-user. Admins can print or share it with their users.</div>
+                <h5><i class="bi bi-question-circle me-2"></i>What is Valenius?</h5>
+                <p>Valenius is a VPN management tool installed by your IT team. It lets you connect to your company VPN with a single click, without needing administrator rights on your computer.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-shield me-2"></i>The Tray Icon</h5>
+                <p>Look for the Valenius icon in the system tray (bottom-right of your screen). <strong>Right-click</strong> the icon to open the menu. A grey/inactive icon means the VPN is disconnected; a coloured icon means connected.</p>
+                <p>If the icon is missing, search for "Valenius" in the Start menu and launch the app.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-plug me-2"></i>Connecting and Disconnecting</h5>
+                <p>Right-click the tray icon → <strong>Connect</strong>. If you have multiple VPN profiles, hover over <em>Connect</em> to select one — the company profile is always listed first.</p>
+                <p>To disconnect: right-click → <strong>Disconnect</strong>.</p>
+                <p>If you see <em>"Not authorized"</em>, your computer has not been activated yet. Contact your IT administrator.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wifi me-2"></i>Auto-Connect</h5>
+                <p>If configured by your IT team, the VPN connects automatically on untrusted networks (public Wi-Fi, home) and stays disconnected on trusted networks (office). You can toggle this in the tray menu — your IT team's setting is reapplied every ~5 minutes.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-download me-2"></i>"Get config from admin"</h5>
+                <p>Appears when your IT administrator has pushed a new VPN configuration. Click once to install it. The item disappears after the config has been applied.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-arrow-up-circle me-2"></i>"Install update"</h5>
+                <p>Appears when a software update is available. Click to install silently in the background — the app restarts automatically when done.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-headset me-2"></i>Getting Help</h5>
+                <p>Contact your IT administrator if the VPN does not connect, you see "Not authorized", the tray icon is missing, or you cannot reach company resources after connecting.</p>
+            </div>
+
+            <div class="tab-pane fade help-section" id="client-de">
+                <div class="alert alert-info py-2 px-3 small mb-4"><i class="bi bi-info-circle me-1"></i>Dieser Abschnitt richtet sich an Windows-Endbenutzer. Administratoren können ihn ausdrucken oder an ihre Benutzer weitergeben.</div>
+                <h5><i class="bi bi-question-circle me-2"></i>Was ist Valenius?</h5>
+                <p>Valenius ist ein VPN-Verwaltungsprogramm, das von Ihrer IT-Abteilung installiert wurde. Es ermöglicht Ihnen, sich mit einem einzigen Klick mit dem Unternehmens-VPN zu verbinden — ohne Administratorrechte.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-shield me-2"></i>Das Tray-Symbol</h5>
+                <p>Das Valenius-Symbol befindet sich in der Taskleiste (unten rechts). <strong>Rechtsklick</strong> öffnet das Menü. Graues Symbol = VPN getrennt; farbiges Symbol = VPN verbunden.</p>
+                <p>Falls das Symbol fehlt, suchen Sie im Startmenü nach „Valenius".</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-plug me-2"></i>Verbinden und Trennen</h5>
+                <p>Rechtsklick → <strong>Verbinden</strong>. Bei mehreren Profilen: Maus über <em>Verbinden</em> halten und Profil wählen — das Firmenprofil steht immer an erster Stelle.</p>
+                <p>Trennen: Rechtsklick → <strong>Trennen</strong>.</p>
+                <p><em>„Not authorized"</em> bedeutet, dass Ihr Computer noch nicht aktiviert wurde. Bitte wenden Sie sich an Ihre IT-Abteilung.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wifi me-2"></i>Auto-Connect</h5>
+                <p>Falls konfiguriert, verbindet sich das VPN automatisch in nicht vertrauenswürdigen Netzwerken (öffentliches WLAN, Heimnetzwerk) und bleibt in vertrauenswürdigen Netzwerken (Büro) getrennt. Im Tray-Menü umschaltbar — die IT-Einstellung wird alle ~5 Minuten erneut angewendet.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-download me-2"></i>„Konfiguration vom Admin laden"</h5>
+                <p>Erscheint, wenn Ihre IT-Abteilung eine neue VPN-Konfiguration übertragen hat. Einmal klicken — die Konfiguration wird automatisch installiert.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-arrow-up-circle me-2"></i>„Update installieren"</h5>
+                <p>Erscheint bei verfügbarem Software-Update. Klicken installiert das Update lautlos — die App startet anschließend automatisch neu.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-headset me-2"></i>Hilfe erhalten</h5>
+                <p>Wenden Sie sich an Ihre IT-Abteilung, wenn das VPN sich nicht verbindet, „Not authorized" erscheint, das Tray-Symbol fehlt oder Unternehmensressourcen nicht erreichbar sind.</p>
+            </div>
+
+            <div class="tab-pane fade help-section" id="client-sk">
+                <div class="alert alert-info py-2 px-3 small mb-4"><i class="bi bi-info-circle me-1"></i>Táto sekcia je určená pre koncových používateľov Windows. Administrátori ju môžu vytlačiť alebo zdieľať so svojimi používateľmi.</div>
+                <h5><i class="bi bi-question-circle me-2"></i>Čo je Valenius?</h5>
+                <p>Valenius je nástroj na správu VPN nainštalovaný vaším IT oddelením. Umožňuje pripojiť sa k firemnej VPN jediným kliknutím — bez administrátorských práv.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-shield me-2"></i>Ikona v systémovej lište</h5>
+                <p>Ikonu Valenius nájdete v systémovej lište (vpravo dole). <strong>Pravé tlačidlo myši</strong> otvorí menu. Sivá ikona = VPN odpojená; farebná ikona = VPN pripojená.</p>
+                <p>Ak ikona chýba, vyhľadajte „Valenius" v ponuke Štart.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-plug me-2"></i>Pripojenie a odpojenie</h5>
+                <p>Pravé tlačidlo → <strong>Pripojiť</strong>. Pri viacerých profiloch: prejdite myšou na <em>Pripojiť</em> a vyberte profil — firemný profil je vždy na prvom mieste.</p>
+                <p>Odpojenie: pravé tlačidlo → <strong>Odpojiť</strong>.</p>
+                <p><em>„Not authorized"</em> znamená, že váš počítač ešte nebol aktivovaný. Kontaktujte IT oddelenie.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-wifi me-2"></i>Automatické pripojenie</h5>
+                <p>Ak je nakonfigurované, VPN sa automaticky spustí v nedôveryhodných sieťach (verejná Wi-Fi, domáca sieť) a v dôveryhodných sieťach (kancelária) ostane odpojená. Prepínateľné v menu lišty — nastavenie IT sa aplikuje každých ~5 minút.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-download me-2"></i>„Získať konfiguráciu od admina"</h5>
+                <p>Objaví sa, keď IT administrátor odoslal novú VPN konfiguráciu. Stačí raz kliknúť — konfigurácia sa nainštaluje automaticky.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-arrow-up-circle me-2"></i>„Nainštalovať aktualizáciu"</h5>
+                <p>Objaví sa pri dostupnej aktualizácii. Kliknutím sa nainštaluje ticho na pozadí — aplikácia sa po aktualizácii automaticky reštartuje.</p>
+                <hr class="help-sep" />
+                <h5><i class="bi bi-headset me-2"></i>Získanie pomoci</h5>
+                <p>Kontaktujte IT oddelenie, ak VPN sa nepripojí, zobrazí sa „Not authorized", ikona v lište chýba alebo firemné zdroje nie sú dostupné po pripojení.</p>
+            </div>
+
+        </div>
+    </div>
+
+</div>
+
+<script>
+(function () {
+    var syncing = false;
+    var currentLang = 'en';
+
+    // Sync language tabs across all audience sections
+    document.querySelectorAll('.lang-tabs button').forEach(function (btn) {
+        btn.addEventListener('shown.bs.tab', function (e) {
+            if (syncing) return;
+            var lang = e.target.dataset.lang;
+            if (lang === currentLang) return;
+            currentLang = lang;
+            syncing = true;
+            document.querySelectorAll('.lang-tabs button[data-lang="' + lang + '"]').forEach(function (other) {
+                if (other !== e.target) new bootstrap.Tab(other).show();
+            });
+            syncing = false;
+            try { localStorage.setItem('helpLang', lang); } catch (ex) {}
+        });
+    });
+
+    // Restore saved audience tab
+    var savedAudience = null;
+    try { savedAudience = localStorage.getItem('helpAudience'); } catch (ex) {}
+    if (savedAudience) {
+        var aBtn = document.querySelector('#audienceTabs [data-bs-target="' + savedAudience + '"]');
+        if (aBtn) new bootstrap.Tab(aBtn).show();
+    }
+    document.querySelectorAll('#audienceTabs button').forEach(function (btn) {
+        btn.addEventListener('shown.bs.tab', function (e) {
+            try { localStorage.setItem('helpAudience', e.target.getAttribute('data-bs-target')); } catch (ex) {}
+        });
+    });
+
+    // Restore saved language
+    var savedLang = 'en';
+    try { savedLang = localStorage.getItem('helpLang') || 'en'; } catch (ex) {}
+    if (savedLang !== 'en') {
+        currentLang = savedLang;
+        syncing = true;
+        document.querySelectorAll('.lang-tabs button[data-lang="' + savedLang + '"]').forEach(function (btn) {
+            new bootstrap.Tab(btn).show();
+        });
+        syncing = false;
+    }
+}());
+</script>

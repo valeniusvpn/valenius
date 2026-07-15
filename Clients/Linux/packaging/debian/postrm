@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+# NOTE on the guard below: dpkg calls the OLD package's postrm with "upgrade"
+# during an upgrade / self-update (updater.py's `dpkg -i`), and with "remove"
+# or "purge" only on a genuine uninstall. Acting on remove|purge but NOT on
+# upgrade is what preserves the documented "configs survive an upgrade"
+# invariant while still wiping them on uninstall.
+
+case "$1" in
+    remove|purge)
+        # Security: leaving WireGuard configs behind after uninstall is a real
+        # risk -- the .conf.enc files hold private keys and master.key decrypts
+        # them, and a stale config would otherwise resurface (still listed) on
+        # the next install. Wipe the whole data dir: encrypted configs, staged
+        # configs, temp decrypts, master.key, registration.json, apikey.
+        rm -rf /var/lib/valenius
+        ;;
+esac
+
+case "$1" in
+    purge)
+        # Full purge additionally drops backend connection settings
+        # (/etc/valenius/appsettings.json contains BackendUrl + ApiKey).
+        rm -rf /etc/valenius
+        ;;
+esac
+
+exit 0

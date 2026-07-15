@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Valenius
+Comment=WireGuard VPN tray applet
+Exec=/usr/lib/valenius/venv/bin/python3 /usr/lib/valenius/tray/__main__.py
+Icon=valenius
+Categories=Network;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

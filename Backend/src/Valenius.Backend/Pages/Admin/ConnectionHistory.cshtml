@@ -1,0 +1,446 @@
+@page
+@model Valenius.Backend.Pages.Admin.ConnectionHistoryModel
+@{
+    ViewData["Title"] = "Connection History";
+    var _isAdmin      = User.IsInRole("Admin");
+    var _multiCustomer = _isAdmin && Model.CustomerNames.Count > 1;
+}
+
+<style>
+    .preset-btn.active { background: var(--brand-primary); border-color: var(--brand-primary); color: #fff; }
+    .group-header { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #6c757d; padding: .5rem 0 .3rem; border-bottom: 1px solid #dee2e6; margin-bottom: .5rem; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="page-title mb-0">Connection History</h1>
+    <small class="text-muted">Latest 500 events</small>
+</div>
+
+@if (!Model.Logs.Any())
+{
+    <div class="alert alert-info d-flex align-items-center gap-2">
+        <i class="bi bi-info-circle-fill"></i>No connection events recorded yet.
+    </div>
+}
+else
+{
+    <!-- Filter bar -->
+    <div class="card mb-3">
+        <div class="card-body py-3">
+            <div class="row g-2 align-items-end">
+
+                <!-- Hostname -->
+                <div class="col-auto">
+                    <label class="form-label small fw-semibold mb-1" for="fHostname">Name</label>
+                    <input type="text" id="fHostname" class="form-control form-control-sm" placeholder="Search…" style="width:140px;">
+                </div>
+
+                @if (_multiCustomer)
+                {
+                    <!-- Customer -->
+                    <div class="col-auto">
+                        <label class="form-label small fw-semibold mb-1" for="fCustomer">Customer</label>
+                        <select id="fCustomer" class="form-select form-select-sm" style="width:150px;">
+                            <option value="">All customers</option>
+                            @foreach (var c in Model.CustomerNames)
+                            {
+                                <option value="@c">@c</option>
+                            }
+                        </select>
+                    </div>
+                }
+
+                <!-- User -->
+                <div class="col-auto">
+                    <label class="form-label small fw-semibold mb-1" for="fUser">User</label>
+                    <input type="text" id="fUser" class="form-control form-control-sm" placeholder="Search…" style="width:140px;">
+                </div>
+
+                <!-- Time presets -->
+                <div class="col-auto">
+                    <label class="form-label small fw-semibold mb-1 d-block">Time range</label>
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-secondary preset-btn" data-preset="today">Today</button>
+                        <button type="button" class="btn btn-outline-secondary preset-btn" data-preset="yesterday">Yesterday</button>
+                        <button type="button" class="btn btn-outline-secondary preset-btn" data-preset="thisweek">This week</button>
+                        <button type="button" class="btn btn-outline-secondary preset-btn" data-preset="lastweek">Last week</button>
+                        <button type="button" class="btn btn-outline-secondary preset-btn" data-preset="thismonth">This month</button>
+                        <button type="button" class="btn btn-outline-secondary preset-btn" data-preset="lastmonth">Last month</button>
+                    </div>
+                </div>
+
+                <!-- Custom date range -->
+                <div class="col-auto">
+                    <label class="form-label small fw-semibold mb-1" for="fFrom">From</label>
+                    <input type="text" id="fFrom" class="form-control form-control-sm" placeholder="dd.MM.yyyy" maxlength="10" style="width:110px;">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small fw-semibold mb-1" for="fTo">To</label>
+                    <input type="text" id="fTo" class="form-control form-control-sm" placeholder="dd.MM.yyyy" maxlength="10" style="width:110px;">
+                </div>
+
+                <!-- Actions -->
+                <div class="col-auto ms-auto d-flex gap-1 align-items-end">
+                    @if (_multiCustomer)
+                    {
+                        <button type="button" id="btnGroup" class="btn btn-sm btn-outline-secondary">
+                            <i class="bi bi-collection me-1"></i>Group by customer
+                        </button>
+                    }
+                    <button type="button" id="btnClear" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-x-circle me-1"></i>Clear
+                    </button>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Result count -->
+    <div id="resultInfo" class="text-muted small mb-2"></div>
+
+    <!-- Flat table -->
+    <div id="flatView">
+        <div class="card">
+            <table class="table table-hover mb-0" id="logTable">
+                <thead>
+                    <tr>
+                        <th class="text-nowrap"><i class="bi bi-clock me-1"></i>Time</th>
+                        <th>Event</th>
+                        <th><i class="bi bi-pc-display me-1"></i>Name</th>
+                        @if (_isAdmin)
+                        {
+                            <th class="col-customer"><i class="bi bi-building me-1"></i>Customer</th>
+                        }
+                        <th><i class="bi bi-person me-1"></i>User</th>
+                        <th><i class="bi bi-arrow-left-right me-1"></i>Tunnel</th>
+                        <th>LAN IP</th>
+                        <th>WAN IP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var log in Model.Logs)
+                    {
+                        <tr data-hostname="@log.Client.EffectiveName.ToLower()"
+                            data-customer="@(log.Client.Customer?.Name ?? "")"
+                            data-user="@((log.Username ?? "").ToLower())"
+                            data-date="@log.OccurredAt.ToVienna().ToString("yyyy-MM-dd")">
+                            <td class="text-muted small text-nowrap">@log.OccurredAt.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")</td>
+                            <td>
+                                @if (log.EventType == "Connect")
+                                {
+                                    <span class="badge bg-success"><i class="bi bi-plug-fill me-1"></i>Connect</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-secondary"><i class="bi bi-plug me-1"></i>Disconnect</span>
+                                }
+                            </td>
+                            <td>
+                                <a asp-page="./Details" asp-route-id="@log.ClientId"
+                                   class="fw-semibold text-decoration-none small">@log.Client.EffectiveName</a>
+                            </td>
+                            @if (_isAdmin)
+                            {
+                                <td class="col-customer text-muted small">@(log.Client.Customer?.Name ?? "-")</td>
+                            }
+                            <td class="small">@(string.IsNullOrEmpty(log.Username) ? "-" : log.Username)</td>
+                            <td class="small text-muted">@(string.IsNullOrEmpty(log.TunnelName) ? "-" : log.TunnelName)</td>
+                            <td class="small text-muted">@(string.IsNullOrEmpty(log.LanIp) ? "-" : log.LanIp)</td>
+                            <td class="small text-muted">@(string.IsNullOrEmpty(log.WanIp) ? "-" : log.WanIp)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div id="noResults" class="text-muted small mt-2" style="display:none;">No entries match the current filters.</div>
+        <div id="pagination" class="d-flex justify-content-center mt-3"></div>
+    </div>
+
+    <!-- Grouped view (rebuilt by JS) -->
+    <div id="groupedView" style="display:none;"></div>
+}
+
+<script>
+(function () {
+    const PAGE_SIZE = 50;
+
+    // ── Vienna timezone helpers ──────────────────────────────────────────────
+    function viennaDisplayStr(date) {
+        return new Intl.DateTimeFormat('de-AT', { timeZone: 'Europe/Vienna', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+    }
+    function parseDMY(s) {
+        if (!s || s.length !== 10) return '';
+        return s.substring(6, 10) + '-' + s.substring(3, 5) + '-' + s.substring(0, 2);
+    }
+
+    function getPresetRange(preset) {
+        const now     = new Date();
+        const dayOfWk = now.getDay();
+        switch (preset) {
+            case 'today':
+                return { from: viennaDisplayStr(now), to: viennaDisplayStr(now) };
+            case 'yesterday': {
+                const d = new Date(now); d.setDate(d.getDate() - 1);
+                const s = viennaDisplayStr(d);
+                return { from: s, to: s };
+            }
+            case 'thisweek': {
+                const d = new Date(now);
+                const offset = dayOfWk === 0 ? 6 : dayOfWk - 1;
+                d.setDate(d.getDate() - offset);
+                return { from: viennaDisplayStr(d), to: viennaDisplayStr(now) };
+            }
+            case 'lastweek': {
+                const d = new Date(now);
+                const offset = dayOfWk === 0 ? 6 : dayOfWk - 1;
+                const mon = new Date(d); mon.setDate(d.getDate() - offset - 7);
+                const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+                return { from: viennaDisplayStr(mon), to: viennaDisplayStr(sun) };
+            }
+            case 'thismonth': {
+                const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+                return { from: viennaDisplayStr(firstOfMonth), to: viennaDisplayStr(now) };
+            }
+            case 'lastmonth': {
+                const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+                const last = new Date(now.getFullYear(), now.getMonth(), 0);
+                return { from: viennaDisplayStr(d), to: viennaDisplayStr(last) };
+            }
+        }
+        return null;
+    }
+
+    // ── DOM refs ─────────────────────────────────────────────────────────────
+    const fHostname   = document.getElementById('fHostname');
+    const fCustomer   = document.getElementById('fCustomer');
+    const fUser       = document.getElementById('fUser');
+    const fFrom       = document.getElementById('fFrom');
+    const fTo         = document.getElementById('fTo');
+    const btnGroup    = document.getElementById('btnGroup');
+    const btnClear    = document.getElementById('btnClear');
+    const flatView    = document.getElementById('flatView');
+    const groupedView = document.getElementById('groupedView');
+    const resultInfo  = document.getElementById('resultInfo');
+    const noResults   = document.getElementById('noResults');
+    const allRows     = flatView ? Array.from(document.querySelectorAll('#logTable tbody tr')) : [];
+
+    if (!flatView) return;
+
+    let grouped        = false;
+    let currentPage    = 1;
+    let currentVisible = allRows.slice();
+
+    // ── Result info ──────────────────────────────────────────────────────────
+    function updateResultInfo() {
+        const total    = currentVisible.length;
+        const allCount = allRows.length;
+        const suffix   = allCount >= 500 ? ' — latest 500 shown' : '';
+        if (!grouped && total > PAGE_SIZE) {
+            const start = (currentPage - 1) * PAGE_SIZE + 1;
+            const end   = Math.min(currentPage * PAGE_SIZE, total);
+            resultInfo.innerHTML = `Showing <strong>${start}–${end}</strong> of <strong>${total}</strong> filtered entr${total === 1 ? 'y' : 'ies'}${suffix}`;
+        } else {
+            resultInfo.innerHTML = `Showing <strong>${total}</strong> of <strong>${allCount}</strong> entr${allCount === 1 ? 'y' : 'ies'}${suffix}`;
+        }
+    }
+
+    // ── Pagination ───────────────────────────────────────────────────────────
+    function pageRange(current, total) {
+        if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+        const pages = new Set([1, total]);
+        for (let i = Math.max(2, current - 2); i <= Math.min(total - 1, current + 2); i++) pages.add(i);
+        return Array.from(pages).sort((a, b) => a - b);
+    }
+
+    function renderPagination(total, page) {
+        const pag   = document.getElementById('pagination');
+        const pages = Math.ceil(total / PAGE_SIZE);
+        if (pages <= 1) { pag.innerHTML = ''; return; }
+
+        let html = '<nav aria-label="Page navigation"><ul class="pagination pagination-sm mb-0">';
+        html += `<li class="page-item${page === 1 ? ' disabled' : ''}"><a class="page-link" href="#" data-page="${page - 1}">&lsaquo;</a></li>`;
+
+        const range = pageRange(page, pages);
+        let last = 0;
+        range.forEach(p => {
+            if (p - last > 1) html += '<li class="page-item disabled"><span class="page-link">&hellip;</span></li>';
+            html += `<li class="page-item${p === page ? ' active' : ''}"><a class="page-link" href="#" data-page="${p}">${p}</a></li>`;
+            last = p;
+        });
+
+        html += `<li class="page-item${page === pages ? ' disabled' : ''}"><a class="page-link" href="#" data-page="${page + 1}">&rsaquo;</a></li>`;
+        html += '</ul></nav>';
+        pag.innerHTML = html;
+
+        pag.querySelectorAll('a[data-page]').forEach(a => {
+            a.addEventListener('click', e => {
+                e.preventDefault();
+                const p = parseInt(a.dataset.page);
+                if (p >= 1 && p <= pages) {
+                    renderPage(p);
+                    flatView.querySelector('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        });
+    }
+
+    function renderPage(n) {
+        currentPage   = n;
+        const start   = (n - 1) * PAGE_SIZE;
+        const pageSet = new Set(currentVisible.slice(start, start + PAGE_SIZE));
+        allRows.forEach(r => { r.style.display = pageSet.has(r) ? '' : 'none'; });
+        noResults.style.display = currentVisible.length === 0 ? '' : 'none';
+        updateResultInfo();
+        renderPagination(currentVisible.length, n);
+    }
+
+    // ── Header HTML for grouped sub-tables (Customer col omitted) ───────────
+    function cloneWithoutCustomerCol(node) {
+        const clone = node.cloneNode(true);
+        clone.querySelectorAll('.col-customer').forEach(el => el.remove());
+        return clone;
+    }
+    const theadHtml = cloneWithoutCustomerCol(document.querySelector('#logTable thead')).outerHTML;
+
+    // ── Filter logic ─────────────────────────────────────────────────────────
+    function rowVisible(row) {
+        const hostname = (fHostname?.value ?? '').toLowerCase().trim();
+        const customer = (fCustomer?.value ?? '').trim();
+        const user     = (fUser?.value ?? '').toLowerCase().trim();
+        const from     = parseDMY(fFrom?.value ?? '');
+        const to       = parseDMY(fTo?.value ?? '');
+
+        if (hostname && !row.dataset.hostname.includes(hostname)) return false;
+        if (customer && row.dataset.customer !== customer)         return false;
+        if (user     && !row.dataset.user.includes(user))         return false;
+        if (from     && row.dataset.date < from)                  return false;
+        if (to       && row.dataset.date > to)                    return false;
+        return true;
+    }
+
+    function applyFilters() {
+        currentVisible = allRows.filter(rowVisible);
+        if (!grouped) {
+            renderPage(1);
+        } else {
+            buildGroupedView(currentVisible);
+            updateResultInfo();
+        }
+    }
+
+    // ── Grouped view builder ─────────────────────────────────────────────────
+    function buildGroupedView(visibleRows) {
+        const groups = new Map();
+        visibleRows.forEach(row => {
+            const key = row.dataset.customer || '\x00unassigned';
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(row);
+        });
+
+        if (groups.size === 0) {
+            groupedView.innerHTML = '<p class="text-muted small">No entries match the current filters.</p>';
+            return;
+        }
+
+        const sortedKeys = Array.from(groups.keys()).sort((a, b) =>
+            a === '\x00unassigned' ? 1 : b === '\x00unassigned' ? -1 : a.localeCompare(b));
+
+        let html = '';
+        sortedKeys.forEach(key => {
+            const label    = key === '\x00unassigned' ? 'Unassigned' : key;
+            const rows     = groups.get(key);
+            const rowsHtml = rows.map(r => cloneWithoutCustomerCol(r).outerHTML).join('');
+
+            html += `<div class="mb-4">
+                <div class="group-header"><i class="bi bi-building me-1"></i>${escHtml(label)} <span class="text-muted fw-normal">(${rows.length})</span></div>
+                <div class="card">
+                    <table class="table table-hover mb-0">
+                        ${theadHtml}
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                </div>
+            </div>`;
+        });
+
+        groupedView.innerHTML = html;
+    }
+
+    function escHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ── Preset buttons ───────────────────────────────────────────────────────
+    let activePreset = null;
+
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', function () {
+            const preset = this.dataset.preset;
+            if (activePreset === preset) {
+                this.classList.remove('active');
+                activePreset = null;
+                fFrom.value = '';
+                fTo.value   = '';
+            } else {
+                const range = getPresetRange(preset);
+                if (!range) return;
+                document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                activePreset = preset;
+                fFrom.value  = range.from;
+                fTo.value    = range.to;
+            }
+            applyFilters();
+        });
+    });
+
+    [fFrom, fTo].filter(Boolean).forEach(el => {
+        el.addEventListener('change', () => {
+            document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+            activePreset = null;
+            applyFilters();
+        });
+    });
+
+    // ── Text / select filters ────────────────────────────────────────────────
+    [fHostname, fCustomer, fUser].filter(Boolean).forEach(el => {
+        el.addEventListener('input', applyFilters);
+    });
+
+    // ── Group by toggle ──────────────────────────────────────────────────────
+    if (btnGroup) {
+        btnGroup.addEventListener('click', () => {
+            grouped = !grouped;
+            btnGroup.classList.toggle('active', grouped);
+            btnGroup.classList.toggle('btn-outline-secondary', !grouped);
+            btnGroup.classList.toggle('btn-secondary', grouped);
+
+            if (grouped) {
+                flatView.style.display    = 'none';
+                groupedView.style.display = '';
+                applyFilters();
+            } else {
+                groupedView.style.display = 'none';
+                flatView.style.display    = '';
+                applyFilters();
+            }
+        });
+    }
+
+    // ── Clear ────────────────────────────────────────────────────────────────
+    btnClear.addEventListener('click', () => {
+        if (fHostname) fHostname.value = '';
+        if (fCustomer) fCustomer.value = '';
+        if (fUser)     fUser.value     = '';
+        if (fFrom)     fFrom.value     = '';
+        if (fTo)       fTo.value       = '';
+        document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+        activePreset = null;
+        applyFilters();
+    });
+
+    // ── Initial render ────────────────────────────────────────────────────────
+    renderPage(1);
+
+})();
+</script>

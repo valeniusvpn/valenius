@@ -1,0 +1,272 @@
+@page
+@model Valenius.Backend.Pages.Admin.BackupModel
+@{
+    ViewData["Title"] = "Backup & Restore";
+}
+
+<div class="d-flex align-items-center gap-2 mb-4">
+    <i class="bi bi-safe2 text-primary" style="font-size:1.4rem;"></i>
+    <h1 class="page-title mb-0">Backup &amp; Restore</h1>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert" style="max-width:760px;">
+        <i class="bi bi-check-circle me-1"></i>@success
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Error"] is string error)
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" role="alert" style="max-width:760px;">
+        <i class="bi bi-x-circle me-1"></i>@error
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<!-- Current database summary -->
+<div class="card mb-4" style="max-width:760px;">
+    <div class="card-header">
+        <i class="bi bi-database me-2"></i>Current database
+    </div>
+    <div class="card-body">
+        <dl class="row mb-0">
+            <dt class="col-sm-4">Customers</dt>
+            <dd class="col-sm-8">@Model.CustomerCount</dd>
+
+            <dt class="col-sm-4">Clients</dt>
+            <dd class="col-sm-8">@Model.ClientCount</dd>
+
+            <dt class="col-sm-4">App users</dt>
+            <dd class="col-sm-8">@Model.UserCount</dd>
+
+            <dt class="col-sm-4">Connection logs</dt>
+            <dd class="col-sm-8">@Model.ConnectionLogCount</dd>
+        </dl>
+    </div>
+</div>
+
+<!-- Standard backup & restore -->
+<div class="card mb-4" style="max-width:760px;">
+    <div class="card-header">
+        <i class="bi bi-archive me-2"></i>Standard backup &amp; restore
+    </div>
+
+    <!-- Download -->
+    <div class="card-body">
+        <h6 class="fw-semibold mb-1"><i class="bi bi-download me-1 text-primary"></i>Download</h6>
+        <p class="text-muted small mb-3">
+            Downloads a JSON file with all customers, clients, users, trusted networks, and settings.
+            <strong>Private keys are not included</strong> — use the encrypted backup below for full disaster recovery.
+        </p>
+        <form method="post" asp-page-handler="Download">
+            <div class="form-check mb-3">
+                <input asp-for="IncludeConnectionLogs" class="form-check-input" type="checkbox" />
+                <label asp-for="IncludeConnectionLogs" class="form-check-label">
+                    Include connection logs
+                    <span class="text-muted small">(@Model.ConnectionLogCount entries)</span>
+                </label>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">
+                <i class="bi bi-download me-1"></i>Download backup
+            </button>
+        </form>
+    </div>
+
+    <hr class="my-0" />
+
+    <!-- Restore -->
+    <div class="card-body">
+        <h6 class="fw-semibold mb-1"><i class="bi bi-upload me-1 text-danger"></i>Restore</h6>
+        <div class="alert alert-danger py-2 mb-3 small">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            <strong>Destructive operation.</strong> Replaces <em>all</em> current data.
+            <strong>This cannot be undone.</strong>
+        </div>
+        <form method="post" asp-page-handler="Restore" enctype="multipart/form-data"
+              onsubmit="return confirm('Restore will permanently replace ALL current data.\n\nThis cannot be undone. Are you sure?');">
+            <div class="mb-3">
+                <label asp-for="BackupFile" class="form-label small fw-semibold">
+                    Backup file <span class="text-muted fw-normal">(.json)</span>
+                </label>
+                <input asp-for="BackupFile" type="file" accept=".json" class="form-control form-control-sm" />
+            </div>
+            <button type="submit" class="btn btn-danger btn-sm">
+                <i class="bi bi-arrow-counterclockwise me-1"></i>Restore
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- Encrypted backup & restore -->
+<div class="card border-warning mb-4" style="max-width:760px;">
+    <div class="card-header" style="background:#fffbf0; border-bottom-color:#ffe69c;">
+        <i class="bi bi-shield-lock me-2 text-warning"></i><strong>Encrypted backup &amp; restore</strong>
+        <span class="text-muted fw-normal small ms-2">— includes CA &amp; WireGuard® private keys</span>
+    </div>
+
+    <!-- Download -->
+    <div class="card-body">
+        <h6 class="fw-semibold mb-1"><i class="bi bi-download me-1 text-warning"></i>Download</h6>
+        <p class="text-muted small mb-3">
+            Downloads a fully encrypted backup containing <strong>all private key material</strong>
+            (CA private key, mTLS backend key, and WireGuard® client keys).
+            An auto-generated passphrase is shown once — store it in a password manager or alongside the file.
+            You will need both the file <em>and</em> the passphrase to restore.
+        </p>
+        <form id="encBackupForm" method="post" asp-page-handler="DownloadEncrypted">
+            <div class="form-check mb-3">
+                <input asp-for="EncIncludeConnectionLogs" class="form-check-input" type="checkbox" />
+                <label asp-for="EncIncludeConnectionLogs" class="form-check-label">
+                    Include connection logs
+                    <span class="text-muted small">(@Model.ConnectionLogCount entries)</span>
+                </label>
+            </div>
+            <button type="submit" class="btn btn-warning btn-sm text-dark" id="encDownloadBtn">
+                <i class="bi bi-shield-lock me-1"></i>Download encrypted backup
+            </button>
+            <span id="encSpinner" class="text-muted small ms-2 d-none">
+                <span class="spinner-border spinner-border-sm me-1"></span>Encrypting…
+            </span>
+        </form>
+    </div>
+
+    <hr class="my-0" style="border-color:#ffe69c;" />
+
+    <!-- Restore -->
+    <div class="card-body">
+        <h6 class="fw-semibold mb-1"><i class="bi bi-upload me-1 text-danger"></i>Restore</h6>
+        <div class="alert alert-danger py-2 mb-3 small">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            <strong>Destructive operation.</strong> Replaces <em>all</em> current data <strong>including CA and WireGuard® private keys.</strong>
+            Restart the backend after restoring to reload the CA material.
+            <strong>This cannot be undone.</strong>
+        </div>
+        <form method="post" asp-page-handler="RestoreEncrypted" enctype="multipart/form-data"
+              onsubmit="return confirm('Encrypted restore will permanently replace ALL current data including private keys.\n\nRemember to restart the backend afterwards.\n\nThis cannot be undone. Are you sure?');">
+            <div class="mb-3">
+                <label asp-for="EncryptedFile" class="form-label small fw-semibold">
+                    Encrypted backup file <span class="text-muted fw-normal">(.enc)</span>
+                </label>
+                <input asp-for="EncryptedFile" type="file" accept=".enc" class="form-control form-control-sm" />
+            </div>
+            <div class="mb-3">
+                <label asp-for="EncryptedPassphrase" class="form-label small fw-semibold">
+                    Backup passphrase
+                </label>
+                <input asp-for="EncryptedPassphrase" type="text" class="form-control form-control-sm font-monospace"
+                       placeholder="xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx-xxxxxxxx"
+                       autocomplete="off" spellcheck="false" />
+                <div class="form-text">The passphrase shown when the encrypted backup was created. Hyphens are optional.</div>
+            </div>
+            <button type="submit" class="btn btn-danger btn-sm">
+                <i class="bi bi-arrow-counterclockwise me-1"></i>Restore
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- Passphrase modal (shown after encrypted backup download) -->
+<div class="modal fade" id="passphraseModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title"><i class="bi bi-key-fill text-warning me-2"></i>Save your backup passphrase</h5>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning py-2 mb-3 small">
+                    <strong>This passphrase is shown only once.</strong>
+                    Without it, the encrypted backup cannot be decrypted. Store it in a password manager
+                    or securely alongside the backup file.
+                </div>
+                <label class="form-label small fw-semibold">Backup passphrase</label>
+                <div class="input-group input-group-sm mb-2">
+                    <input id="passphraseDisplay" type="text" class="form-control font-monospace"
+                           readonly style="font-size:.8rem; letter-spacing:.03em;" />
+                    <button class="btn btn-outline-secondary" type="button" id="copyBtn" title="Copy to clipboard">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+                <div id="copyConfirm" class="text-success small d-none">
+                    <i class="bi bi-check2 me-1"></i>Copied to clipboard
+                </div>
+            </div>
+            <div class="modal-footer border-0 pt-0">
+                <button type="button" class="btn btn-warning" id="passphraseConfirmBtn" disabled>
+                    <i class="bi bi-check-lg me-1"></i>I have saved the passphrase
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    var form       = document.getElementById('encBackupForm');
+    var btn        = document.getElementById('encDownloadBtn');
+    var spinner    = document.getElementById('encSpinner');
+    var modal      = new bootstrap.Modal(document.getElementById('passphraseModal'));
+    var dispInput  = document.getElementById('passphraseDisplay');
+    var copyBtn    = document.getElementById('copyBtn');
+    var copyMsg    = document.getElementById('copyConfirm');
+    var confirmBtn = document.getElementById('passphraseConfirmBtn');
+    var pendingDownload = null;
+
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        btn.disabled = true;
+        spinner.classList.remove('d-none');
+        try {
+            var token = form.querySelector('input[name="__RequestVerificationToken"]').value;
+            var resp  = await fetch(form.action, {
+                method: 'POST',
+                headers: { 'RequestVerificationToken': token },
+                body: new FormData(form),
+            });
+            if (!resp.ok) { alert('Server error ' + resp.status + ' — could not create backup.'); return; }
+            var result = await resp.json();
+            var raw = atob(result.data);
+            var buf = new Uint8Array(raw.length);
+            for (var i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+            var url = URL.createObjectURL(new Blob([buf], { type: 'application/octet-stream' }));
+            pendingDownload = { filename: result.filename, blobUrl: url };
+            dispInput.value = result.passphrase;
+            copyMsg.classList.add('d-none');
+            confirmBtn.disabled = true;
+            modal.show();
+        } catch (err) {
+            alert('Unexpected error: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('d-none');
+        }
+    });
+
+    copyBtn.addEventListener('click', function () {
+        navigator.clipboard.writeText(dispInput.value).then(function () {
+            copyMsg.classList.remove('d-none');
+            confirmBtn.disabled = false;
+        });
+    });
+
+    dispInput.addEventListener('focus', function () {
+        setTimeout(function () { confirmBtn.disabled = false; }, 2000);
+    });
+
+    confirmBtn.addEventListener('click', function () {
+        modal.hide();
+        if (pendingDownload) {
+            var a = document.createElement('a');
+            a.href = pendingDownload.blobUrl;
+            a.download = pendingDownload.filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(pendingDownload.blobUrl);
+            pendingDownload = null;
+        }
+    });
+})();
+</script>
+}

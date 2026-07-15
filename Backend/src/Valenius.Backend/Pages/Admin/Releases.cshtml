@@ -1,0 +1,229 @@
+@page
+@using Valenius.Backend.Pages.Admin
+@using Valenius.Backend.Models
+@model Valenius.Backend.Pages.Admin.ReleasesModel
+@{
+    ViewData["Title"] = "Releases";
+
+    string FmtSize(long b) => b switch
+    {
+        >= 1_048_576 => $"{b / 1_048_576.0:F1} MB",
+        >= 1_024     => $"{b / 1_024.0:F0} KB",
+        _            => $"{b} B"
+    };
+    string Short(string s) => s.Length <= 16 ? s : s[..16] + "…";
+}
+
+<div class="d-flex align-items-center gap-2 mb-4">
+    <i class="bi bi-cloud-upload text-primary" style="font-size:1.4rem;"></i>
+    <h1 class="page-title mb-0">Releases</h1>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@success
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Error"] is string error)
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-x-circle me-1"></i>@error
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<p class="text-muted small" style="max-width:860px;">
+    Each OS has independent <strong>Stable</strong> and <strong>Beta</strong> streams. Clients track
+    <strong>stable</strong> by default; an admin can put a specific device on <strong>beta</strong>
+    (client Details → Update channel). A beta client with no beta release falls back to stable.
+    Served by <code>GET /api/version/&lt;os&gt;?channel=&lt;stable|beta&gt;</code> (Windows + Linux stable are
+    also folded into the legacy <code>/api/version</code>). Android updates via the store.
+</p>
+
+<ul class="nav nav-tabs mb-3" id="releaseTabs" role="tablist">
+    @foreach (var (s, i) in ReleasesModel.Streams.Select((s, i) => (s, i)))
+    {
+        <li class="nav-item" role="presentation">
+            <button class="nav-link @(i == 0 ? "active" : "")" id="rt-@s.Os-btn"
+                    data-bs-toggle="tab" data-bs-target="#rt-@s.Os" type="button" role="tab">
+                @s.Label
+                <span class="badge bg-secondary rounded-pill ms-1">@Model.ReleasesByOs[s.Os].Count</span>
+            </button>
+        </li>
+    }
+</ul>
+
+<div class="tab-content">
+    @foreach (var (s, i) in ReleasesModel.Streams.Select((s, i) => (s, i)))
+    {
+        // Android is store-updated → stable stream only (for sideload/MDM hosting).
+        var channels = s.Os == ReleaseOs.Android
+            ? new[] { (Id: ReleaseChannel.Stable, Label: "Stable") }
+            : new[] { (Id: ReleaseChannel.Stable, Label: "Stable"), (Id: ReleaseChannel.Beta, Label: "Beta") };
+
+        <div class="tab-pane fade @(i == 0 ? "show active" : "")" id="rt-@s.Os" role="tabpanel">
+
+            @if (s.Os == ReleaseOs.Android)
+            {
+                <div class="alert alert-info py-2 small" style="max-width:860px;">
+                    <i class="bi bi-info-circle me-1"></i>The Android app updates through the Play Store; there's no
+                    in-app auto-update. Uploads here are for sideloading / MDM distribution.
+                </div>
+            }
+
+            @foreach (var ch in channels)
+            {
+                var releases  = Model.ReleasesByOs[s.Os].Where(r => r.Channel == ch.Id).ToList();
+                var published = releases.FirstOrDefault(r => r.IsPublished);
+                var isBeta    = ch.Id == ReleaseChannel.Beta;
+
+                <div class="card mb-4" style="max-width:1040px;">
+                    <div class="card-header d-flex align-items-center gap-2">
+                        @if (isBeta)
+                        {
+                            <span class="badge bg-warning text-dark"><i class="bi bi-cone-striped me-1"></i>Beta</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Stable</span>
+                        }
+                        <span class="fw-semibold">@s.Label — @ch.Label channel</span>
+                        @if (published is not null)
+                        {
+                            <span class="text-muted small ms-auto">published: <code>@published.Version</code></span>
+                        }
+                    </div>
+                    <div class="card-body">
+                        <!-- Upload -->
+                        <form method="post" asp-page-handler="Upload" enctype="multipart/form-data" class="mb-3">
+                            <input type="hidden" name="Os" value="@s.Os" />
+                            <input type="hidden" name="Channel" value="@ch.Id" />
+                            <div class="row g-2 align-items-end">
+                                <div class="col-sm-3">
+                                    <label class="form-label small fw-semibold mb-1">Version</label>
+                                    <input name="Version" class="form-control form-control-sm" placeholder="1.2.3" />
+                                </div>
+                                <div class="col-sm-5">
+                                    <label class="form-label small fw-semibold mb-1">
+                                        Installer <span class="text-muted fw-normal">(@string.Join(", ", s.Ext))</span>
+                                    </label>
+                                    <input name="Installer" type="file" accept="@s.Accept" class="form-control form-control-sm" />
+                                </div>
+                                <div class="col-sm-4">
+                                    <div class="d-flex gap-2 flex-nowrap">
+                                        <button type="submit" class="btn btn-primary btn-sm text-nowrap">
+                                            <i class="bi bi-cloud-upload me-1"></i>Upload &amp; publish
+                                        </button>
+                                        @if (!isBeta && s.Os == ReleaseOs.Windows && published is not null)
+                                        {
+                                            <a asp-page-handler="DownloadPackage" class="btn btn-outline-primary btn-sm text-nowrap">
+                                                <i class="bi bi-box-arrow-down me-1"></i>Package .zip
+                                            </a>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-2">
+                                <input name="ReleaseNotes" class="form-control form-control-sm"
+                                       placeholder="Release notes (optional)" />
+                            </div>
+                        </form>
+
+                        <!-- History -->
+                        @if (releases.Count == 0)
+                        {
+                            <p class="text-muted small mb-0">No @ch.Label releases yet.</p>
+                        }
+                        else
+                        {
+                            <div class="table-responsive">
+                                <table class="table table-sm table-hover mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Version</th><th>File</th><th>Size</th>
+                                            <th>Uploaded (Vienna)</th><th>Status</th><th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var r in releases)
+                                        {
+                                            <tr>
+                                                <td><span class="badge bg-primary">@r.Version</span></td>
+                                                <td>
+                                                    <code class="small">@r.FileName</code><br />
+                                                    <span class="text-muted font-monospace" style="font-size:.72rem;">@Short(r.Sha256)</span>
+                                                </td>
+                                                <td class="text-muted small text-nowrap">@FmtSize(r.SizeBytes)</td>
+                                                <td class="text-muted small text-nowrap">@r.UploadedAt.ToVienna().ToString("dd.MM.yyyy HH:mm")</td>
+                                                <td>
+                                                    @if (r.IsPublished)
+                                                    {
+                                                        <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Published</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="badge bg-secondary">Archived</span>
+                                                    }
+                                                </td>
+                                                <td class="text-end text-nowrap">
+                                                    <a href="/api/download/@Uri.EscapeDataString(r.FileName)" download
+                                                       class="btn btn-outline-secondary btn-sm py-0 px-2" title="Download">
+                                                        <i class="bi bi-download"></i>
+                                                    </a>
+                                                    @if (isBeta)
+                                                    {
+                                                        <form method="post" asp-page-handler="Promote" asp-route-id="@r.Id" class="d-inline"
+                                                              onsubmit="return confirm('Promote @r.Version to the stable channel?');">
+                                                            <button class="btn btn-outline-primary btn-sm py-0 px-2" title="Promote to stable">
+                                                                <i class="bi bi-arrow-up-circle"></i>
+                                                            </button>
+                                                        </form>
+                                                    }
+                                                    @if (!r.IsPublished)
+                                                    {
+                                                        <form method="post" asp-page-handler="Publish" asp-route-id="@r.Id" class="d-inline">
+                                                            <button class="btn btn-outline-success btn-sm py-0 px-2" title="Publish (make active)">
+                                                                <i class="bi bi-check2-circle"></i>
+                                                            </button>
+                                                        </form>
+                                                    }
+                                                    <form method="post" asp-page-handler="Delete" asp-route-id="@r.Id" class="d-inline"
+                                                          onsubmit="return confirm('Delete this release? This cannot be undone.');">
+                                                        <button class="btn btn-outline-danger btn-sm py-0 px-2" title="Delete">
+                                                            <i class="bi bi-trash3"></i>
+                                                        </button>
+                                                    </form>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    // Reopen the last-used OS tab after a post/redirect.
+    const key = 'valenius.releases.tab';
+    document.querySelectorAll('#releaseTabs button[data-bs-toggle="tab"]').forEach(function (btn) {
+        btn.addEventListener('shown.bs.tab', function (e) {
+            localStorage.setItem(key, e.target.getAttribute('data-bs-target'));
+        });
+    });
+    const saved = localStorage.getItem(key);
+    if (saved) {
+        const btn = document.querySelector('#releaseTabs button[data-bs-target="' + saved + '"]');
+        if (btn) new bootstrap.Tab(btn).show();
+    }
+})();
+</script>
+}

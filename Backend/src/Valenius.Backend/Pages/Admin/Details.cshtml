@@ -1,0 +1,1719 @@
+@page "{id:int}"
+@model Valenius.Backend.Pages.Admin.DetailsModel
+@{
+    ViewData["Title"] = $"Client - {Model.Client.EffectiveName}";
+    var _customer        = Model.Client.Customer;
+    var _isAdmin         = User.IsInRole("Admin");
+    var _valeniusMode    = _customer?.ServerMode == "Valenius";
+    var _wtMode          = _isAdmin && _valeniusMode;
+    var _externalEnabled = _customer == null || _customer.ServerMode != "Valenius" || _customer.AllowExternalConfig;
+    var _hasPeer         = !string.IsNullOrEmpty(Model.Client.WgPublicKey);
+}
+
+<style>
+    .nav-tabs .nav-link { color: #495057; font-weight: 500; }
+    .nav-tabs .nav-link.active { color: var(--brand-primary); font-weight: 600; }
+    .nav-tabs .nav-link.tab-brand { color: #1c87b0; }
+    .nav-tabs .nav-link.tab-brand.active { color: #1c87b0; }
+    .tab-content.card-tabs { border: 1px solid #dee2e6; border-top: 0; border-radius: 0 0 10px 10px; background: #fff; padding: 1.5rem; }
+    .section-heading { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #6c757d; border-bottom: 1px solid #dee2e6; padding-bottom: .4rem; margin-bottom: 1rem; }
+    .section-heading-brand { color: #29ABE2; border-color: rgba(41,171,226,.3); }
+    .card-brand { border-left: 3px solid #29ABE2; }
+    .card-brand > .card-header { color: #1c87b0; background: rgba(41,171,226,.06); border-bottom-color: rgba(41,171,226,.2); font-weight: 600; }
+    .client-hero { border: 1px solid #dee2e6; border-radius: 10px; background: linear-gradient(135deg,#fbfdff 0%,#f4f8fb 100%); }
+    .client-hero .meta { font-size: .82rem; }
+    .client-hero .meta .sep { color: #cdd5dc; margin: 0 .35rem; }
+    .readonly-field { font-size: .85rem; }
+    .readonly-field dt { font-weight: 600; color: #6c757d; }
+</style>
+
+<div class="mb-3">
+    <a asp-page="Index" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Back to list
+    </a>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@success
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Warning"] is string warning)
+{
+    <div class="alert alert-warning alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-exclamation-triangle me-1"></i>@warning
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Error"] is string error)
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-x-circle me-1"></i>@error
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+@if (Model.Client.IsDuplicatePending && _isAdmin)
+{
+    <div class="alert alert-warning border-warning" role="alert" style="max-width:760px;">
+        <h6 class="fw-bold mb-1"><i class="bi bi-exclamation-triangle-fill me-1"></i>Duplicate name — needs a decision</h6>
+        <p class="small mb-2">
+            A client named <strong>@Model.Client.EffectiveName</strong> already exists. This is a new
+            registration for the same hostname — most likely the same machine reinstalled with a fresh
+            identity. Until you decide, it stays inactive and is told to ask an administrator.
+        </p>
+        <div class="d-flex flex-wrap gap-2">
+            <form method="post" asp-page-handler="Reassign" asp-route-id="@Model.Client.Id">
+                <button type="submit" class="btn btn-sm btn-primary">
+                    <i class="bi bi-arrow-left-right me-1"></i>Reassign existing client to this install
+                </button>
+            </form>
+            <form method="post" asp-page-handler="KeepBoth" asp-route-id="@Model.Client.Id">
+                <button type="submit" class="btn btn-sm btn-outline-secondary">
+                    <i class="bi bi-files me-1"></i>Keep both as separate clients
+                </button>
+            </form>
+        </div>
+        <p class="text-muted small mb-0 mt-2">
+            <i class="bi bi-info-circle me-1"></i>Reassigning keeps the existing client's activation,
+            VPN config and history and moves them onto this reinstall.
+        </p>
+    </div>
+}
+
+<!-- ── Identity & status hero (always visible above the tabs) ───────────────── -->
+<div class="card client-hero mb-3">
+    <div class="card-body py-3">
+        <div class="d-flex flex-wrap align-items-center gap-3">
+            <div class="d-flex align-items-center gap-2">
+                <i class="bi @Model.Client.PlatformIcon text-primary" style="font-size:1.6rem;"></i>
+                <div>
+                    <h1 class="page-title mb-1">@Model.Client.EffectiveName</h1>
+                    <div class="meta text-muted d-flex flex-wrap align-items-center">
+                        @if (Model.Client.IsActive)
+                        {
+                            <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Active</span>
+                        }
+                        else if (Model.Client.IsDuplicatePending)
+                        {
+                            <span class="badge bg-warning text-dark"><i class="bi bi-files me-1"></i>Duplicate</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Pending</span>
+                        }
+                        @if (!string.IsNullOrEmpty(Model.Client.Platform))
+                        {
+                            <span class="badge bg-light text-dark border ms-2" title="Client platform">@Model.Client.Platform</span>
+                        }
+                        <span class="d-inline-flex align-items-center gap-1 ms-2 @(Model.IsOnline ? "text-success" : "text-secondary")"
+                              title="@(Model.IsOnline ? "Service connected — long-poll active" : "Offline — no active connection")">
+                            <i class="bi bi-circle-fill" style="font-size:.55rem;"></i>@(Model.IsOnline ? "Online" : "Offline")
+                        </span>
+                        <span class="sep">·</span>
+                        <span>@(_customer?.Name ?? "No customer")</span>
+                        <span class="sep">·</span>
+                        <span>Last seen @Model.Client.LastSeenAt.ToVienna().ToString("dd.MM.yyyy HH:mm")</span>
+                        @if (_valeniusMode && _hasPeer && Model.Client.VpnIpAddress is not null)
+                        {
+                            <span class="sep">·</span>
+                            <span><i class="bi bi-hdd-network me-1"></i><code>@Model.Client.VpnIpAddress</code></span>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            @if (_isAdmin)
+            {
+                <div class="ms-auto d-flex flex-wrap gap-2 align-items-center">
+                    @if (Model.IsUpdateAvailable)
+                    {
+                        <form method="post" asp-page-handler="ForceUpdate" class="m-0">
+                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                            <button type="submit" class="btn btn-warning btn-sm"
+                                    onclick="return confirm('Trigger immediate update to @Model.LatestVersion on @Model.Client.EffectiveName?');">
+                                <i class="bi bi-arrow-repeat me-1"></i>Update to @Model.LatestVersion
+                            </button>
+                        </form>
+                    }
+
+                    <form method="post" asp-page-handler="SetUpdateChannel" class="m-0 d-flex align-items-center gap-1"
+                          title="Auto-update channel for this client">
+                        <input type="hidden" name="id" value="@Model.Client.Id" />
+                        <span class="small text-muted"><i class="bi bi-signpost-split me-1"></i>Channel</span>
+                        <select name="channel" class="form-select form-select-sm" style="width:auto;" onchange="this.form.submit()">
+                            <option value="stable" selected="@(Model.Client.UpdateChannel == "beta" ? null : "selected")">Stable</option>
+                            <option value="beta" selected="@(Model.Client.UpdateChannel == "beta" ? "selected" : null)">Beta</option>
+                        </select>
+                    </form>
+
+                    @if (Model.Client.PendingConnect)
+                    {
+                        <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Connect pending</span>
+                    }
+                    else
+                    {
+                        <form method="post" asp-page-handler="TriggerConnect" class="m-0">
+                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                            <button type="submit" class="btn btn-outline-success btn-sm">
+                                <i class="bi bi-plug-fill me-1"></i>Connect now
+                            </button>
+                        </form>
+                    }
+
+                    @if (Model.Client.PendingDisconnect)
+                    {
+                        <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Disconnect pending</span>
+                    }
+                    else if (Model.IsWgConnected)
+                    {
+                        <form method="post" asp-page-handler="ForceDisconnect" class="m-0">
+                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                            <button type="submit" class="btn btn-outline-danger btn-sm"
+                                    onclick="return confirm('Force disconnect VPN on @Model.Client.EffectiveName?');">
+                                <i class="bi bi-plug me-1"></i>Disconnect
+                            </button>
+                        </form>
+                    }
+
+                    @if (_wtMode && _hasPeer)
+                    {
+                        <form method="post" asp-page-handler="KillTunnel" class="m-0">
+                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                            <button type="submit" class="btn btn-danger btn-sm"
+                                    onclick="return confirm('Kill the WireGuard tunnel for @Model.Client.EffectiveName? This removes the peer from the server immediately, even if the client is unreachable. It reconnects automatically on its next connection attempt.');">
+                                <i class="bi bi-plug-fill me-1"></i>Kill Tunnel
+                            </button>
+                        </form>
+
+                        <button type="button" class="btn btn-outline-primary btn-sm"
+                                data-bs-toggle="modal" data-bs-target="#modalReprovision">
+                            <i class="bi bi-arrow-repeat me-1"></i>Re-provision
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+<!-- ── Tab navigation ──────────────────────────────────────────────────── -->
+<ul class="nav nav-tabs" id="detailTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="tab-overview-btn"
+                data-bs-toggle="tab" data-bs-target="#tab-overview" type="button" role="tab">
+            <i class="bi bi-info-circle me-1"></i>Overview
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-access-btn"
+                data-bs-toggle="tab" data-bs-target="#tab-access" type="button" role="tab">
+            <i class="bi bi-shield-check me-1"></i>Access
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link tab-brand" id="tab-server-btn"
+                data-bs-toggle="tab" data-bs-target="#tab-server" type="button" role="tab">
+            <img src="~/img/app.png" style="height:14px;width:14px;object-fit:contain;vertical-align:-.1em;" class="me-1" alt="" />Integrated Server
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-vpn-btn"
+                data-bs-toggle="tab" data-bs-target="#tab-vpn" type="button" role="tab">
+            <i class="bi bi-wifi me-1"></i>VPN
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-history-btn"
+                data-bs-toggle="tab" data-bs-target="#tab-history" type="button" role="tab">
+            <i class="bi bi-clock-history me-1"></i>History
+            @if (Model.Logs.Count > 0)
+            {
+                <span class="badge bg-secondary ms-1 fw-normal" style="font-size:.7rem;">
+                    @Model.Logs.Count@(Model.Logs.Count >= 500 ? "+" : "")
+                </span>
+            }
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-diagnostics-btn"
+                data-bs-toggle="tab" data-bs-target="#tab-diagnostics" type="button" role="tab">
+            <i class="bi bi-clipboard-data me-1"></i>Diagnostics
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content card-tabs" id="detailTabContent">
+
+    <!-- ================================================================
+         TAB 1 — OVERVIEW
+    ================================================================ -->
+    <div class="tab-pane fade show active" id="tab-overview" role="tabpanel">
+
+        <!-- Client info -->
+        <div class="card mb-3">
+            <div class="card-header"><i class="bi bi-info-circle me-2"></i>Client info</div>
+            <div class="card-body">
+                <dl class="row mb-0">
+                    <dt class="col-sm-4">Client key</dt>
+                    <dd class="col-sm-8"><code class="small">@Model.Client.ClientKey</code></dd>
+
+                    <dt class="col-sm-4">Host SID</dt>
+                    <dd class="col-sm-8"><code class="small">@Model.Client.HostSid</code></dd>
+
+                    <dt class="col-sm-4">Username</dt>
+                    <dd class="col-sm-8">@(string.IsNullOrEmpty(Model.Client.Username) ? "-" : Model.Client.Username)</dd>
+
+                    <dt class="col-sm-4">User SID</dt>
+                    <dd class="col-sm-8"><code class="small">@(string.IsNullOrEmpty(Model.Client.UserSid) ? "-" : Model.Client.UserSid)</code></dd>
+
+                    <dt class="col-sm-4">Client version</dt>
+                    <dd class="col-sm-8">
+                        <code>@(string.IsNullOrEmpty(Model.Client.ClientVersion) ? "-" : Model.Client.ClientVersion)</code>
+                        @if (Model.IsUpdateAvailable)
+                        {
+                            <span class="badge bg-warning text-dark ms-1" title="Use 'Update to @Model.LatestVersion' above to roll it out now.">Update available: @Model.LatestVersion</span>
+                        }
+                    </dd>
+
+                    <dt class="col-sm-4">Customer</dt>
+                    <dd class="col-sm-8">@(Model.Client.Customer?.Name ?? "-")</dd>
+
+                    <dt class="col-sm-4">Registered</dt>
+                    <dd class="col-sm-8">@Model.Client.RegisteredAt.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")</dd>
+
+                    <dt class="col-sm-4">Last seen</dt>
+                    <dd class="col-sm-8">@Model.Client.LastSeenAt.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")</dd>
+                </dl>
+            </div>
+        </div>
+
+        <!-- Display name -->
+        <div class="card mb-3">
+            <div class="card-header"><i class="bi bi-tag me-2"></i>Display name</div>
+            <div class="card-body">
+                <form method="post" asp-page-handler="SaveDisplayName">
+                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                    <div class="mb-2">
+                        <input type="text" name="displayName" maxlength="255" class="form-control"
+                               value="@Model.Client.DisplayName" placeholder="@Model.Client.Hostname" />
+                        <div class="form-text">
+                            Shown instead of the hostname (<code>@Model.Client.Hostname</code>) across the
+                            admin panel. Leave blank to use the hostname.
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm">
+                        <i class="bi bi-floppy me-1"></i>Save name
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Recent connection history (max 10) -->
+        <div class="card mb-3">
+            <div class="card-header d-flex align-items-center justify-content-between">
+                <span><i class="bi bi-clock-history me-2"></i>Recent activity</span>
+                @if (Model.Logs.Count > 10)
+                {
+                    <button class="btn btn-link btn-sm p-0 text-decoration-none" id="showHistoryTabBtn">
+                        View all @Model.Logs.Count entries <i class="bi bi-arrow-right ms-1"></i>
+                    </button>
+                }
+            </div>
+            @if (!Model.Logs.Any())
+            {
+                <div class="card-body text-muted small">No events recorded yet.</div>
+            }
+            else
+            {
+                <table class="table table-sm mb-0">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Event</th>
+                            <th>User</th>
+                            <th>Tunnel</th>
+                            <th>LAN IP</th>
+                            <th>WAN IP</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var log in Model.Logs.Take(10))
+                        {
+                            <tr>
+                                <td class="text-muted small">@log.OccurredAt.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")</td>
+                                <td>
+                                    @if (log.EventType == "Connect")
+                                    {
+                                        <span class="badge bg-success"><i class="bi bi-plug-fill me-1"></i>Connect</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary"><i class="bi bi-plug me-1"></i>Disconnect</span>
+                                    }
+                                </td>
+                                <td class="small">@log.Username</td>
+                                <td class="small text-muted">@log.TunnelName</td>
+                                <td class="small text-muted">@(string.IsNullOrEmpty(log.LanIp) ? "-" : log.LanIp)</td>
+                                <td class="small text-muted">@(string.IsNullOrEmpty(log.WanIp) ? "-" : log.WanIp)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+
+        <!-- Notes -->
+        <div class="card mb-0">
+            <div class="card-header"><i class="bi bi-sticky me-2"></i>Notes</div>
+            <div class="card-body">
+                <form method="post" asp-page-handler="SaveNotes">
+                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                    <div class="mb-3">
+                        <textarea name="notes" class="form-control" rows="3"
+                                  placeholder="Optional notes about this machine...">@Model.Client.Notes</textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm">
+                        <i class="bi bi-floppy me-1"></i>Save notes
+                    </button>
+                </form>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ================================================================
+         TAB 2 — ACCESS  (membership & lifecycle)
+    ================================================================ -->
+    <div class="tab-pane fade" id="tab-access" role="tabpanel">
+        <div class="row g-3">
+
+            <!-- Left column — settings -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-sliders me-1"></i>Settings</div>
+
+                <!-- Customer membership -->
+                <div class="card mb-0">
+                    <div class="card-header"><i class="bi bi-building me-2"></i>Customer</div>
+                    <div class="card-body">
+                        @if (_isAdmin)
+                        {
+                            <form id="formAssignCustomer" method="post" asp-page-handler="AssignCustomer">
+                                <input type="hidden" name="id" value="@Model.Client.Id" />
+                                <div class="mb-2">
+                                    <select name="customerId" class="form-select form-select-sm">
+                                        <option value="">-- None --</option>
+                                        @foreach (var cu in Model.AllCustomers)
+                                        {
+                                            <option value="@cu.Id" selected="@(Model.Client.CustomerId == cu.Id ? "selected" : null)">@cu.Name</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="form-text mb-2">Determines which VPN server, defaults and licence apply to this client.</div>
+                                @if (_hasPeer)
+                                {
+                                    <button type="button" class="btn btn-outline-primary btn-sm w-100"
+                                            data-bs-toggle="modal" data-bs-target="#modalAssignCustomer">
+                                        <i class="bi bi-link me-1"></i>Change customer
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button type="submit" class="btn btn-outline-primary btn-sm w-100">
+                                        <i class="bi bi-link me-1"></i>Assign customer
+                                    </button>
+                                }
+                            </form>
+                        }
+                        else
+                        {
+                            <div class="fw-semibold">@(_customer?.Name ?? "—")</div>
+                            <div class="form-text">Only an administrator can change the customer assignment.</div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right column — actions -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-lightning-charge me-1"></i>Actions</div>
+
+                <!-- Access control -->
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-shield-check me-2"></i>Access control</div>
+                    <div class="card-body">
+                        <form method="post" asp-page-handler="Toggle">
+                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                            @if (Model.Client.IsActive)
+                            {
+                                <p class="small text-muted mb-3">This client is <strong class="text-success">active</strong> and can connect to VPN.</p>
+                                <button type="submit" class="btn btn-danger w-100">
+                                    <i class="bi bi-pause-circle me-1"></i>Deactivate client
+                                </button>
+                            }
+                            else
+                            {
+                                <p class="small text-muted mb-3">This client is <strong class="text-warning">pending activation</strong> and cannot connect to VPN.</p>
+                                <button type="submit" class="btn btn-success w-100">
+                                    <i class="bi bi-play-circle me-1"></i>Activate client
+                                </button>
+                            }
+                        </form>
+                    </div>
+                </div>
+
+                @if (_isAdmin)
+                {
+                    <!-- Danger zone -->
+                    <div class="card border-danger mb-0">
+                        <div class="card-header text-danger bg-danger bg-opacity-10 border-bottom border-danger border-opacity-25">
+                            <i class="bi bi-exclamation-triangle me-2"></i>Danger zone
+                        </div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-3">Delete this client record. The machine will need to re-register and be re-activated.</p>
+                            <form id="formDeleteClient" method="post" asp-page-handler="Delete" style="display:none;">
+                                <input type="hidden" name="id" value="@Model.Client.Id" />
+                            </form>
+                            <button type="button" class="btn btn-outline-danger btn-sm w-100"
+                                    data-bs-toggle="modal" data-bs-target="#modalDeleteClient">
+                                <i class="bi bi-trash me-1"></i>Delete client
+                            </button>
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+         TAB 3 — INTEGRATED SERVER  (Valenius WireGuard® — Pro flagship)
+    ================================================================ -->
+    <div class="tab-pane fade" id="tab-server" role="tabpanel">
+
+        @if (_valeniusMode)
+        {
+            <div class="row g-3">
+
+                <!-- Left column — peer state & settings -->
+                <div class="col-lg-6">
+                    <div class="section-heading section-heading-brand">
+                        <img src="~/img/app.png" style="height:15px;width:15px;object-fit:contain;vertical-align:-.1em;" class="me-1" alt="" />Peer &amp; configuration
+                    </div>
+
+                    <!-- Valenius WireGuard® peer -->
+                    <div class="card card-brand mb-3">
+                        <div class="card-header"><i class="bi bi-shield-lock me-2"></i>Valenius WireGuard® peer</div>
+                        <div class="card-body">
+                            @if (_hasPeer)
+                            {
+                                <dl class="row mb-3">
+                                    <dt class="col-sm-4">VPN IP</dt>
+                                    <dd class="col-sm-8"><code>@(Model.Client.VpnIpAddress ?? "-")</code></dd>
+                                    <dt class="col-sm-4">Public key</dt>
+                                    <dd class="col-sm-8"><code class="small text-break">@Model.Client.WgPublicKey</code></dd>
+                                    @if (Model.Client.ConfigProvisionedAt.HasValue)
+                                    {
+                                        <dt class="col-sm-4">Config age</dt>
+                                        <dd class="col-sm-8">
+                                            @Model.Client.ConfigProvisionedAt.Value.ToVienna().ToString("dd.MM.yyyy HH:mm")
+                                            @if (Model.Client.MaxConfigValidDays.HasValue)
+                                            {
+                                                var expiresAt = Model.Client.ConfigProvisionedAt.Value.AddDays(Model.Client.MaxConfigValidDays.Value);
+                                                var expired   = DateTime.UtcNow > expiresAt;
+                                                <span class="badge @(expired ? "bg-danger" : "bg-secondary") ms-1 fw-normal">
+                                                    @(expired ? "Expired" : $"expires {expiresAt.ToVienna():dd.MM.yyyy}")
+                                                </span>
+                                            }
+                                        </dd>
+                                    }
+                                </dl>
+                                @if (_isAdmin)
+                                {
+                                    <p class="small text-muted mb-2">Re-provision to re-register this peer on the sidecar and push a fresh config. Existing keys and VPN IP are reused.</p>
+                                    <form id="formReprovision" method="post" asp-page-handler="ProvisionPeer" style="display:none;">
+                                        <input type="hidden" name="id" value="@Model.Client.Id" />
+                                    </form>
+                                    <form id="formUnprovision" method="post" asp-page-handler="UnprovisionPeer" style="display:none;">
+                                        <input type="hidden" name="id" value="@Model.Client.Id" />
+                                    </form>
+                                    <div class="d-flex gap-2">
+                                        <button type="button" class="btn btn-outline-primary btn-sm flex-grow-1"
+                                                data-bs-toggle="modal" data-bs-target="#modalReprovision">
+                                            <i class="bi bi-arrow-repeat me-1"></i>Re-provision
+                                        </button>
+                                        <button type="button" class="btn btn-outline-danger btn-sm"
+                                                data-bs-toggle="modal" data-bs-target="#modalUnprovision">
+                                            <i class="bi bi-shield-x me-1"></i>Unprovision
+                                        </button>
+                                    </div>
+                                }
+                            }
+                            else if (Model.Client.IsActive && _isAdmin)
+                            {
+                                <div class="alert alert-warning py-2 small mb-3">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    No Valenius WireGuard® peer provisioned yet. Click below to generate keys, allocate a VPN IP, and register this client on the server.
+                                </div>
+                                <form method="post" asp-page-handler="ProvisionPeer">
+                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                    <button type="submit" class="btn btn-primary btn-sm w-100">
+                                        <i class="bi bi-shield-plus me-1"></i>Provision peer
+                                    </button>
+                                </form>
+                            }
+                            else
+                            {
+                                <p class="small text-muted mb-0">
+                                    <i class="bi bi-info-circle me-1"></i>
+                                    No peer provisioned yet. A peer is provisioned automatically when this client is activated.
+                                </p>
+                            }
+                        </div>
+                    </div>
+
+                    <!-- Peer settings -->
+                    <div class="card card-brand mb-3">
+                        <div class="card-header"><i class="bi bi-sliders me-2"></i>Peer settings</div>
+                        <div class="card-body">
+                            @if (_isAdmin)
+                            {
+                                <form method="post" asp-page-handler="SavePeerSettings">
+                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Allowed IPs <span class="text-muted fw-normal">(override)</span></label>
+                                        <input type="text" name="allowedIPs" class="form-control form-control-sm"
+                                               value="@Model.Client.AllowedIPs"
+                                               placeholder="@(Model.Client.Customer?.AllowedIPs ?? "0.0.0.0/0, ::/0 (customer default)")"
+                                               pattern="((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})(,\s*((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3}))*"
+                                               title="Comma-separated CIDRs, e.g. 0.0.0.0/0, ::/0 or 10.0.0.0/8" />
+                                        <div class="form-text">
+                                            In effect: <code>@Model.EffectiveAllowedIPs</code>
+                                            <span class="text-muted">(@(Model.AllowedIPsOverridden ? "client override" : "customer default"))</span>. Leave blank to inherit.
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">DNS server <span class="text-muted fw-normal">(override)</span></label>
+                                        <input type="text" name="dnsServer" class="form-control form-control-sm"
+                                               value="@Model.Client.DnsServer"
+                                               placeholder="@(Model.Client.Customer?.DnsServer ?? "none (customer default)")"
+                                               pattern="(\d{1,3}\.){3}\d{1,3}"
+                                               title="IPv4 address, e.g. 10.100.0.1" />
+                                        <div class="form-text">
+                                            In effect: <code>@Model.EffectiveDns</code>
+                                            <span class="text-muted">(@(Model.DnsOverridden ? "client override" : "customer default"))</span>. Leave blank to inherit.
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">DNS search domains <span class="text-muted fw-normal">(override)</span></label>
+                                        <input type="text" name="dnsSearchDomains" class="form-control form-control-sm"
+                                               value="@Model.Client.DnsSearchDomains"
+                                               placeholder="@(Model.Client.Customer?.DnsSearchDomains ?? "none (customer default)")"
+                                               pattern="^[A-Za-z0-9][A-Za-z0-9.\-]*(\s*,\s*[A-Za-z0-9][A-Za-z0-9.\-]*)*$"
+                                               title="Comma-separated domains, e.g. corp.internal, lan" />
+                                        <div class="form-text">
+                                            In effect: <code>@Model.EffectiveDnsSearchDomains</code>
+                                            <span class="text-muted">(@(Model.DnsSearchDomainsOverridden ? "client override" : "customer default"))</span>.
+                                            Split-DNS (NRPT) domains — resolve only through this tunnel. Leave blank to inherit.
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Auto re-provision after <span class="text-muted fw-normal">(days)</span></label>
+                                        <input type="number" name="maxConfigValidDays" class="form-control form-control-sm"
+                                               value="@Model.Client.MaxConfigValidDays" min="1" placeholder="Never" />
+                                        <div class="form-text">
+                                            Automatically push a fresh config once it reaches this age. Leave blank to never expire.
+                                        </div>
+                                    </div>
+                                    <button type="submit" class="btn btn-primary btn-sm">
+                                        <i class="bi bi-floppy me-1"></i>Save peer settings
+                                    </button>
+                                    <span class="text-muted small ms-2">Re-provision to apply.</span>
+                                </form>
+                            }
+                            else
+                            {
+                                <dl class="readonly-field row mb-0">
+                                    <dt class="col-sm-5">Allowed IPs</dt>
+                                    <dd class="col-sm-7"><code>@Model.EffectiveAllowedIPs</code></dd>
+                                    <dt class="col-sm-5">DNS server</dt>
+                                    <dd class="col-sm-7"><code>@Model.EffectiveDns</code></dd>
+                                    <dt class="col-sm-5">DNS search domains</dt>
+                                    <dd class="col-sm-7"><code>@Model.EffectiveDnsSearchDomains</code></dd>
+                                    <dt class="col-sm-5">Auto re-provision</dt>
+                                    <dd class="col-sm-7">@(Model.Client.MaxConfigValidDays.HasValue ? $"after {Model.Client.MaxConfigValidDays} days" : "never")</dd>
+                                </dl>
+                                <div class="form-text mt-2">Only an administrator can change peer settings.</div>
+                            }
+                        </div>
+                    </div>
+
+                    <!-- Tunnel verification -->
+                    <div class="card card-brand mb-0">
+                        <div class="card-header"><i class="bi bi-activity me-2"></i>Tunnel verification</div>
+                        <div class="card-body">
+                            <p class="small text-muted mb-2">
+                                After connecting, Valenius confirms the tunnel can actually reach the server (a health probe forced through the tunnel) before showing the client as connected.
+                            </p>
+                            <p class="small mb-3">
+                                @if (Model.Client.SkipConnectivityCheck)
+                                {
+                                    <span>Currently <strong class="text-warning">disabled</strong> — the tunnel is treated as connected without verification.</span>
+                                }
+                                else
+                                {
+                                    <span>Currently <strong class="text-success">enabled</strong>.</span>
+                                }
+                            </p>
+                            @if (_isAdmin)
+                            {
+                                <form method="post" asp-page-handler="ToggleConnectivityCheck">
+                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm w-100">
+                                        @(Model.Client.SkipConnectivityCheck ? "Re-enable verification" : "Disable verification")
+                                    </button>
+                                </form>
+                                <div class="form-text mt-2">Disable only where the health probe cannot run.</div>
+                            }
+                            else
+                            {
+                                <div class="form-text">Only an administrator can change tunnel verification.</div>
+                            }
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right column — session security (MFA) -->
+                <div class="col-lg-6">
+                    <div class="section-heading section-heading-brand"><i class="bi bi-shield-lock-fill me-1"></i>Session security</div>
+
+                    @if (Model.MfaProActive)
+                    {
+                        <!-- Session MFA — policy (settings) -->
+                        <div class="card card-brand mb-3">
+                            <div class="card-header"><i class="bi bi-shield-lock-fill me-2"></i>Session MFA policy</div>
+                            <div class="card-body">
+                                @if (_isAdmin)
+                                {
+                                    @if (!Model.MfaEditable)
+                                    {
+                                        <div class="alert alert-warning py-2 small mb-3">
+                                            <i class="bi bi-lock-fill me-1"></i>
+                                            Policy editing is locked — the Pro license is inactive or expired.
+                                            <strong>Existing enforcement and sessions continue unchanged.</strong>
+                                        </div>
+                                    }
+                                    <fieldset disabled="@(Model.MfaEditable ? null : "disabled")">
+                                    <form method="post" asp-page-handler="SetMfaPolicy" onsubmit="return mfaConfirm(this);">
+                                        <input type="hidden" name="id" value="@Model.Client.Id" />
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-semibold">Peer type</label>
+                                            <select name="peerType" id="mfaPeerType" class="form-select form-select-sm"
+                                                    data-current="@Model.Client.PeerType">
+                                                <option value="User" selected="@(Model.Client.PeerType == PeerType.User ? "selected" : null)">User (can be MFA-gated)</option>
+                                                <option value="Machine" selected="@(Model.Client.PeerType == PeerType.Machine ? "selected" : null)">Machine (never gated)</option>
+                                            </select>
+                                            <div class="form-text">Machine peers are always connected and are never subject to MFA gating.</div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-semibold">MFA policy</label>
+                                            <select name="mfaPolicy" class="form-select form-select-sm">
+                                                <option value="Inherit" selected="@(Model.Client.MfaPolicy == null ? "selected" : null)">Inherit from customer (@(Model.Client.Customer?.DefaultMfaPolicy.ToString() ?? "Disabled"))</option>
+                                                <option value="Disabled" selected="@(Model.Client.MfaPolicy == MfaPolicy.Disabled ? "selected" : null)">Disabled</option>
+                                                <option value="PerConnection" selected="@(Model.Client.MfaPolicy == MfaPolicy.PerConnection ? "selected" : null)">Per connection (re-auth each connect)</option>
+                                                <option value="Interval" selected="@(Model.Client.MfaPolicy == MfaPolicy.Interval ? "selected" : null)">Interval (fixed lifetime)</option>
+                                            </select>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-semibold">Session lifetime <span class="text-muted fw-normal">(hours, override)</span></label>
+                                            <input type="number" name="mfaLifetimeHours" min="1" class="form-control form-control-sm"
+                                                   value="@Model.Client.MfaSessionLifetimeHours"
+                                                   placeholder="@(Model.Client.Customer?.MfaSessionLifetimeHours.ToString() ?? "12") (default)" />
+                                            <div class="form-text">Only applies to the <strong>Interval</strong> policy. Leave blank to use the customer default.</div>
+                                        </div>
+                                        <button type="submit" class="btn btn-primary btn-sm">
+                                            <i class="bi bi-floppy me-1"></i>Save MFA policy
+                                        </button>
+                                    </form>
+
+                                    <hr class="my-3" />
+                                    <form method="post" asp-page-handler="SetMfaApprover">
+                                        <input type="hidden" name="id" value="@Model.Client.Id" />
+                                        <label class="form-label small fw-semibold">Push-to-approve device <span class="text-muted fw-normal">(optional)</span></label>
+                                        <select name="approverClientId" class="form-select form-select-sm">
+                                            <option value="">None — authenticator / TOTP only</option>
+                                            @foreach (var cand in Model.ApproverCandidates)
+                                            {
+                                                <option value="@cand.Id" selected="@(Model.Client.MfaApproverClientId == cand.Id ? "selected" : null)">@cand.EffectiveName</option>
+                                            }
+                                        </select>
+                                        <div class="form-text">
+                                            A mobile device that approves this client's MFA via push — the user taps
+                                            <strong>Approve</strong> on that phone instead of entering a code.
+                                            @if (!Model.ApproverCandidates.Any())
+                                            {
+                                                <text>No push-capable devices in this customer yet.</text>
+                                            }
+                                        </div>
+                                        <button type="submit" class="btn btn-primary btn-sm mt-2">
+                                            <i class="bi bi-floppy me-1"></i>Save approver
+                                        </button>
+                                    </form>
+                                    </fieldset>
+                                }
+
+                                <div class="d-flex align-items-center justify-content-between mt-3 mb-2">
+                                    <span class="small fw-semibold">Effective policy</span>
+                                    <span class="badge @(Model.MfaResolved.Gated ? "bg-warning text-dark" : "bg-secondary")">
+                                        @Model.MfaResolved.Policy
+                                    </span>
+                                </div>
+                                <div class="d-flex align-items-center justify-content-between mb-0">
+                                    <span class="small fw-semibold">Enrollment</span>
+                                    @if (Model.Client.MfaTotpEnabled)
+                                    {
+                                        <span class="badge bg-success">Enrolled</span>
+                                    }
+                                    else if (Model.Client.MfaEnrollmentOpen)
+                                    {
+                                        <span class="badge bg-info text-dark">Awaiting (QR on device)</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary">Not enrolled</span>
+                                    }
+                                </div>
+                                @if (!_isAdmin)
+                                {
+                                    <div class="form-text mt-2">Only an administrator can change the MFA policy.</div>
+                                }
+                            </div>
+                        </div>
+
+                        @if (_isAdmin)
+                        {
+                            <!-- Session MFA — enrollment & sessions (actions) -->
+                            <div class="card card-brand mb-0">
+                                <div class="card-header"><i class="bi bi-shield-lock me-2"></i>Enrollment &amp; sessions</div>
+                                <div class="card-body">
+                                    @if (Model.Client.MfaTotpEnabled || Model.Client.MfaEnrollmentOpen)
+                                    {
+                                        <p class="small text-muted mb-2">Reset the authenticator so the user must enroll a fresh TOTP factor.</p>
+                                        <fieldset disabled="@(Model.MfaEditable ? null : "disabled")">
+                                        <form method="post" asp-page-handler="ResetMfa"
+                                              onsubmit="return confirm('Reset MFA for this client? The user must re-enroll their authenticator.');">
+                                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                                            <button type="submit" class="btn btn-outline-warning btn-sm w-100">
+                                                <i class="bi bi-arrow-counterclockwise me-1"></i>Reset MFA enrollment
+                                            </button>
+                                        </form>
+                                        </fieldset>
+                                    }
+                                    else
+                                    {
+                                        <p class="small text-muted mb-0">No enrollment to reset yet.</p>
+                                    }
+
+                                    @if (Model.ActiveMfaSessions.Count > 0)
+                                    {
+                                        <hr class="my-3" />
+                                        <div class="small fw-semibold mb-2">Active sessions</div>
+                                        @foreach (var s in Model.ActiveMfaSessions)
+                                        {
+                                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                                <span class="small text-muted">until @s.ExpiresAt.ToVienna().ToString("HH:mm") &middot; @(s.CreatedFromIp ?? "—")</span>
+                                                <form method="post" asp-page-handler="RevokeMfaSession" class="m-0">
+                                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                                    <input type="hidden" name="sessionId" value="@s.SessionId" />
+                                                    <button type="submit" class="btn btn-outline-danger btn-sm py-0">Revoke</button>
+                                                </form>
+                                            </div>
+                                        }
+                                    }
+                                </div>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <div class="card">
+                            <div class="card-body text-muted small">
+                                <i class="bi bi-info-circle me-1"></i>Session MFA is a Pro feature and is not active on this installation.
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+
+            @if (Model.GeneratedConfig is not null)
+            {
+                <!-- Generated WireGuard config (full width) -->
+                <div class="card card-brand mt-3 mb-0">
+                    <div class="card-header d-flex align-items-center gap-2 flex-wrap">
+                        <i class="bi bi-file-earmark-code me-1"></i>Generated config
+                        <span class="badge bg-secondary ms-1 fw-normal" style="font-size:.7rem;">current</span>
+                        <div class="ms-auto d-flex gap-1">
+                            <button type="button" class="btn btn-outline-secondary btn-sm"
+                                    onclick="copyConfig()" id="btnCopyConfig">
+                                <i class="bi bi-clipboard me-1"></i>Copy
+                            </button>
+                            <a asp-page-handler="DownloadConf" class="btn btn-outline-secondary btn-sm"
+                               title="Download .conf file">
+                                <i class="bi bi-download me-1"></i>.conf
+                            </a>
+                            <button type="button" class="btn btn-outline-secondary btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#modalQrCode"
+                                    title="Show QR code">
+                                <i class="bi bi-qr-code me-1"></i>QR
+                            </button>
+                            <a asp-page="ConfigCard" asp-route-id="@Model.Client.Id" target="_blank"
+                               class="btn btn-outline-primary btn-sm"
+                               title="Open printable config card (PDF/print)">
+                                <i class="bi bi-printer me-1"></i>Card
+                            </a>
+                            @if (_isAdmin)
+                            {
+                                <button type="button" class="btn btn-outline-success btn-sm"
+                                        data-bs-toggle="modal" data-bs-target="#modalEmailConfig"
+                                        title="Send config and QR code by e-mail">
+                                    <i class="bi bi-envelope me-1"></i>Email
+                                </button>
+                            }
+                        </div>
+                    </div>
+                    @if (Model.MfaResolved.Policy != MfaPolicy.Disabled)
+                    {
+                        <div class="alert alert-warning rounded-0 border-0 border-bottom mb-0 py-2 px-3 small">
+                            <i class="bi bi-shield-exclamation me-1"></i>
+                            <strong>MFA active.</strong>
+                            Any device with this config connects as this peer while an MFA session is active.
+                            A mobile device importing it bypasses the per-device authentication prompt.
+                            To exempt a device from MFA entirely, set its <strong>Peer type</strong> to <strong>Machine</strong>.
+                        </div>
+                    }
+                    <div class="card-body p-0">
+                        <pre id="configPre" class="mb-0 p-3" style="font-size:.78rem;background:#f8fafb;border-radius:0;overflow-x:auto;white-space:pre;">@Model.GeneratedConfig</pre>
+                    </div>
+                    <div class="card-footer bg-transparent border-top d-flex align-items-center gap-2 py-2">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   id="showPrivateKey" onchange="togglePrivateKey(this.checked)" />
+                            <label class="form-check-label small" for="showPrivateKey">Show private key</label>
+                        </div>
+                        <span class="text-muted small ms-auto">
+                            <i class="bi bi-exclamation-triangle me-1"></i>Reconstructed from database — reflects current provisioning state.
+                        </span>
+                    </div>
+                </div>
+            }
+
+            @if (Model.MfaProActive && _isAdmin)
+            {
+                <!-- ── Cross-customer sidecar profiles ──────────────────────────────── -->
+                <div class="section-heading section-heading-brand mt-4"><i class="bi bi-share me-1"></i>Foreign sidecar profiles</div>
+
+                @if (Model.ForeignProfiles.Count > 0)
+                {
+                    <div class="card card-brand mb-3">
+                        <div class="card-header"><i class="bi bi-hdd-network me-2"></i>Provisioned foreign profiles</div>
+                        <table class="table table-sm mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Source customer</th>
+                                    <th>VPN IP</th>
+                                    <th>Provisioned</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var fp in Model.ForeignProfiles)
+                                {
+                                    <tr>
+                                        <td class="small fw-semibold align-middle">
+                                            <a asp-page="/Admin/Customers/Details" asp-route-id="@fp.SourceCustomerId"
+                                               class="text-decoration-none">@fp.SourceCustomer.Name</a>
+                                        </td>
+                                        <td class="small font-monospace align-middle">@(fp.VpnIpAddress ?? "-")</td>
+                                        <td class="small text-muted align-middle">
+                                            @(fp.ConfigProvisionedAt.HasValue
+                                                ? fp.ConfigProvisionedAt.Value.ToVienna().ToString("dd.MM.yyyy HH:mm")
+                                                : "-")
+                                        </td>
+                                        <td class="text-end align-middle">
+                                            <div class="d-flex gap-1 justify-content-end">
+                                                <form method="post" asp-page-handler="ProvisionForeign">
+                                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                                    <input type="hidden" name="sourceCustomerId" value="@fp.SourceCustomerId" />
+                                                    <button type="submit" class="btn btn-xs btn-outline-primary"
+                                                            style="font-size:.75rem;padding:.15rem .5rem;"
+                                                            title="Re-stage the config and re-register the peer on the sidecar">
+                                                        <i class="bi bi-arrow-repeat me-1"></i>Re-provision
+                                                    </button>
+                                                </form>
+                                                <form method="post" asp-page-handler="DeprovisionForeign"
+                                                      onsubmit="return confirm('Remove foreign profile from @fp.SourceCustomer.Name? The profile will be deleted on the client.');">
+                                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                                    <input type="hidden" name="sourceCustomerId" value="@fp.SourceCustomerId" />
+                                                    <button type="submit" class="btn btn-xs btn-outline-danger"
+                                                            style="font-size:.75rem;padding:.15rem .5rem;">
+                                                        <i class="bi bi-shield-x me-1"></i>Remove
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+
+                @if (Model.ShareableCustomers.Count > 0)
+                {
+                    <div class="card card-brand mb-0">
+                        <div class="card-header"><i class="bi bi-plus-circle me-2"></i>Add foreign profile</div>
+                        <div class="card-body">
+                            @if (!Model.Client.IsActive)
+                            {
+                                <div class="alert alert-warning py-2 small mb-3">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    The client must be active before a foreign profile can be provisioned.
+                                </div>
+                            }
+                            <form method="post" asp-page-handler="ProvisionForeign">
+                                <input type="hidden" name="id" value="@Model.Client.Id" />
+                                <div class="mb-3">
+                                    <label class="form-label small fw-semibold">Source customer sidecar</label>
+                                    <select name="sourceCustomerId" class="form-select form-select-sm" required>
+                                        @foreach (var c in Model.ShareableCustomers)
+                                        {
+                                            var alreadyProvisioned = Model.ForeignProfiles.Any(fp => fp.SourceCustomerId == c.Id);
+                                            <option value="@c.Id" disabled="@(alreadyProvisioned ? "disabled" : null)">
+                                                @c.Name@(alreadyProvisioned ? " (already provisioned)" : "")
+                                            </option>
+                                        }
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm"
+                                        disabled="@(!Model.Client.IsActive ? "disabled" : null)">
+                                    <i class="bi bi-shield-plus me-1"></i>Provision foreign profile
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                }
+                else if (Model.Client.Customer?.AllowReceiveForeignProfiles != true)
+                {
+                    <div class="card mb-0">
+                        <div class="card-body text-muted small">
+                            <i class="bi bi-lock me-1"></i>
+                            Foreign profile provisioning is not enabled for this customer.
+                            Enable <strong>Allow this customer's clients to receive foreign sidecar profiles</strong>
+                            on the <a asp-page="/Admin/Customers/Details" asp-route-id="@Model.Client.CustomerId">customer settings page</a>.
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="card mb-0">
+                        <div class="card-body text-muted small">
+                            <i class="bi bi-info-circle me-1"></i>
+                            No other customers have enabled sidecar sharing yet.
+                            Enable <strong>Allow other customers' clients to use this sidecar</strong> on the source customer.
+                        </div>
+                    </div>
+                }
+            }
+        }
+        else
+        {
+            <!-- Pro upsell — full tab for External / OSS customers -->
+            <div class="row justify-content-center">
+                <div class="col-lg-8">
+                    <div class="card border-0" style="background: linear-gradient(135deg,#f0f4ff 0%,#e8eeff 100%);">
+                        <div class="card-body py-5 text-center">
+                            <i class="bi bi-shield-lock-fill mb-3 d-block" style="font-size:3rem;color:var(--brand-primary);"></i>
+                            <h5 class="fw-bold mb-2" style="color:var(--brand-primary);">Valenius WireGuard® Pro — Integrated server</h5>
+                            <p class="text-muted mb-4 mx-auto" style="max-width:520px;">
+                                This customer uses an external WireGuard® server, so there is no integrated peer to manage here.
+                                Switch the customer to <strong>Valenius</strong> server mode (Pro) to provision peers, allocate
+                                VPN IPs, gate sessions with MFA, and push encrypted configs directly to clients — no manual key exchange.
+                            </p>
+                            <ul class="list-unstyled small text-start text-muted mb-4 d-inline-block">
+                                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Auto key generation (X25519) &amp; dynamic VPN IP allocation</li>
+                                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Encrypted config delivery (DPAPI) &amp; automatic renewal</li>
+                                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Per-connection or timed MFA session gating</li>
+                                <li><i class="bi bi-check-circle-fill text-success me-2"></i>mTLS-secured sidecar management</li>
+                            </ul>
+                            <div>
+                                <a href="https://stranto.com/valenius" target="_blank" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Learn more about Pro
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+    </div>
+
+    <!-- ================================================================
+         TAB 4 — VPN  (connection behavior & external profiles)
+    ================================================================ -->
+    <div class="tab-pane fade" id="tab-vpn" role="tabpanel">
+        <div class="row g-3">
+
+            <!-- Left column — connection behavior -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-wifi me-1"></i>Connection</div>
+
+                <!-- Auto Connect -->
+                <div class="card mb-0">
+                    <div class="card-header"><i class="bi bi-wifi me-2"></i>Auto Connect</div>
+                    <div class="card-body">
+                        @if (_isAdmin)
+                        {
+                            <form method="post" asp-page-handler="ToggleAutoConnect" class="mb-3">
+                                <input type="hidden" name="id" value="@Model.Client.Id" />
+                                @if (Model.Client.AutoConnectEnabled)
+                                {
+                                    <p class="small text-muted mb-2">Auto Connect is <strong class="text-success">enabled</strong> — the client connects automatically outside trusted networks.</p>
+                                    <button type="submit" class="btn btn-danger btn-sm w-100">
+                                        <i class="bi bi-wifi-off me-1"></i>Disable Auto Connect
+                                    </button>
+                                }
+                                else
+                                {
+                                    <p class="small text-muted mb-2">Auto Connect is <strong class="text-warning">disabled</strong>.</p>
+                                    <button type="submit" class="btn btn-success btn-sm w-100">
+                                        <i class="bi bi-wifi me-1"></i>Enable Auto Connect
+                                    </button>
+                                }
+                            </form>
+
+                            <hr class="my-3" />
+
+                            <form method="post" asp-page-handler="SaveAutoConnect">
+                                <input type="hidden" name="id" value="@Model.Client.Id" />
+                                <input type="hidden" name="autoConnectEnabled" value="@Model.Client.AutoConnectEnabled.ToString().ToLower()" />
+                                <label class="form-label small fw-semibold">
+                                    Profile <span class="text-muted fw-normal">(optional)</span>
+                                </label>
+                                @if (Model.KnownProfiles.Any())
+                                {
+                                    <select name="autoConnectProfileName" class="form-select form-select-sm mb-2">
+                                        <option value="">— first available —</option>
+                                        @foreach (var p in Model.KnownProfiles)
+                                        {
+                                            <option value="@p" selected="@(Model.Client.AutoConnectProfileName == p ? "selected" : null)">@p</option>
+                                        }
+                                    </select>
+                                }
+                                else
+                                {
+                                    <input type="text" name="autoConnectProfileName" class="form-control form-control-sm mb-2"
+                                           value="@Model.Client.AutoConnectProfileName"
+                                           placeholder="e.g. Office_VPN" maxlength="50"
+                                           pattern="[A-Za-z0-9_\-]*" title="Letters, digits, underscores and hyphens only" />
+                                    <div class="form-text text-warning mb-2">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>No profiles known yet.
+                                    </div>
+                                }
+                                <div class="form-text mb-2">Profile to activate outside trusted networks.</div>
+                                <button type="submit" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-floppy me-1"></i>Save profile
+                                </button>
+                            </form>
+                        }
+                        else
+                        {
+                            <dl class="readonly-field row mb-0">
+                                <dt class="col-6">Status</dt>
+                                <dd class="col-6">@(Model.Client.AutoConnectEnabled ? "Enabled" : "Disabled")</dd>
+                                <dt class="col-6">Profile</dt>
+                                <dd class="col-6">@(string.IsNullOrEmpty(Model.Client.AutoConnectProfileName) ? "first available" : Model.Client.AutoConnectProfileName)</dd>
+                            </dl>
+                            <div class="form-text mt-2">Only an administrator can change Auto Connect.</div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right column — External profiles -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-key me-1"></i>External WireGuard® server profiles</div>
+
+                <!-- Upload config -->
+                @if (_externalEnabled)
+                {
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-file-earmark-arrow-up me-2"></i>Upload config</div>
+                    <div class="card-body">
+                        @if (Model.Client.PendingConfigFileName != null)
+                        {
+                            <div class="alert alert-warning py-2 small mb-3">
+                                <i class="bi bi-hourglass-split me-1"></i>
+                                Pending delivery: profile <strong>@Model.Client.PendingConfigFileName</strong><br>
+                                Will be installed on the client within 5 minutes.
+                            </div>
+                        }
+                        <form method="post" asp-page-handler="UploadConfig" enctype="multipart/form-data">
+                            <input type="hidden" name="id" value="@Model.Client.Id" />
+                            <div class="mb-2">
+                                <label class="form-label small fw-semibold mb-1">Profile name</label>
+                                <input type="text" name="profileName" class="form-control form-control-sm"
+                                       placeholder="e.g. Office_VPN" maxlength="50" required
+                                       pattern="[A-Za-z0-9_\-]+" title="Letters, digits, underscores and hyphens only" />
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small fw-semibold mb-1">.conf file</label>
+                                <input type="file" name="configFile" accept=".conf" class="form-control form-control-sm" required />
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm w-100">
+                                <i class="bi bi-cloud-upload me-1"></i>Upload config
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                }
+                else
+                {
+                <div class="card mb-3">
+                    <div class="card-body text-muted small">
+                        <i class="bi bi-lock me-1"></i>External WireGuard® server is disabled for this customer — config upload is not available.
+                    </div>
+                </div>
+                }
+
+                @if (Model.KnownProfiles.Any())
+                {
+                    <!-- VPN profiles -->
+                    <div class="card mb-0">
+                        <div class="card-header"><i class="bi bi-key me-2"></i>VPN profiles</div>
+                        <table class="table table-sm mb-0">
+                            <tbody>
+                                @foreach (var p in Model.KnownProfiles)
+                                {
+                                    <tr>
+                                        <td class="small font-monospace align-middle">@p</td>
+                                        <td class="text-end">
+                                            @if (Model.Client.PendingDeleteProfileName == p)
+                                            {
+                                                <span class="badge bg-warning text-dark">
+                                                    <i class="bi bi-hourglass-split me-1"></i>Pending deletion
+                                                </span>
+                                            }
+                                            else if (_isAdmin)
+                                            {
+                                                <form id="formDeleteProfile-@p" method="post" asp-page-handler="DeleteProfile" style="display:none;">
+                                                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                                                    <input type="hidden" name="profileName" value="@p" />
+                                                </form>
+                                                <button type="button" class="btn btn-xs btn-outline-danger"
+                                                        style="font-size:.75rem;padding:.15rem .5rem;"
+                                                        data-bs-toggle="modal" data-bs-target="#modalDeleteProfile"
+                                                        data-profile-name="@p"
+                                                        data-form-id="formDeleteProfile-@p">
+                                                    <i class="bi bi-trash me-1"></i>Delete
+                                                </button>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+         TAB 5 — HISTORY (all, paged)
+    ================================================================ -->
+    <div class="tab-pane fade" id="tab-history" role="tabpanel">
+
+        <div class="card mb-3">
+            <div class="card-header"><i class="bi bi-graph-up me-2"></i>WireGuard traffic</div>
+            <div class="card-body traffic-auto" data-traffic-url="?handler=Traffic&id=@Model.Client.Id">
+                <div class="d-flex justify-content-end mb-3">
+                    <partial name="_TrafficRangeSelector" />
+                </div>
+                <div class="row g-3 mb-3">
+                    <div class="col-4">
+                        <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Total usage</div>
+                        <div class="fs-4 fw-semibold" data-tf="total">@TrafficFormat.Bytes(Model.TrafficRx + Model.TrafficTx)</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="text-muted small text-uppercase" style="letter-spacing:.03em">
+                            <span style="color:#2563eb">&#9679;</span> Downloaded
+                        </div>
+                        <div class="fs-5 fw-semibold" data-tf="rx">@TrafficFormat.Bytes(Model.TrafficRx)</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="text-muted small text-uppercase" style="letter-spacing:.03em">
+                            <span style="color:#d97706">&#9679;</span> Uploaded
+                        </div>
+                        <div class="fs-5 fw-semibold" data-tf="tx">@TrafficFormat.Bytes(Model.TrafficTx)</div>
+                    </div>
+                </div>
+                <div data-tf="chart">@Html.Raw(TrafficChart.Render(Model.TrafficBuckets, Valenius.Backend.Services.TrafficRange.Default))</div>
+                <p class="small text-muted mt-2 mb-0">
+                    Lifetime totals since first sampled; the chart shows download/upload over the selected time frame.
+                    Traffic accounting requires the integrated Valenius server (sidecar).
+                </p>
+            </div>
+        </div>
+
+        @if (!Model.Logs.Any())
+        {
+            <p class="text-muted small mb-0">No events recorded yet.</p>
+        }
+        else
+        {
+            <div class="d-flex align-items-center justify-content-between mb-2" id="histPagingTop">
+                <div class="d-flex align-items-center gap-2">
+                    <button id="histPrev" class="btn btn-sm btn-outline-secondary" disabled>
+                        <i class="bi bi-chevron-left"></i> Prev
+                    </button>
+                    <span id="histPageInfo" class="small text-muted"></span>
+                    <button id="histNext" class="btn btn-sm btn-outline-secondary">
+                        Next <i class="bi bi-chevron-right"></i>
+                    </button>
+                </div>
+                <span class="small text-muted">
+                    @Model.Logs.Count@(Model.Logs.Count >= 500 ? "+" : "") entries total
+                </span>
+            </div>
+
+            <table class="table table-sm mb-2">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Event</th>
+                        <th>User</th>
+                        <th>Tunnel</th>
+                        <th>LAN IP</th>
+                        <th>WAN IP</th>
+                    </tr>
+                </thead>
+                <tbody id="historyTableBody">
+                    @foreach (var log in Model.Logs)
+                    {
+                        <tr>
+                            <td class="text-muted small">@log.OccurredAt.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")</td>
+                            <td>
+                                @if (log.EventType == "Connect")
+                                {
+                                    <span class="badge bg-success"><i class="bi bi-plug-fill me-1"></i>Connect</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-secondary"><i class="bi bi-plug me-1"></i>Disconnect</span>
+                                }
+                            </td>
+                            <td class="small">@log.Username</td>
+                            <td class="small text-muted">@log.TunnelName</td>
+                            <td class="small text-muted">@(string.IsNullOrEmpty(log.LanIp) ? "-" : log.LanIp)</td>
+                            <td class="small text-muted">@(string.IsNullOrEmpty(log.WanIp) ? "-" : log.WanIp)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <div class="d-flex align-items-center gap-2">
+                <button id="histPrev2" class="btn btn-sm btn-outline-secondary" disabled>
+                    <i class="bi bi-chevron-left"></i> Prev
+                </button>
+                <span id="histPageInfo2" class="small text-muted"></span>
+                <button id="histNext2" class="btn btn-sm btn-outline-secondary">
+                    Next <i class="bi bi-chevron-right"></i>
+                </button>
+            </div>
+        }
+    </div>
+
+    <!-- ================================================================
+         TAB — DIAGNOSTICS
+    ================================================================ -->
+    <div class="tab-pane fade" id="tab-diagnostics" role="tabpanel">
+
+        <div class="card mb-0">
+            <div class="card-header d-flex align-items-center justify-content-between">
+                <span><i class="bi bi-clipboard-data me-2"></i>Diagnostics — client logs</span>
+                <form method="post" asp-page-handler="RequestLogs" asp-route-id="@Model.Client.Id" class="d-inline">
+                    <button type="submit" class="btn btn-sm btn-outline-primary" disabled="@(Model.Client.PendingLogRequest ? "disabled" : null)">
+                        <i class="bi bi-cloud-arrow-up me-1"></i>Request logs
+                    </button>
+                </form>
+            </div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">
+                    Collects a fixed set of <strong>Valenius-only</strong> logs from the client (service/daemon log,
+                    update log, WireGuard tunnel log). Secrets — API key, WireGuard <strong>private keys</strong>,
+                    TOTP secrets, tokens — are <strong>redacted on the client before upload</strong>. No other system
+                    data is collected. The upload is stored here (newest 10 kept) for download.
+                </p>
+                @if (Model.Client.PendingLogRequest)
+                {
+                    <div class="alert alert-info py-2 small mb-2">
+                        <i class="bi bi-hourglass-split me-1"></i>Requested — the client will upload on its next check-in.
+                    </div>
+                }
+                @if (!Model.LogBundles.Any())
+                {
+                    <p class="text-muted small mb-0">No log bundles uploaded yet.</p>
+                }
+                else
+                {
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr><th>Uploaded</th><th>Trigger</th><th>Size</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var b in Model.LogBundles)
+                            {
+                                <tr>
+                                    <td class="small text-muted">@b.UploadedAt.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")</td>
+                                    <td class="small">
+                                        @if (b.Trigger == "User")
+                                        {
+                                            <span class="badge bg-info text-dark">User</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary">Admin</span>
+                                        }
+                                    </td>
+                                    <td class="small text-muted">@($"{b.SizeBytes / 1024.0:0.#} KB")</td>
+                                    <td class="text-end">
+                                        <a class="btn btn-sm btn-outline-secondary me-1"
+                                           asp-page-handler="DownloadLog" asp-route-id="@Model.Client.Id" asp-route-bundleId="@b.Id">
+                                            <i class="bi bi-download me-1"></i>Download
+                                        </a>
+                                        <form method="post" asp-page-handler="DeleteLog" asp-route-id="@Model.Client.Id"
+                                              asp-route-bundleId="@b.Id" class="d-inline"
+                                              onsubmit="return confirm('Delete this log bundle?');">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+            </div>
+        </div>
+
+    </div>
+
+</div>
+
+<!-- ── Modals ──────────────────────────────────────────────────────────── -->
+
+<div class="modal fade" id="modalReprovision" tabindex="-1" aria-labelledby="modalReprovisionLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalReprovisionLabel">
+                    <i class="bi bi-arrow-repeat me-2 text-primary"></i>Re-provision peer
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Re-register <strong>@Model.Client.EffectiveName</strong> on the WireGuard® server and push a fresh configuration to the client.</p>
+                <p class="small text-muted mb-0"><i class="bi bi-info-circle me-1"></i>Existing keys and VPN IP address are preserved.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary btn-sm"
+                        onclick="document.getElementById('formReprovision').submit()">
+                    <i class="bi bi-arrow-repeat me-1"></i>Re-provision
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="modalUnprovision" tabindex="-1" aria-labelledby="modalUnprovisionLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalUnprovisionLabel">
+                    <i class="bi bi-shield-x me-2 text-danger"></i>Unprovision peer
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Remove the Valenius WireGuard® peer for <strong>@Model.Client.EffectiveName</strong> from the server.</p>
+                <ul class="small text-muted mb-0 ps-3">
+                    <li>The peer is removed from the WireGuard® server via the sidecar.</li>
+                    <li>VPN keys and IP address are cleared from the database.</li>
+                    <li>The VPN profile on the client machine will be deleted on the next heartbeat.</li>
+                </ul>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger btn-sm"
+                        onclick="document.getElementById('formUnprovision').submit()">
+                    <i class="bi bi-shield-x me-1"></i>Unprovision
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(Model.Client.WgPublicKey))
+{
+    <div class="modal fade" id="modalAssignCustomer" tabindex="-1" aria-labelledby="modalAssignCustomerLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalAssignCustomerLabel">
+                        <i class="bi bi-exclamation-triangle me-2 text-warning"></i>Change customer
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="mb-2"><strong>@Model.Client.EffectiveName</strong> has an active Valenius WireGuard® peer.</p>
+                    <p class="small text-muted mb-1">Changing the customer will:</p>
+                    <ul class="small text-muted mb-0 ps-3">
+                        <li>Remove the peer from the current WireGuard® server.</li>
+                        <li>Clear the VPN keys and IP address from the database.</li>
+                        <li>Require re-provisioning under the new customer.</li>
+                    </ul>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-warning btn-sm"
+                            onclick="document.getElementById('formAssignCustomer').submit()">
+                        <i class="bi bi-link me-1"></i>Change customer
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+<div class="modal fade" id="modalDeleteClient" tabindex="-1" aria-labelledby="modalDeleteClientLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalDeleteClientLabel">
+                    <i class="bi bi-trash me-2 text-danger"></i>Delete client
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Delete <strong>@Model.Client.EffectiveName</strong>?</p>
+                <p class="small text-muted mb-0">The machine will need to re-register and be re-activated. This cannot be undone.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger btn-sm"
+                        onclick="document.getElementById('formDeleteClient').submit()">
+                    <i class="bi bi-trash me-1"></i>Delete client
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (Model.GeneratedConfigQr is not null)
+{
+    <div class="modal fade" id="modalQrCode" tabindex="-1" aria-labelledby="modalQrCodeLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalQrCodeLabel">
+                        <i class="bi bi-qr-code me-2"></i>WireGuard® QR Code
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center py-3">
+                    <img src="data:image/png;base64,@Model.GeneratedConfigQr"
+                         alt="WireGuard® QR code"
+                         style="width:240px;height:240px;image-rendering:pixelated;" />
+                    <p class="text-muted small mt-3 mb-0">
+                        <i class="bi bi-phone me-1"></i>Scan with the WireGuard® mobile app to import this profile
+                    </p>
+                </div>
+                <div class="modal-footer justify-content-between">
+                    <a asp-page-handler="QrPng" class="btn btn-outline-secondary btn-sm">
+                        <i class="bi bi-download me-1"></i>Download PNG
+                    </a>
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@if (Model.GeneratedConfig is not null)
+{
+    <div class="modal fade" id="modalEmailConfig" tabindex="-1" aria-labelledby="modalEmailConfigLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <form method="post" asp-page-handler="SendConfigEmail">
+                    <input type="hidden" name="id" value="@Model.Client.Id" />
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="modalEmailConfigLabel">
+                            <i class="bi bi-envelope me-2"></i>Send config by e-mail
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="small text-muted mb-3">
+                            The recipient will receive the <code>.conf</code> file as an attachment
+                            and the QR code inline in the e-mail body.
+                        </p>
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Recipient e-mail address</label>
+                            <input type="email" name="recipientEmail"
+                                   class="form-control form-control-sm"
+                                   placeholder="user@example.com"
+                                   required autofocus />
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-success btn-sm">
+                            <i class="bi bi-send me-1"></i>Send
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+}
+
+<div class="modal fade" id="modalDeleteProfile" tabindex="-1" aria-labelledby="modalDeleteProfileLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalDeleteProfileLabel">
+                    <i class="bi bi-trash me-2 text-danger"></i>Delete profile
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Delete profile <strong id="modalDeleteProfileName"></strong> from <strong>@Model.Client.EffectiveName</strong>?</p>
+                <p class="small text-muted mb-0"><i class="bi bi-info-circle me-1"></i>The file will be removed on the client within 5 minutes.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" id="btnDeleteProfileConfirm" class="btn btn-danger btn-sm">
+                    <i class="bi bi-trash me-1"></i>Delete profile
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+    // ── Session MFA: warn when switching a Machine peer to a gateable User peer ──
+    function mfaConfirm(form) {
+        var sel = form.querySelector('#mfaPeerType');
+        if (sel && sel.getAttribute('data-current') === 'Machine' && sel.value === 'User') {
+            return confirm('Switching this peer from Machine to User makes it subject to MFA gating. Continue?');
+        }
+        return true;
+    }
+
+    // ── Tab persistence ──────────────────────────────────────────────────────
+    (function () {
+        var key = 'detailTab-@Model.Client.Id';
+        var saved = null;
+        try { saved = localStorage.getItem(key); } catch (e) {}
+        if (saved) {
+            var btn = document.querySelector('#detailTabs [data-bs-target="' + saved + '"]');
+            if (btn) new bootstrap.Tab(btn).show();
+        }
+        document.querySelectorAll('#detailTabs [data-bs-toggle="tab"]').forEach(function (btn) {
+            btn.addEventListener('shown.bs.tab', function (e) {
+                try { localStorage.setItem(key, e.target.getAttribute('data-bs-target')); } catch (x) {}
+            });
+        });
+    })();
+
+    // ── "View all" link from overview tab ────────────────────────────────────
+    var showHistBtn = document.getElementById('showHistoryTabBtn');
+    if (showHistBtn) {
+        showHistBtn.addEventListener('click', function () {
+            var btn = document.querySelector('#detailTabs [data-bs-target="#tab-history"]');
+            if (btn) new bootstrap.Tab(btn).show();
+        });
+    }
+
+    // ── History pagination ───────────────────────────────────────────────────
+    (function () {
+        var tbody = document.getElementById('historyTableBody');
+        if (!tbody) return;
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        if (rows.length === 0) return;
+        var pageSize = 25;
+        var currentPage = 1;
+        var totalPages = Math.ceil(rows.length / pageSize);
+
+        function showPage(page) {
+            rows.forEach(function (row, i) {
+                row.style.display = (i >= (page - 1) * pageSize && i < page * pageSize) ? '' : 'none';
+            });
+            var info = 'Page ' + page + ' of ' + totalPages;
+            document.getElementById('histPageInfo').textContent  = info;
+            document.getElementById('histPageInfo2').textContent = info;
+            document.getElementById('histPrev').disabled  = page <= 1;
+            document.getElementById('histPrev2').disabled = page <= 1;
+            document.getElementById('histNext').disabled  = page >= totalPages;
+            document.getElementById('histNext2').disabled = page >= totalPages;
+            currentPage = page;
+        }
+
+        document.getElementById('histPrev').addEventListener('click',  function () { if (currentPage > 1)           showPage(currentPage - 1); });
+        document.getElementById('histNext').addEventListener('click',  function () { if (currentPage < totalPages)   showPage(currentPage + 1); });
+        document.getElementById('histPrev2').addEventListener('click', function () { if (currentPage > 1)           showPage(currentPage - 1); });
+        document.getElementById('histNext2').addEventListener('click', function () { if (currentPage < totalPages)   showPage(currentPage + 1); });
+
+        showPage(1);
+    })();
+
+    // ── Delete profile modal ─────────────────────────────────────────────────
+    (function () {
+        var profileModal = document.getElementById('modalDeleteProfile');
+        if (!profileModal) return;
+        profileModal.addEventListener('show.bs.modal', function (e) {
+            var btn = e.relatedTarget;
+            document.getElementById('modalDeleteProfileName').textContent = btn.getAttribute('data-profile-name');
+            document.getElementById('btnDeleteProfileConfirm').setAttribute('data-form-id', btn.getAttribute('data-form-id'));
+        });
+        document.getElementById('btnDeleteProfileConfirm').addEventListener('click', function () {
+            document.getElementById(this.getAttribute('data-form-id')).submit();
+        });
+    })();
+
+    // ── Generated config ─────────────────────────────────────────────────────
+    var _rawConfig = document.getElementById('configPre') ? document.getElementById('configPre').textContent : null;
+
+    function togglePrivateKey(show) {
+        var pre = document.getElementById('configPre');
+        if (!pre || !_rawConfig) return;
+        pre.textContent = show ? _rawConfig : _rawConfig.replace(/(PrivateKey\s*=\s*)(\S+)/g, '$1<hidden>');
+    }
+
+    function copyConfig() {
+        if (!_rawConfig) return;
+        navigator.clipboard.writeText(_rawConfig).then(function () {
+            var btn = document.getElementById('btnCopyConfig');
+            var orig = btn.innerHTML;
+            btn.innerHTML = '<i class="bi bi-clipboard-check me-1"></i>Copied';
+            setTimeout(function () { btn.innerHTML = orig; }, 1500);
+        });
+    }
+
+    if (document.getElementById('configPre')) togglePrivateKey(false);
+</script>
+}

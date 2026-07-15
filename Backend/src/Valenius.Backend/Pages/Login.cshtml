@@ -1,0 +1,194 @@
+@page
+@model Valenius.Backend.Pages.LoginModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign in — Valenius</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <link rel="stylesheet" href="/lib/inter/inter.css" />
+    <link rel="stylesheet" href="/lib/bootstrap/5.3.3/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/lib/bootstrap-icons/1.11.3/bootstrap-icons.min.css" />
+    <style>
+        :root {
+            --brand-primary:      #0F4E66;
+            --brand-primary-dark: #0a3a4d;
+            --brand-accent:       #1DABDA;
+        }
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            font-size: .9rem;
+            background: #f0f4f8;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem 1rem;
+        }
+        .login-wrap { width: 100%; max-width: 400px; }
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: .75rem;
+            margin-bottom: 2rem;
+            text-decoration: none;
+        }
+        .brand img { width: 40px; height: 40px; border-radius: 9px; }
+        .brand-name {
+            font-weight: 700;
+            font-size: 1.15rem;
+            color: var(--brand-primary);
+            letter-spacing: -.01em;
+        }
+        .card {
+            border: 1px solid #e0e8ef;
+            border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,.07);
+            background: #fff;
+        }
+        .card-body { padding: 1.75rem; }
+        .card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--brand-primary);
+            margin-bottom: 1.5rem;
+        }
+        .divider {
+            display: flex;
+            align-items: center;
+            gap: .75rem;
+            color: #adb5bd;
+            font-size: .78rem;
+            margin: 1.25rem 0;
+        }
+        .divider::before, .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #e8ecf0;
+        }
+        .btn-primary { background: var(--brand-primary); border-color: var(--brand-primary); font-weight: 500; border-radius: 7px; }
+        .btn-primary:hover { background: var(--brand-primary-dark); border-color: var(--brand-primary-dark); }
+        .btn-outline-primary { color: var(--brand-primary); border-color: var(--brand-primary); font-weight: 500; border-radius: 7px; }
+        .btn-outline-primary:hover { background: var(--brand-primary); color: #fff; }
+        .company-logo { height: 22px; opacity: .6; margin-top: 1.5rem; display: block; margin-left: auto; margin-right: auto; }
+    </style>
+</head>
+<body>
+<div class="login-wrap">
+
+    <a class="brand" href="/">
+        <img src="/img/app.png" alt="Valenius" />
+        <span class="brand-name">Valenius</span>
+    </a>
+
+    <div class="card">
+        <div class="card-body">
+            <div class="card-title">
+                @if (Model.IsTotpStep)
+                {
+                    <i class="bi bi-phone me-2"></i>@:Two-factor authentication
+                }
+                else
+                {
+                    @:Sign in
+                }
+            </div>
+
+            @if (!string.IsNullOrEmpty(Model.Error))
+            {
+                <div class="alert alert-danger py-2 mb-3" role="alert">
+                    <i class="bi bi-exclamation-circle me-1"></i>@Model.Error
+                </div>
+            }
+
+            @* ── TOTP challenge ── *@
+            @if (Model.IsTotpStep)
+            {
+                <p class="small text-muted mb-3">
+                    Open your authenticator app and enter the 6-digit code.
+                </p>
+                <form method="post" asp-page-handler="Totp">
+                    <input type="hidden" name="returnUrl" value="@Model.ReturnUrl" />
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Authenticator code</label>
+                        <input type="text" name="code" class="form-control form-control-sm text-center"
+                               inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                               autocomplete="one-time-code" autofocus required
+                               placeholder="000000" style="letter-spacing:.3em;font-size:1.2rem;" />
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm w-100">
+                        <i class="bi bi-shield-check me-1"></i>Verify
+                    </button>
+                </form>
+                <div class="mt-3 text-center">
+                    <a href="/login?returnUrl=@Uri.EscapeDataString(Model.ReturnUrl)" class="small text-muted">
+                        <i class="bi bi-arrow-left me-1"></i>Back to sign in
+                    </a>
+                </div>
+            }
+
+            @* ── Local login form ── *@
+            @if (!Model.IsTotpStep && Model.LocalAuthEnabled)
+            {
+                <form method="post" asp-page-handler="Local">
+                    <input type="hidden" name="returnUrl" value="@Model.ReturnUrl" />
+
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Email</label>
+                        <input type="email" name="email" class="form-control form-control-sm"
+                               value="@Model.Email" autocomplete="email" autofocus required />
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Password</label>
+                        <input type="password" name="password" class="form-control form-control-sm"
+                               autocomplete="current-password" required />
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-sm w-100">
+                        <i class="bi bi-box-arrow-in-right me-1"></i>Sign in
+                    </button>
+                </form>
+            }
+
+            @* ── OIDC button ── *@
+            @if (!Model.IsTotpStep && Model.OidcEnabled && Model.LocalAuthEnabled)
+            {
+                <div class="divider">or</div>
+            }
+            @if (!Model.IsTotpStep && Model.OidcEnabled)
+            {
+                <form method="post" asp-page-handler="Oidc">
+                    <input type="hidden" name="returnUrl" value="@Model.ReturnUrl" />
+                    <button type="submit" class="btn btn-outline-primary btn-sm w-100">
+                        <i class="bi bi-shield-lock me-1"></i>Continue with Authentik
+                    </button>
+                </form>
+            }
+
+            @* Edge-case: both disabled (should not happen in practice) *@
+            @if (!Model.IsTotpStep && !Model.OidcEnabled && !Model.LocalAuthEnabled)
+            {
+                <div class="alert alert-warning py-2 mb-0">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    No authentication method is enabled. Please contact an administrator.
+                </div>
+            }
+
+        </div>
+    </div>
+
+    <img src="/img/stranto-logo.png" alt="Stranto Business Solutions GmbH" class="company-logo" />
+</div>
+
+<script src="/lib/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

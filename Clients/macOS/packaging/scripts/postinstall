@@ -1,0 +1,38 @@
+#!/bin/bash
+# pkg postinstall — (re)register the LaunchDaemon + LaunchAgent and (re)launch both processes.
+# Runs as root during `installer -pkg`. This is the step that brings the fleet back up after an
+# auto-update, so it must be idempotent and must relaunch even when nothing was running before.
+
+set -u
+SUPPORT="/Library/Application Support/Valenius"
+DAEMON_LABEL="com.stranto.valenius.daemon"
+APP_LABEL="com.stranto.valenius.app"
+DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+AGENT_PLIST="/Library/LaunchAgents/${APP_LABEL}.plist"
+
+# Seed the config template on first install only — never clobber an admin-edited appsettings.json
+# (which holds the BackendUrl + install-time ApiKey). Mirrors the Linux/Windows install behaviour.
+mkdir -p "$SUPPORT"
+chmod 700 "$SUPPORT"
+if [ ! -f "${SUPPORT}/appsettings.json" ] && [ -f "${SUPPORT}/appsettings.json.example" ]; then
+    cp "${SUPPORT}/appsettings.json.example" "${SUPPORT}/appsettings.json"
+    chmod 600 "${SUPPORT}/appsettings.json"
+fi
+
+# Ensure the bundled binaries are executable (pkgbuild preserves modes, but be defensive).
+chmod 755 "${SUPPORT}/bin/valeniusd" "${SUPPORT}/bin/wireguard-go" 2>/dev/null || true
+
+# (Re)bootstrap the daemon in the system domain.
+/bin/launchctl bootout "system/${DAEMON_LABEL}" 2>/dev/null || true
+/bin/launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null || \
+    /bin/launchctl load -w "$DAEMON_PLIST" 2>/dev/null || true
+
+# (Re)load the LaunchAgent + relaunch the app in the console user's GUI session.
+CONSOLE_UID=$(/usr/bin/stat -f%u /dev/console 2>/dev/null)
+if [ -n "$CONSOLE_UID" ] && [ "$CONSOLE_UID" != "0" ]; then
+    /bin/launchctl bootout "gui/${CONSOLE_UID}/${APP_LABEL}" 2>/dev/null || true
+    /bin/launchctl bootstrap "gui/${CONSOLE_UID}" "$AGENT_PLIST" 2>/dev/null || true
+    /bin/launchctl asuser "$CONSOLE_UID" /usr/bin/open -a /Applications/Valenius.app 2>/dev/null || true
+fi
+
+exit 0

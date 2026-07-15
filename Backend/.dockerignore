@@ -1,0 +1,26 @@
+# Build outputs
+**/bin/
+**/obj/
+**/publish/
+
+# Installer artefacts
+installer/output/
+installer/publish/
+installer/wireguard/
+
+# Docker data directory (not part of the image)
+data/
+
+# Secrets and environment files
+.env
+*.env
+
+# IDE and OS noise
+.vs/
+.vscode/
+**/.DS_Store
+**/Thumbs.db
+
+# Documentation
+docs/
+*.md

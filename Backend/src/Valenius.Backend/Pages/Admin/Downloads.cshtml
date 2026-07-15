@@ -1,0 +1,34 @@
+@page
+@model Valenius.Backend.Pages.Admin.DownloadsModel
+@{
+    ViewData["Title"] = "Downloads";
+}
+
+<style>
+    .dl-os-icon { font-size: 2.6rem; line-height: 1; color: var(--brand-primary, #0F4E66); }
+    .dl-card { border: 1px solid #e0e8ef; border-radius: 12px; transition: box-shadow .15s ease, transform .15s ease; }
+    .dl-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.08); transform: translateY(-2px); }
+</style>
+
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div>
+        <h1 class="h4 mb-1">Downloads</h1>
+        <p class="text-muted small mb-0">Current published stable installer for each desktop client.</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/downloads" target="_blank" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-box-arrow-up-right me-1"></i>Public page
+        </a>
+        <a href="/Admin/Releases" class="btn btn-outline-primary btn-sm">
+            <i class="bi bi-cloud-upload me-1"></i>Manage releases
+        </a>
+    </div>
+</div>
+
+<partial name="_DownloadsList" model="Model.Items" />
+
+<p class="text-muted small mt-3 mb-0">
+    Share the public download page: <a href="/downloads" target="_blank">@Model.PublicUrl</a> —
+    it lists these same stable installers and needs no login. Beta channels and version history are
+    on <a href="/Admin/Releases">Releases</a>.
+</p>

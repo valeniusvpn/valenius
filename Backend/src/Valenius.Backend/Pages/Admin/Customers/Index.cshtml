@@ -1,0 +1,92 @@
+@page
+@model Valenius.Backend.Pages.Admin.Customers.IndexModel
+@{
+    ViewData["Title"] = "Customer Management";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="page-title mb-0">Customers</h1>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-8">
+        @if (!Model.Customers.Any())
+        {
+            <div class="alert alert-info d-flex align-items-center gap-2">
+                <i class="bi bi-info-circle-fill"></i>
+                No customers yet. Create one using the form on the right.
+            </div>
+        }
+        else
+        {
+            <div class="card">
+                <table class="table table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th><i class="bi bi-building me-1"></i>Name</th>
+                            <th><i class="bi bi-filter me-1"></i>Prefix</th>
+                            <th><i class="bi bi-pc-display me-1"></i>Clients</th>
+                            <th><i class="bi bi-people me-1"></i>Users</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var c in Model.Customers)
+                        {
+                            <tr>
+                                <td class="fw-semibold">@c.Name</td>
+                                <td>
+                                    @if (c.ClientPrefix != null)
+                                    {
+                                        <code class="small">@c.ClientPrefix</code>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">-</span>
+                                    }
+                                </td>
+                                <td><span class="badge bg-secondary">@c.ClientCount</span></td>
+                                <td><span class="badge bg-secondary">@c.UserCount</span></td>
+                                <td class="text-end">
+                                    <a asp-page="./Details" asp-route-id="@c.Id"
+                                       class="btn btn-sm btn-outline-primary">
+                                        <i class="bi bi-eye me-1"></i>Details
+                                    </a>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-plus-circle me-2"></i>New customer</div>
+            <div class="card-body">
+                <form method="post" asp-page-handler="Create">
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Name</label>
+                        <input type="text" name="name" class="form-control form-control-sm"
+                               placeholder="Customer name" required maxlength="200" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Client prefix <span class="text-muted fw-normal">(max 3 chars)</span></label>
+                        <input type="text" name="clientPrefix" class="form-control form-control-sm"
+                               placeholder="e.g. ABC" maxlength="3" style="text-transform:uppercase;" />
+                        <div class="form-text">New clients whose hostname starts with this prefix are assigned automatically.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Notes</label>
+                        <textarea name="notes" class="form-control form-control-sm" rows="2"
+                                  placeholder="Optional notes..." maxlength="500"></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm w-100">
+                        <i class="bi bi-plus-lg me-1"></i>Create customer
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,35 @@
+#!/bin/sh
+set -e
+
+# Only tear down on a genuine removal. On upgrade ($1 = "upgrade") do NOTHING: the old
+# daemon keeps running during unpack and the new postinst restarts it into the new
+# version. Previously this stopped AND disabled the service on every upgrade too, so if
+# the (detached) dpkg self-update run was interrupted the service was left disabled and
+# dead -- and disabling it here is pointless churn on an ordinary upgrade anyway.
+case "${1:-}" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop valenius.service || true
+            systemctl disable valenius.service || true
+            systemctl daemon-reload
+        fi
+
+        rm -f /etc/xdg/autostart/valenius-tray.desktop
+
+        if [ -f /etc/NetworkManager/conf.d/91-valenius-wireguard-unmanaged.conf ]; then
+            rm -f /etc/NetworkManager/conf.d/91-valenius-wireguard-unmanaged.conf
+            if command -v nmcli >/dev/null 2>&1; then
+                nmcli general reload conf 2>/dev/null || true
+            fi
+        fi
+
+        # Re-enable the distro wg-quick AppArmor profile that postinst disabled --
+        # return the system to stock.
+        if [ -L /etc/apparmor.d/disable/wg-quick ]; then
+            rm -f /etc/apparmor.d/disable/wg-quick
+            if command -v apparmor_parser >/dev/null 2>&1 && [ -f /etc/apparmor.d/wg-quick ]; then
+                apparmor_parser -r /etc/apparmor.d/wg-quick 2>/dev/null || true
+            fi
+        fi
+        ;;
+esac

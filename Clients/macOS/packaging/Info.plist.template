@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Valenius</string>
+    <key>CFBundleDisplayName</key>
+    <string>Valenius</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.stranto.valenius.app</string>
+    <key>CFBundleExecutable</key>
+    <string>ValeniusApp</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Menu bar agent: no Dock icon, no app menu. Belt-and-suspenders with the code's
+         NSApp.setActivationPolicy(.accessory). -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>© Stranto</string>
+</dict>
+</plist>

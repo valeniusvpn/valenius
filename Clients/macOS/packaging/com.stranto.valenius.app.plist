@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stranto.valenius.app</string>
+
+    <!-- LaunchAgent (per-user, GUI session): starts the menu bar app on login. Installed to
+         /Library/LaunchAgents by the pkg (M7). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Valenius.app/Contents/MacOS/ValeniusApp</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- The app owns a single-instance flock; KeepAlive would fight a clean user Quit, so let
+         login (RunAtLoad) and manual relaunch drive it instead. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>

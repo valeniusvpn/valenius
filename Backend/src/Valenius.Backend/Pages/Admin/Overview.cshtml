@@ -1,0 +1,605 @@
+@page
+@model Valenius.Backend.Pages.Admin.OverviewModel
+@using Valenius.Backend.Licensing
+@{
+    ViewData["Title"] = "Overview";
+}
+
+<h1 class="page-title">Overview</h1>
+
+@if (Model.TotalCustomers == 0)
+{
+    <div class="card mb-4 border-0 bg-primary-subtle" id="setupWelcomeCard">
+        <div class="card-body p-4">
+            <div class="d-flex gap-3 align-items-start">
+                <div style="font-size:2.2rem;color:var(--brand-primary);flex-shrink:0;line-height:1;padding-top:.1rem">
+                    <i class="bi bi-rocket-takeoff-fill"></i>
+                </div>
+                <div class="flex-grow-1">
+                    <h5 class="fw-semibold mb-1">Welcome to Valenius</h5>
+                    <p class="text-muted mb-3">
+                        No customers configured yet. Use the setup wizard to create your first customer and connect a WireGuard® sidecar.
+                    </p>
+                    <div class="d-flex gap-2 flex-wrap">
+                        <a asp-page="Setup" class="btn btn-primary">
+                            <i class="bi bi-stars me-1"></i>Start setup wizard
+                        </a>
+                        <button type="button" class="btn btn-outline-secondary" onclick="dismissSetupCard()">
+                            Dismiss
+                        </button>
+                    </div>
+                </div>
+                <button type="button" class="btn-close ms-2" aria-label="Dismiss" onclick="dismissSetupCard()"></button>
+            </div>
+        </div>
+    </div>
+    <script>
+        (function () {
+            if (sessionStorage.getItem('wt-setup-dismissed')) {
+                document.getElementById('setupWelcomeCard').style.display = 'none';
+            }
+        }());
+        function dismissSetupCard() {
+            sessionStorage.setItem('wt-setup-dismissed', '1');
+            document.getElementById('setupWelcomeCard').style.display = 'none';
+        }
+    </script>
+}
+
+<!-- Stat boxes -->
+<div class="row g-3 mb-4" id="statBoxes">
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(15,78,102,.1);color:var(--brand-primary);">
+                    <i class="bi bi-display"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-total">@Model.TotalClients</div>
+                    <div class="stat-label">Total clients</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(25,135,84,.1);color:#198754;">
+                    <i class="bi bi-check-circle-fill"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-active">@Model.ActiveClients</div>
+                    <div class="stat-label">Active</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(255,193,7,.12);color:#cc9900;">
+                    <i class="bi bi-clock-history"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-pending">@if (Model.PendingClients > 0) {<a asp-page="Index" asp-route-filter="pending" style="color:inherit;text-decoration:none;">@Model.PendingClients</a>} else {@Model.PendingClients}</div>
+                    <div class="stat-label">Pending</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(13,202,240,.1);color:#0dcaf0;">
+                    <i class="bi bi-wifi"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-online">@Model.OnlineClients</div>
+                    <div class="stat-label">Heartbeat online</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(111,66,193,.1);color:#6f42c1;">
+                    <i class="bi bi-shield-fill-check"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-wgactive">—</div>
+                    <div class="stat-label">WG tunnels active</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(15,78,102,.08);color:var(--brand-primary);">
+                    <i class="bi bi-building"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-customers">@Model.TotalCustomers</div>
+                    <div class="stat-label">Customers</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                    <span class="stat-label">Client versions</span>
+                    <a href="/Admin/Downloads" class="text-decoration-none" title="Downloads">
+                        <i class="bi bi-box-arrow-down"></i>
+                    </a>
+                </div>
+                <ul class="list-unstyled mb-0 small">
+                    @foreach (var d in Model.ClientDownloads)
+                    {
+                        <li class="d-flex align-items-center justify-content-between py-1">
+                            <span class="text-muted"><i class="bi @d.Icon me-1"></i>@d.Label</span>
+                            <span class="fw-semibold">@(d.Version ?? "—")</span>
+                        </li>
+                    }
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-3">
+        <div class="card h-100 stat-card">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="stat-icon-wrap" style="background:rgba(108,117,125,.1);color:#6c757d;">
+                    <i class="bi bi-safe2"></i>
+                </div>
+                <div>
+                    <div class="stat-value" id="stat-backup" style="font-size:1rem;">
+                        @(Model.LastBackupAt.HasValue ? Model.LastBackupAt.Value.ToVienna().ToString("dd.MM.yyyy HH:mm") : "Never")
+                    </div>
+                    <div class="stat-label">Last backup</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Fleet traffic -->
+<div class="card mb-4">
+    <div class="card-header"><i class="bi bi-graph-up me-2"></i>Fleet traffic</div>
+    <div class="card-body traffic-auto" data-traffic-url="?handler=Traffic">
+        <div class="d-flex justify-content-end mb-3">
+            <partial name="_TrafficRangeSelector" />
+        </div>
+        <div class="row g-4">
+            <div class="col-lg-8">
+                <div class="d-flex gap-4 mb-3 flex-wrap">
+                    <div>
+                        <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Total usage</div>
+                        <div class="fs-4 fw-semibold" data-tf="total">@TrafficFormat.Bytes(Model.FleetRx + Model.FleetTx)</div>
+                    </div>
+                    <div>
+                        <div class="text-muted small text-uppercase" style="letter-spacing:.03em">
+                            <span style="color:#2563eb">&#9679;</span> Downloaded
+                        </div>
+                        <div class="fs-5 fw-semibold" data-tf="rx">@TrafficFormat.Bytes(Model.FleetRx)</div>
+                    </div>
+                    <div>
+                        <div class="text-muted small text-uppercase" style="letter-spacing:.03em">
+                            <span style="color:#d97706">&#9679;</span> Uploaded
+                        </div>
+                        <div class="fs-5 fw-semibold" data-tf="tx">@TrafficFormat.Bytes(Model.FleetTx)</div>
+                    </div>
+                </div>
+                <div data-tf="chart">@Html.Raw(TrafficChart.Render(Model.FleetTrafficBuckets, Valenius.Backend.Services.TrafficRange.Default))</div>
+            </div>
+            <div class="col-lg-4">
+                <div class="text-muted small text-uppercase mb-2" style="letter-spacing:.03em">Top talkers</div>
+                @if (!Model.TopTalkers.Any())
+                {
+                    <p class="text-muted small mb-0">No traffic recorded yet — needs the integrated Valenius server (sidecar).</p>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <tbody>
+                                @foreach (var t in Model.TopTalkers)
+                                {
+                                    <tr>
+                                        <td class="text-truncate" style="max-width:170px">
+                                            <a asp-page="/Admin/Details" asp-route-id="@t.Id">@t.Name</a>
+                                        </td>
+                                        <td class="text-end fw-semibold">@TrafficFormat.Bytes(t.Rx + t.Tx)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- License status card -->
+@{
+    var _lic        = Model.License;
+    var _install    = Model.InstallLicense;
+    var (_licBadgeClass, _licBadgeText, _licIcon) = _lic switch
+    {
+        { IsInGracePeriod: true }                        => ("bg-warning text-dark", "Grace period",   "bi-exclamation-triangle-fill"),
+        { IsValid: false, LicenseType: not "community" } => ("bg-danger",            "Expired",        "bi-x-octagon-fill"),
+        { LicenseType: "community" }                     => ("bg-secondary",         "Community",      "bi-people-fill"),
+        _                                                => ("bg-success",            "Valid",          "bi-patch-check-fill"),
+    };
+    var _installBorderClass = _install.Status switch
+    {
+        InstallationLicenseStatus.OssMode => "border-danger",
+        InstallationLicenseStatus.Warning => "border-warning",
+        _ => ""
+    };
+    var _borderClass = _installBorderClass != "" ? _installBorderClass
+                     : _lic.IsInGracePeriod ? "border-warning"
+                     : !_lic.IsValid && _lic.LicenseType != "community" ? "border-danger"
+                     : "";
+    int? _daysUntilOssMode = _install.Status == InstallationLicenseStatus.Warning && _install.LastValidatedAt.HasValue
+        ? Math.Max(0, 90 - (int)(DateTime.UtcNow - _install.LastValidatedAt.Value).TotalDays)
+        : null;
+}
+<div class="card mb-4 @_borderClass">
+    <div class="card-header d-flex align-items-center gap-2">
+        <i class="bi @_licIcon me-1"></i>License
+        <span class="badge @_licBadgeClass ms-1">@_licBadgeText</span>
+        @if (_lic.IsInGracePeriod)
+        {
+            <span class="badge bg-warning text-dark ms-1">@_lic.DaysUntilExpiry day(s) until expiry</span>
+        }
+        @if (_install.Status == InstallationLicenseStatus.Warning)
+        {
+            <span class="badge bg-warning text-dark ms-1"><i class="bi bi-exclamation-triangle-fill me-1"></i>License server unreachable</span>
+            @if (_daysUntilOssMode.HasValue)
+            {
+                <span class="badge bg-warning text-dark ms-1">@_daysUntilOssMode day(s) until OSS mode</span>
+            }
+        }
+        else if (_install.Status == InstallationLicenseStatus.OssMode)
+        {
+            <span class="badge bg-danger ms-1"><i class="bi bi-x-octagon-fill me-1"></i>OSS mode — Pro features disabled</span>
+        }
+    </div>
+    <div class="card-body">
+        <div class="row g-3 align-items-start">
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted mb-1">Licensee</div>
+                <div class="fw-semibold" id="lic-licensee" style="cursor:default;user-select:none;">@_lic.Licensee</div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted mb-1">Type</div>
+                <div class="fw-semibold">@_lic.LicenseType</div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted mb-1">Endpoints</div>
+                <div class="fw-semibold">
+                    @Model.ActiveClients active
+                    @if (_lic.MaxEndpoints >= 0)
+                    {
+                        <span class="text-muted fw-normal">/ @_lic.MaxEndpoints</span>
+                        @if (Model.ActiveClients >= _lic.MaxEndpoints)
+                        {
+                            <span class="badge bg-warning text-dark ms-1 small">limit reached</span>
+                        }
+                    }
+                    else
+                    {
+                        <span class="text-muted fw-normal">/ unlimited</span>
+                    }
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted mb-1">Expiry</div>
+                <div class="fw-semibold">
+                    @if (_lic.ExpiresAt.HasValue)
+                    {
+                        <span class="@(_lic.DaysUntilExpiry < 30 ? "text-warning" : "")">
+                            @_lic.ExpiresAt.Value.ToString("dd.MM.yyyy")
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="text-muted">No expiry</span>
+                    }
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted mb-1">Last license check</div>
+                <div class="fw-semibold">
+                    @if (_install.LastValidatedAt.HasValue)
+                    {
+                        <span id="lic-last-check">@_install.LastValidatedAt.Value.ToVienna().ToString("dd.MM.yyyy HH:mm")</span>
+                    }
+                    else
+                    {
+                        <span id="lic-last-check" class="text-warning">Never</span>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Traffic graph -->
+<div class="card mb-4">
+    <div class="card-header d-flex align-items-center gap-2">
+        <i class="bi bi-activity me-1"></i>
+        <span>VPN Traffic</span>
+        <span class="ms-auto d-flex gap-1">
+            <button class="btn btn-sm btn-outline-secondary window-btn active" data-window="60">1 h</button>
+            <button class="btn btn-sm btn-outline-secondary window-btn" data-window="180">3 h</button>
+            <button class="btn btn-sm btn-outline-secondary window-btn" data-window="360">6 h</button>
+        </span>
+    </div>
+    <div class="card-body" style="position:relative;height:280px;">
+        <canvas id="trafficChart"></canvas>
+        <div id="trafficNoData" class="text-muted small text-center d-none" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);">
+            <i class="bi bi-hourglass-split me-1"></i>Collecting data — first reading arrives in ~60 s
+        </div>
+    </div>
+</div>
+
+<style>
+    .stat-card { transition: box-shadow .15s; }
+    .stat-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+    .stat-icon-wrap {
+        width: 48px; height: 48px;
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+        font-size: 1.4rem;
+    }
+    .stat-value { font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+    .stat-label { font-size: .75rem; color: #6c757d; margin-top: .1rem; }
+    .window-btn.active { background: var(--brand-primary); border-color: var(--brand-primary); color: #fff; }
+</style>
+
+<script src="/lib/chart.js/4.4.3/chart.umd.min.js"></script>
+<script>
+(function () {
+    // ── Config ───────────────────────────────────────────────────────────────
+    var STATS_MS      = 15_000;      // how often to refresh stat boxes (cheap DB read)
+    var TRAFFIC_MS    = 60_000;      // how often to poll sidecars for traffic data
+    var windowMinutes = 60;          // default time window (minutes)
+    var MAX_SNAPSHOTS = 400;         // keep enough for 6 h at 1-min intervals
+
+    // ── Traffic snapshot ring buffer ─────────────────────────────────────────
+    var snapshots = [];   // [{ ts: Date, bytesDown, bytesUp, wgActive }]
+
+    function pushSnapshot(s) {
+        snapshots.push(s);
+        if (snapshots.length > MAX_SNAPSHOTS) snapshots.shift();
+    }
+
+    function snapshotsInWindow() {
+        var cutoff = new Date(Date.now() - windowMinutes * 60_000);
+        return snapshots.filter(function (s) { return s.ts >= cutoff; });
+    }
+
+    // ── Chart setup ──────────────────────────────────────────────────────────
+    var ctx   = document.getElementById('trafficChart').getContext('2d');
+    var noDataEl = document.getElementById('trafficNoData');
+
+    Chart.defaults.font.family = "'Inter', sans-serif";
+    Chart.defaults.font.size   = 11;
+
+    var chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels:   [],
+            datasets: [
+                {
+                    label:           'Download (KB/s)',
+                    data:            [],
+                    borderColor:     '#0d6efd',
+                    backgroundColor: 'rgba(13,110,253,.07)',
+                    fill:            true,
+                    tension:         0.35,
+                    pointRadius:     2,
+                    borderWidth:     2
+                },
+                {
+                    label:           'Upload (KB/s)',
+                    data:            [],
+                    borderColor:     '#198754',
+                    backgroundColor: 'rgba(25,135,84,.07)',
+                    fill:            true,
+                    tension:         0.35,
+                    pointRadius:     2,
+                    borderWidth:     2
+                }
+            ]
+        },
+        options: {
+            responsive:          true,
+            maintainAspectRatio: false,
+            animation:           { duration: 300 },
+            interaction:         { mode: 'index', intersect: false },
+            plugins: {
+                legend: { position: 'top', labels: { boxWidth: 12, padding: 14 } },
+                tooltip: {
+                    callbacks: {
+                        label: function (ctx) {
+                            return ' ' + ctx.dataset.label.split(' ')[0] + ': ' + ctx.parsed.y.toFixed(2) + ' KB/s';
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: { maxTicksLimit: 8, color: '#6c757d' },
+                    grid:  { color: 'rgba(0,0,0,.04)' }
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: '#6c757d',
+                        callback: function (v) { return v.toFixed(1) + ' KB/s'; }
+                    },
+                    grid: { color: 'rgba(0,0,0,.04)' }
+                }
+            }
+        }
+    });
+
+    function rebuildChart() {
+        var win = snapshotsInWindow();
+        if (win.length < 2) {
+            noDataEl.classList.remove('d-none');
+            chart.data.labels   = [];
+            chart.data.datasets[0].data = [];
+            chart.data.datasets[1].data = [];
+            chart.update('none');
+            return;
+        }
+        noDataEl.classList.add('d-none');
+
+        var labels = [], down = [], up = [];
+        for (var i = 1; i < win.length; i++) {
+            var prev = win[i - 1], cur = win[i];
+            var dtSec = (cur.ts - prev.ts) / 1000;
+            if (dtSec <= 0) continue;
+            labels.push(cur.ts.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit', hour12: false }));
+            down.push(((cur.bytesDown - prev.bytesDown) / dtSec / 1024).toFixed(3));
+            up.push(((cur.bytesUp   - prev.bytesUp  ) / dtSec / 1024).toFixed(3));
+        }
+
+        chart.data.labels            = labels;
+        chart.data.datasets[0].data  = down;
+        chart.data.datasets[1].data  = up;
+        chart.update();
+    }
+
+    // ── Stat-box refresh (Stats JSON) ────────────────────────────────────────
+    function refreshStats() {
+        fetch('@Url.Page("Overview", "StatsJson")')
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d) return;
+                setText('stat-total',     d.total);
+                setText('stat-active',    d.active);
+                setPending(d.pending);
+                setText('stat-online',    d.online);
+                setText('stat-customers', d.customers);
+                if (d.wgActive != null) setWgActive(d.wgActive);
+                if (d.lastBackupIso) {
+                    var dt = new Date(d.lastBackupIso);
+                    setText('stat-backup', dt.toLocaleString('de-AT', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12: false }));
+                }
+                if (d.licenseLastCheckedIso) {
+                    var lc = document.getElementById('lic-last-check');
+                    if (lc) {
+                        var dt = new Date(d.licenseLastCheckedIso);
+                        lc.textContent = dt.toLocaleString('de-AT', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12: false });
+                        lc.className = '';
+                    }
+                }
+            })
+            .catch(function () {});
+    }
+
+    // ── Traffic refresh (Traffic JSON) ───────────────────────────────────────
+    function refreshTraffic() {
+        fetch('@Url.Page("Overview", "TrafficJson")')
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d) return;
+                pushSnapshot({
+                    ts:        new Date(d.timestampIso),
+                    bytesDown: d.bytesDown,
+                    bytesUp:   d.bytesUp,
+                    wgActive:  d.wgActive
+                });
+                setWgActive(d.wgActive);
+                rebuildChart();
+            })
+            .catch(function () {});
+    }
+
+    function setText(id, val) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = val;
+    }
+
+    function setPending(val) {
+        var el = document.getElementById('stat-pending');
+        if (!el) return;
+        if (val > 0) {
+            el.innerHTML = '<a href="@Url.Page("Index", new { filter = "pending" })" style="color:inherit;text-decoration:none;">' + val + '</a>';
+        } else {
+            el.textContent = val;
+        }
+    }
+
+    function setWgActive(val) {
+        var el = document.getElementById('stat-wgactive');
+        if (!el) return;
+        if (val > 0) {
+            el.innerHTML = '<a href="@Url.Page("Index", new { filter = "connected" })" style="color:inherit;text-decoration:none;">' + val + '</a>';
+        } else {
+            el.textContent = val;
+        }
+    }
+
+    // ── Time-window buttons ──────────────────────────────────────────────────
+    document.querySelectorAll('.window-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            document.querySelectorAll('.window-btn').forEach(function (b) {
+                b.classList.remove('active');
+            });
+            btn.classList.add('active');
+            windowMinutes = parseInt(btn.dataset.window, 10);
+            rebuildChart();
+        });
+    });
+
+    // ── Initial load + polling ───────────────────────────────────────────────
+    noDataEl.classList.remove('d-none');
+    refreshStats();
+    refreshTraffic();
+    setInterval(refreshStats,   STATS_MS);
+    setInterval(refreshTraffic, TRAFFIC_MS);
+
+    // ── Hidden: double-click licensee name to trigger an on-demand license check ──
+    (function () {
+        var el = document.getElementById('lic-licensee');
+        if (!el) return;
+        var original = el.textContent;
+        el.addEventListener('dblclick', function () {
+            el.textContent = original;
+            fetch('@Url.Page("Overview", "CheckLicense")')
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (!d.reachable) el.textContent = original + ' !';
+                    if (d.lastCheckedIso) {
+                        var lc = document.getElementById('lic-last-check');
+                        if (lc) {
+                            var dt = new Date(d.lastCheckedIso);
+                            lc.textContent = dt.toLocaleString('de-AT', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+                            lc.className = '';
+                        }
+                    }
+                })
+                .catch(function () { el.textContent = original + ' !'; });
+        });
+    }());
+
+}());
+</script>

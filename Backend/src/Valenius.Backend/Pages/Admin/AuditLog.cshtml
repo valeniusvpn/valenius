@@ -1,0 +1,136 @@
+@page
+@model Valenius.Backend.Pages.Admin.AuditLogModel
+@{
+    ViewData["Title"] = "Audit Log";
+
+    string BadgeCss(string cat) => cat switch
+    {
+        "Auth"     => "bg-primary",
+        "Client"   => "bg-success",
+        "Customer" => "bg-info text-dark",
+        "User"     => "bg-warning text-dark",
+        "Settings" => "bg-secondary",
+        "Backup"   => "bg-dark",
+        "Email"    => "bg-secondary",
+        "Release"  => "bg-primary",
+        _          => "bg-secondary"
+    };
+
+    string[] categories = ["All","Auth","Client","Customer","User","Settings","Backup","Email","Release","System"];
+    string[] periods    = ["1h","24h","7d","30d","all"];
+    string   periodLabel(string p) => p switch { "1h"=>"Last hour","24h"=>"Last 24 h","7d"=>"Last 7 days","30d"=>"Last 30 days",_=>"All time" };
+}
+
+<div class="d-flex align-items-center gap-2 mb-4">
+    <i class="bi bi-journal-text text-primary" style="font-size:1.4rem;"></i>
+    <h1 class="page-title mb-0">Audit Log</h1>
+    <span class="badge bg-secondary ms-1">@Model.TotalCount entries</span>
+</div>
+
+@if (TempData["Success"] is string ok)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@ok
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<!-- Filters -->
+<form method="get" class="row g-2 mb-3 align-items-end">
+    <div class="col-sm-auto">
+        <label class="form-label small fw-semibold mb-1">Category</label>
+        <select name="Category" class="form-select form-select-sm" onchange="this.form.submit()">
+            @foreach (var c in categories)
+            {
+                <option value="@c" selected="@(Model.Category == c || (c == "All" && string.IsNullOrEmpty(Model.Category)) ? "selected" : null)">@c</option>
+            }
+        </select>
+    </div>
+    <div class="col-sm-auto">
+        <label class="form-label small fw-semibold mb-1">Period</label>
+        <select name="Period" class="form-select form-select-sm" onchange="this.form.submit()">
+            @foreach (var p in periods)
+            {
+                <option value="@p" selected="@(Model.Period == p ? "selected" : null)">@periodLabel(p)</option>
+            }
+        </select>
+    </div>
+    <div class="col-sm-4">
+        <label class="form-label small fw-semibold mb-1">Search</label>
+        <div class="input-group input-group-sm">
+            <input type="text" name="Search" class="form-control form-control-sm"
+                   value="@Model.Search" placeholder="Actor, target, action…" />
+            <button type="submit" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-search"></i>
+            </button>
+            @if (!string.IsNullOrEmpty(Model.Search))
+            {
+                <a asp-page="AuditLog" asp-route-Category="@Model.Category" asp-route-Period="@Model.Period"
+                   class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-x"></i>
+                </a>
+            }
+        </div>
+    </div>
+    <div class="col-sm-auto ms-sm-auto">
+        <form method="post" asp-page-handler="Clear"
+              onsubmit="return confirm('Clear ALL audit log entries? This cannot be undone.')">
+            <button type="submit" class="btn btn-outline-danger btn-sm">
+                <i class="bi bi-trash me-1"></i>Clear log
+            </button>
+        </form>
+    </div>
+</form>
+
+@if (!Model.Entries.Any())
+{
+    <div class="alert alert-info py-2">
+        <i class="bi bi-info-circle me-1"></i>No entries found for the selected filters.
+    </div>
+}
+else
+{
+    @if (Model.TotalCount > 500)
+    {
+        <div class="alert alert-warning py-2 mb-2">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            Showing the 500 most recent of @Model.TotalCount entries. Use filters to narrow results.
+        </div>
+    }
+
+    <div class="card">
+        <div class="table-responsive">
+            <table class="table table-hover table-sm mb-0" style="font-size:.84rem;">
+                <thead class="table-light">
+                    <tr>
+                        <th style="white-space:nowrap;">Time (Vienna)</th>
+                        <th>Category</th>
+                        <th>Action</th>
+                        <th>Actor</th>
+                        <th>Target</th>
+                        <th>Details</th>
+                        <th>IP</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var e in Model.Entries)
+                    {
+                        <tr>
+                            <td class="text-nowrap text-muted small">
+                                @e.Timestamp.ToVienna().ToString("dd.MM.yyyy HH:mm:ss")
+                            </td>
+                            <td>
+                                <span class="badge @BadgeCss(e.Category)" style="font-size:.7rem;">@e.Category</span>
+                            </td>
+                            <td class="fw-semibold">@e.Action</td>
+                            <td class="text-muted">@e.Actor</td>
+                            <td>@e.Target</td>
+                            <td class="text-muted small">@e.Details</td>
+                            <td class="text-muted small font-monospace">@(e.IpAddress ?? "—")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}

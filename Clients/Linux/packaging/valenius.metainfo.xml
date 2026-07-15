@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo — the ONLY source of logo + developer branding shown by
+  graphical software centers (GNOME Software, KDE Discover) for this .deb.
+  Installed to /usr/share/metainfo/ by build-deb.sh. Validate with:
+      appstreamcli validate valenius.metainfo.xml
+-->
+<component type="desktop-application">
+  <id>com.stranto.Valenius</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+
+  <name>Valenius</name>
+  <summary>WireGuard VPN manager for non-admin users</summary>
+
+  <!-- New AppStream form (software centers >= 0.16) -->
+  <developer id="com.stranto">
+    <name>Stranto Business Solutions GmbH</name>
+  </developer>
+  <!-- Legacy fallback for older software centers -->
+  <developer_name>Stranto Business Solutions GmbH</developer_name>
+
+  <description>
+    <p>
+      Valenius lets regular (non-root) users connect and disconnect a WireGuard
+      VPN managed by an administrator. It includes a system tray applet and a
+      privileged daemon that runs as root to manage the tunnel interface.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">valenius.desktop</launchable>
+  <icon type="stock">valenius</icon>
+
+  <url type="homepage">https://www.valenius.com/</url>
+
+  <categories>
+    <category>Network</category>
+  </categories>
+
+  <content_rating type="oars-1.1" />
+</component>

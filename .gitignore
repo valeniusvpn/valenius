@@ -1,0 +1,40 @@
+# .NET
+**/bin/
+**/obj/
+*.user
+
+# Installer build output (generated; not source)
+Clients/Windows/installer/output/
+Clients/Windows/installer/publish/
+
+# Docker secrets
+.env
+Backend/.env
+Server/.env
+
+# Windows client appsettings (contains BackendUrl — varies per deployment)
+Clients/Windows/src/Valenius.Service/appsettings.json
+
+# Data directories (structure tracked via .gitkeep)
+Backend/data/versions.json
+Backend/data/downloads/*
+!Backend/data/downloads/.gitkeep
+
+# Runtime / OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings (per-machine permission grants; may contain secrets — never commit)
+.claude/settings.local.json
+
+# Visual Studio
+.vs/
+*.suo
+*.sln.docstates
+
+# Go build output
+Server/sidecar/wg-sidecar
+Server/sidecar/sidecar.exe
+
+# Jobs
+jobs/

@@ -1,0 +1,36 @@
+@using Valenius.Backend.Helpers
+@using Valenius.Backend.Services
+@model IReadOnlyList<DownloadItem>
+@*
+    Three-OS (Windows / macOS / Linux) published-stable download cards. Shared by the admin
+    Overview card, /Admin/Downloads, and the public /downloads page. Data comes from
+    ReleaseQuery.PublishedStableDesktopAsync; installer links hit the anonymous /api/download.
+*@
+<div class="row g-3">
+    @foreach (var d in Model)
+    {
+        <div class="col-12 col-md-4">
+            <div class="card h-100 dl-card">
+                <div class="card-body text-center d-flex flex-column">
+                    <div class="dl-os-icon mb-2"><i class="bi @d.Icon"></i></div>
+                    <h5 class="mb-1">@d.Label</h5>
+                    @if (d.HasRelease)
+                    {
+                        <div class="text-muted small mb-3">Version @d.Release!.Version</div>
+                        <a href="@d.DownloadUrl" class="btn btn-primary btn-sm mt-auto">
+                            <i class="bi bi-download me-1"></i>Download
+                        </a>
+                        <div class="text-muted small mt-2">
+                            @TrafficFormat.Bytes(d.Release.SizeBytes) &middot; @d.Release.UploadedAt.ToVienna().ToString("dd.MM.yyyy")
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="text-muted small mb-3">No stable release published</div>
+                        <span class="badge bg-secondary mt-auto align-self-center">Unavailable</span>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+</div>

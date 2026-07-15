@@ -1,0 +1,81 @@
+#!/bin/sh
+set -e
+
+INSTALL_DIR=/usr/lib/valenius
+CONF_DIR=/etc/valenius
+
+# Load the WireGuard kernel module now so the first connect works without a
+# reboot. The modules-load.d drop-in handles subsequent boots; the hardened
+# daemon can't autoload it itself (CAP_NET_ADMIN/CAP_NET_RAW only,
+# NoNewPrivileges=true) -- `ip link add type wireguard` would fail with EPERM
+# "Operation not permitted". No-op if wireguard is built into the kernel.
+modprobe wireguard 2>/dev/null || true
+
+# Create the venv with access to the system GI/GTK/D-Bus/cryptography packages
+# (the app depends on system-provided PyGObject etc., not PyPI wheels).
+python3 -m venv --system-site-packages "$INSTALL_DIR/venv"
+
+# Create config directory with an example settings file if not present
+mkdir -p "$CONF_DIR"
+if [ ! -f "$CONF_DIR/appsettings.json" ]; then
+    cp "$INSTALL_DIR/appsettings.json.example" "$CONF_DIR/appsettings.json"
+    chmod 640 "$CONF_DIR/appsettings.json"
+    echo "Created $CONF_DIR/appsettings.json - edit it to set BackendUrl and ApiKey."
+fi
+
+# Create data directory (holds registration.json, master.key, encrypted configs)
+mkdir -p /var/lib/valenius
+chmod 700 /var/lib/valenius
+
+# Newer Ubuntu (Canonical's 2024 profile) ships an ENFORCING AppArmor profile for
+# wg-quick that transitions to child profiles when it execs ip/wg/nft
+# (`file mrCx /usr/bin/ip`, `file mrpx /usr/bin/wg -> wg`). An AppArmor domain
+# transition is a privilege change, and the daemon runs with NoNewPrivileges=true,
+# so the kernel rejects those execs with EPERM ("Operation not permitted") BEFORE
+# ip/wg run -- every connect then fails with "Failed to start tunnel: ...
+# /usr/bin/ip: Operation not permitted". This can't be patched from the profile's
+# local-override hook (you can't downgrade a Cx exec rule to ix from a local
+# include), and we deliberately keep NoNewPrivileges (it's load-bearing for the
+# daemon hardening). So disable the wg-quick profile entirely where it exists.
+# wg-quick input is already validated by the daemon's config-content allowlist
+# (config_manager.validate_config_content) -- the local-user -> root RCE risk this
+# profile redundantly guarded -- so dropping it does not open a new hole. No-op on
+# systems without AppArmor or without this profile (Debian, older Ubuntu). The
+# disable symlink is the standard, persistent, reboot-safe mechanism (honored by
+# apparmor_parser); prerm removes it and reloads the profile on a real uninstall.
+if [ -f /etc/apparmor.d/wg-quick ] && [ -d /etc/apparmor.d/disable ]; then
+    ln -sf /etc/apparmor.d/wg-quick /etc/apparmor.d/disable/wg-quick
+    if command -v apparmor_parser >/dev/null 2>&1; then
+        apparmor_parser -R /etc/apparmor.d/wg-quick 2>/dev/null || true
+    fi
+fi
+
+# wg-quick fully owns the lifecycle of the tunnels it creates, but NetworkManager
+# still notices the interface appearing/disappearing and tries to "activate" a
+# connection profile for it, which it has none for -- surfacing a spurious desktop
+# toast ("Activation of network connection failed") on disconnect even though the
+# teardown itself succeeded. Telling NM to never manage wireguard-type devices at
+# all stops it from interfering. No-op if NetworkManager isn't installed.
+if [ -d /etc/NetworkManager/conf.d ]; then
+    cat > /etc/NetworkManager/conf.d/91-valenius-wireguard-unmanaged.conf <<'EOF'
+[keyfile]
+unmanaged-devices=type:wireguard
+EOF
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli general reload conf 2>/dev/null || true
+    fi
+fi
+
+# Enable and (re)start the systemd service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable valenius.service
+    systemctl restart valenius.service
+fi
+
+# Install XDG autostart entry so the tray launches for every user on login
+cp "$INSTALL_DIR/valenius-tray.desktop" /etc/xdg/autostart/
+
+echo "Valenius installed."
+echo "Edit $CONF_DIR/appsettings.json with your BackendUrl and ApiKey, then:"
+echo "  sudo systemctl restart valenius"

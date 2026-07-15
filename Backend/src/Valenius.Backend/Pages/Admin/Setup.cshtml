@@ -1,0 +1,362 @@
+@page
+@model Valenius.Backend.Pages.Admin.SetupModel
+@{
+    ViewData["Title"] = "Setup Wizard";
+    var activeStep = Model.Step switch { "customer" => 1, "wireguard" => 2, _ => 0 };
+}
+
+<h1 class="page-title">Setup Wizard</h1>
+
+<div class="mx-auto" style="max-width:640px">
+
+@if (Model.Step == "welcome")
+{
+    <div class="card shadow-sm border-0">
+        <div class="card-body text-center py-5 px-4">
+            <div style="font-size:3.5rem;color:var(--brand-primary);line-height:1">
+                <i class="bi bi-rocket-takeoff-fill"></i>
+            </div>
+            <h2 class="fw-bold mt-3 mb-2">Welcome to Valenius</h2>
+            <p class="text-muted mb-4" style="max-width:440px;margin:0 auto">
+                Let's get you set up. This wizard takes about 2 minutes and walks you through
+                creating your first customer.
+            </p>
+            <div class="d-flex justify-content-center gap-3 flex-wrap">
+                <a asp-page="Setup" asp-route-step="customer"
+                   class="btn btn-primary btn-lg px-4">
+                    <i class="bi bi-arrow-right me-1"></i>Start setup
+                </a>
+                <a asp-page="Overview" class="btn btn-outline-secondary btn-lg px-4">
+                    Skip for now
+                </a>
+            </div>
+        </div>
+    </div>
+}
+
+@if (Model.Step == "customer" || Model.Step == "wireguard")
+{
+    <!-- Step indicator -->
+    <div class="d-flex align-items-center mb-4 gap-2">
+        <div class="wizard-step-circle @(activeStep >= 1 ? "wsc-active" : "") @(activeStep > 1 ? "wsc-done" : "")">
+            @if (activeStep > 1) { <i class="bi bi-check-lg"></i> } else { <span>1</span> }
+        </div>
+        <span class="wizard-step-label @(activeStep == 1 ? "fw-semibold" : "text-muted")">Customer</span>
+        <div class="wizard-step-line @(activeStep > 1 ? "wsl-done" : "")"></div>
+        <div class="wizard-step-circle @(activeStep >= 2 ? "wsc-active" : "")">
+            <span>2</span>
+        </div>
+        <span class="wizard-step-label @(activeStep == 2 ? "fw-semibold" : "text-muted")">WireGuard®</span>
+    </div>
+}
+
+@if (Model.Step == "customer")
+{
+    @if (Model.Error != null)
+    {
+        <div class="alert alert-danger py-2">@Model.Error</div>
+    }
+
+    <div class="card shadow-sm">
+        <div class="card-header fw-semibold">
+            <i class="bi bi-building me-1"></i>Create customer
+        </div>
+        <div class="card-body">
+            <form method="post" asp-page-handler="Customer">
+                <div class="mb-3">
+                    <label class="form-label">Customer name <span class="text-danger">*</span></label>
+                    <input type="text" name="name" class="form-control" placeholder="e.g. Acme Corp" required autofocus />
+                    <div class="form-text">The organisation or tenant name shown in the admin panel.</div>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Client prefix <span class="text-muted small fw-normal">(optional)</span></label>
+                    <input type="text" name="clientPrefix" class="form-control" maxlength="3" placeholder="e.g. ACM" style="text-transform:uppercase" />
+                    <div class="form-text">Up to 3 letters. Clients whose hostname starts with this prefix are auto-assigned to this customer.</div>
+                </div>
+
+                <div class="mb-4">
+                    <label class="form-label">Notes <span class="text-muted small fw-normal">(optional)</span></label>
+                    <textarea name="notes" class="form-control" rows="2" placeholder="Internal notes…"></textarea>
+                </div>
+
+                <div class="mb-4">
+                    <label class="form-label d-block">Server mode</label>
+                    <div class="d-flex gap-3 flex-wrap">
+                        <div>
+                            <input type="radio" class="btn-check" name="serverMode" id="modeValenius"
+                                   value="Valenius" checked autocomplete="off" />
+                            <label class="btn btn-outline-primary" for="modeValenius">
+                                <i class="bi bi-shield-fill-check me-1"></i>Valenius
+                            </label>
+                        </div>
+                        <div>
+                            <input type="radio" class="btn-check" name="serverMode" id="modeExternal"
+                                   value="External" autocomplete="off" />
+                            <label class="btn btn-outline-secondary" for="modeExternal">
+                                <i class="bi bi-upload me-1"></i>External
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-text mt-2" id="modeHint">
+                        Peers are provisioned automatically via the wg-sidecar.
+                    </div>
+                </div>
+
+                <div class="d-flex justify-content-between">
+                    <a asp-page="Overview" class="btn btn-outline-secondary">Cancel</a>
+                    <button type="submit" class="btn btn-primary">
+                        <span id="btnNextLabel">Next <i class="bi bi-arrow-right ms-1"></i></span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+}
+
+@if (Model.Step == "wireguard")
+{
+    @if (Model.Error != null)
+    {
+        <div class="alert alert-danger py-2">@Model.Error</div>
+    }
+
+    <div class="card shadow-sm">
+        <div class="card-header fw-semibold">
+            <i class="bi bi-hdd-network me-1"></i>WireGuard® sidecar configuration
+        </div>
+        <div class="card-body">
+            <form method="post" asp-page-handler="WireGuard">
+                <input type="hidden" name="setupName"   value="@Model.CarriedName" />
+                <input type="hidden" name="setupPrefix" value="@Model.CarriedPrefix" />
+                <input type="hidden" name="setupNotes"  value="@Model.CarriedNotes" />
+                <input type="hidden" name="setupToken"  value="@Model.CarriedToken" />
+
+                @if (Model.CarriedToken is not null)
+                {
+                    <div class="alert alert-info py-2 px-3 mb-3">
+                        <div class="small fw-semibold mb-1"><i class="bi bi-key me-1"></i>Enrollment token</div>
+                        <div class="small text-muted mb-2">
+                            Set <code>ENROLLMENT_TOKEN</code> to this value in your wg-sidecar stack, then start
+                            the sidecar before testing the connection below.
+                        </div>
+                        <div class="input-group input-group-sm">
+                            <input id="enrollToken" type="text" class="form-control font-monospace"
+                                   value="@Model.CarriedToken" readonly />
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyToken()">
+                                <i class="bi bi-clipboard" id="copyIcon"></i>
+                            </button>
+                        </div>
+                    </div>
+                }
+
+                <h6 class="text-muted small text-uppercase fw-semibold mb-3 mt-1">Sidecar connection</h6>
+
+                <div class="row g-3 mb-3">
+                    <div class="col-sm-7">
+                        <label class="form-label">Sidecar host</label>
+                        <input type="text" name="sidecarUrl" id="sidecarHost" class="form-control"
+                               placeholder="e.g. 192.168.1.10" />
+                        <div class="form-text">IP or hostname reachable from the backend container. Use the server's LAN IP on Linux.</div>
+                    </div>
+                    <div class="col-sm-3">
+                        <label class="form-label">Mgmt port</label>
+                        <input type="number" name="sidecarManagementPort" id="sidecarMgmtPort"
+                               class="form-control" value="8443" min="1" max="65535" />
+                    </div>
+                    <div class="col-sm-2">
+                        <label class="form-label">Health port</label>
+                        <input type="number" name="sidecarHealthPort" class="form-control"
+                               value="0" min="0" max="65535" />
+                        <div class="form-text">0 = same as mgmt port.</div>
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTestSidecar">
+                        <i class="bi bi-plug me-1"></i>Test connection
+                    </button>
+                    <span id="sidecarTestResult" class="ms-2 small"></span>
+                </div>
+
+                <hr class="my-3" />
+                <h6 class="text-muted small text-uppercase fw-semibold mb-3">Client configuration</h6>
+
+                <div class="row g-3 mb-3">
+                    <div class="col-sm-7">
+                        <label class="form-label">Server endpoint</label>
+                        <input type="text" name="serverEndpoint" class="form-control"
+                               placeholder="vpn.example.com:51820" />
+                        <div class="form-text">Public WireGuard® endpoint written into generated client configs.</div>
+                    </div>
+                    <div class="col-sm-5">
+                        <label class="form-label">VPN prefix <span class="text-muted small fw-normal">(optional)</span></label>
+                        <input type="text" name="vpnPrefix" class="form-control"
+                               placeholder="e.g. MyCompany" />
+                        <div class="form-text">Letters only. Profile name on client: prefix + "-VPN".</div>
+                    </div>
+                </div>
+
+                <div class="row g-3 mb-4">
+                    <div class="col-sm-5">
+                        <label class="form-label">DNS server <span class="text-muted small fw-normal">(optional)</span></label>
+                        <input type="text" name="dnsServer" class="form-control"
+                               placeholder="e.g. 10.100.0.1" />
+                    </div>
+                    <div class="col-sm-7">
+                        <label class="form-label">Allowed IPs <span class="text-muted small fw-normal">(optional)</span></label>
+                        <input type="text" name="allowedIPs" class="form-control"
+                               placeholder="0.0.0.0/0, ::/0" />
+                        <div class="form-text">Leave blank for full-tunnel default.</div>
+                    </div>
+                </div>
+
+                <div class="d-flex justify-content-between">
+                    <a asp-page="Setup" asp-route-step="customer" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-left me-1"></i>Back
+                    </a>
+                    <button type="submit" class="btn btn-primary">
+                        Create customer <i class="bi bi-check-lg ms-1"></i>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+}
+
+@if (Model.Step == "done")
+{
+    <div class="card shadow-sm border-0">
+        <div class="card-body text-center py-5 px-4">
+            <div style="font-size:3.5rem;color:#198754;line-height:1">
+                <i class="bi bi-check-circle-fill"></i>
+            </div>
+            <h2 class="fw-bold mt-3 mb-2">You're all set!</h2>
+            <p class="text-muted mb-4">
+                Your first customer has been created. You can now activate clients and manage their WireGuard® configs.
+            </p>
+            <div class="d-flex justify-content-center gap-3 flex-wrap">
+                @if (Model.CreatedCustomerId.HasValue)
+                {
+                    <a asp-page="Customers/Details" asp-route-id="@Model.CreatedCustomerId"
+                       class="btn btn-primary btn-lg px-4">
+                        <i class="bi bi-building me-1"></i>Open customer
+                    </a>
+                }
+                <a asp-page="Overview" class="btn btn-outline-secondary btn-lg px-4">
+                    Go to overview
+                </a>
+            </div>
+            @if (Model.EnrollmentToken is not null)
+            {
+                <div class="mt-4 text-start" style="max-width:480px;margin:0 auto">
+                    <p class="small fw-semibold mb-1">Sidecar enrollment token</p>
+                    <p class="text-muted small mb-2">
+                        Set this as <code>ENROLLMENT_TOKEN</code> in your wg-sidecar stack and deploy.
+                        The token is shown only once — you can regenerate it anytime in Customer settings.
+                    </p>
+                    <div class="input-group input-group-sm">
+                        <input id="enrollToken" type="text" class="form-control font-monospace"
+                               value="@Model.EnrollmentToken" readonly />
+                        <button class="btn btn-outline-secondary" type="button" onclick="copyToken()">
+                            <i class="bi bi-clipboard" id="copyIcon"></i>
+                        </button>
+                    </div>
+                </div>
+            }
+            <div class="mt-4 text-start d-inline-block">
+                <p class="text-muted small mb-2 fw-semibold">What's next?</p>
+                <ul class="text-muted small mb-0 ps-3">
+                    <li>Deploy the wg-sidecar with the enrollment token above</li>
+                    <li>Install the Windows client on endpoint machines</li>
+                    <li>Activate clients from the Clients page</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+}
+
+</div>
+
+<style>
+    .wizard-step-circle {
+        width: 32px; height: 32px; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        border: 2px solid #dee2e6; color: #6c757d;
+        font-size: .85rem; font-weight: 600; flex-shrink: 0;
+        transition: background .2s, border-color .2s, color .2s;
+    }
+    .wizard-step-circle.wsc-active {
+        border-color: var(--brand-primary); color: var(--brand-primary);
+    }
+    .wizard-step-circle.wsc-done {
+        background: var(--brand-primary); border-color: var(--brand-primary); color: #fff;
+    }
+    .wizard-step-label { font-size: .9rem; white-space: nowrap; }
+    .wizard-step-line {
+        flex: 1; height: 2px; background: #dee2e6; border-radius: 1px;
+        transition: background .2s;
+    }
+    .wizard-step-line.wsl-done { background: var(--brand-primary); }
+</style>
+
+@section Scripts {
+<script>
+function copyToken() {
+    var val = document.getElementById('enrollToken');
+    if (!val) return;
+    navigator.clipboard.writeText(val.value).then(function () {
+        var icon = document.getElementById('copyIcon');
+        icon.className = 'bi bi-clipboard-check';
+        setTimeout(function () { icon.className = 'bi bi-clipboard'; }, 2000);
+    });
+}
+(function () {
+    // Server mode hint toggle
+    var radios = document.querySelectorAll('input[name="serverMode"]');
+    var hint   = document.getElementById('modeHint');
+    var btnNext = document.getElementById('btnNextLabel');
+    var hints = {
+        Valenius: 'Peers are provisioned automatically via the wg-sidecar.',
+        External:         'Config files are uploaded manually — no sidecar required.'
+    };
+    var nextLabels = {
+        Valenius: 'Next <i class="bi bi-arrow-right ms-1"></i>',
+        External:         'Create customer <i class="bi bi-check-lg ms-1"></i>'
+    };
+    function updateMode(val) {
+        if (hint)    hint.innerHTML    = hints[val]     || '';
+        if (btnNext) btnNext.innerHTML = nextLabels[val] || nextLabels.Valenius;
+    }
+    radios.forEach(function (r) {
+        r.addEventListener('change', function () { updateMode(r.value); });
+        if (r.checked) updateMode(r.value);
+    });
+
+    // Sidecar test connection
+    var btnTest  = document.getElementById('btnTestSidecar');
+    var testResult = document.getElementById('sidecarTestResult');
+    if (btnTest) {
+        btnTest.addEventListener('click', function () {
+            var host = (document.getElementById('sidecarHost')  || {}).value || '';
+            var port = (document.getElementById('sidecarMgmtPort') || {}).value || '8443';
+            if (!host) { testResult.textContent = 'Enter a host first.'; testResult.className = 'ms-2 small text-warning'; return; }
+            btnTest.disabled = true;
+            testResult.textContent = 'Testing…';
+            testResult.className   = 'ms-2 small text-muted';
+            fetch('@Url.Page("Setup", "TestSidecar")&host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port))
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    testResult.textContent = d.message;
+                    testResult.className   = 'ms-2 small ' + (d.ok ? 'text-success' : 'text-danger');
+                })
+                .catch(function () {
+                    testResult.textContent = 'Request failed.';
+                    testResult.className   = 'ms-2 small text-danger';
+                })
+                .finally(function () { btnTest.disabled = false; });
+        });
+    }
+}());
+</script>
+}

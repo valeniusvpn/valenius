@@ -1,0 +1,20 @@
+# Swift Package Manager
+.build/
+Package.resolved
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+DerivedData/
+*.xcuserstate
+# Per-package Xcode local state (auto-generated when opening an SPM package)
+.swiftpm/
+
+# Build artifacts
+/packaging/output/
+/packaging/bin/
+*.pkg
+
+# Local dev config (never commit real keys)
+appsettings.json

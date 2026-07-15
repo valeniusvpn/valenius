@@ -1,0 +1,478 @@
+@using Valenius.Backend.Licensing
+@inject ILicenseContext _License
+@inject IInstallationLicenseMonitor _InstallLicense
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] - Valenius</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <link rel="stylesheet" href="/lib/inter/inter.css" />
+    <link rel="stylesheet" href="/lib/bootstrap/5.3.3/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/lib/bootstrap-icons/1.11.3/bootstrap-icons.min.css" />
+    <style>
+        :root {
+            --brand-primary:      #0F4E66;
+            --brand-primary-dark: #0a3a4d;
+            --brand-accent:       #1DABDA;
+            --brand-gold:         #FFBE00;
+            --sidebar-width:      220px;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; }
+
+        html, body {
+            margin: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            font-size: .9rem;
+            background: #ffffff;
+            color: #1a1a2e;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        /* ── Top navbar ─────────────────────────────────────────────────── */
+        .topbar {
+            background: #ffffff;
+            border-bottom: 1px solid #e8ecf0;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            padding: 0 1.75rem;
+            gap: 1rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 1px 6px rgba(0,0,0,.06);
+        }
+        .topbar-brand {
+            display: flex;
+            align-items: center;
+            gap: .75rem;
+            text-decoration: none;
+        }
+        .topbar-brand .app-icon {
+            height: 32px;
+            width: auto;
+            border-radius: 7px;
+        }
+        .topbar-brand .app-name {
+            font-weight: 700;
+            font-size: 1rem;
+            color: var(--brand-primary);
+            letter-spacing: -.01em;
+        }
+        .topbar-divider {
+            width: 1px;
+            height: 28px;
+            background: #dee2e6;
+            margin: 0 .5rem;
+        }
+        .topbar-tagline {
+            font-size: .82rem;
+            font-weight: 600;
+            letter-spacing: .01em;
+            background: linear-gradient(120deg, var(--brand-primary) 0%, var(--brand-accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .topbar-tagline sup {
+            font-size: .55em;
+            vertical-align: super;
+            /* override the inherited transparent fill so ® is always visible */
+            -webkit-text-fill-color: var(--brand-accent);
+        }
+        .topbar-tagline-sep {
+            opacity: .45;
+        }
+        .topbar-right {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: .75rem;
+        }
+        .topbar-right .user-name {
+            font-size: .8rem;
+            color: #6c757d;
+        }
+
+        /* ── Layout shell ───────────────────────────────────────────────── */
+        .shell {
+            display: flex;
+            flex: 1;
+        }
+
+        /* ── Sidebar ────────────────────────────────────────────────────── */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: #f8fafb;
+            border-right: 1px solid #e8ecf0;
+            padding: 1.5rem 0;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-section-label {
+            font-size: .7rem;
+            font-weight: 600;
+            letter-spacing: .07em;
+            text-transform: uppercase;
+            color: #adb5bd;
+            padding: .5rem 1.25rem .25rem;
+            margin-top: .25rem;
+        }
+        .sidebar-section-label:first-child {
+            margin-top: 0;
+        }
+        .sidebar-divider {
+            border-top: 1px solid #e8ecf0;
+            margin: .6rem 0;
+        }
+        .sidebar-link {
+            display: flex;
+            align-items: center;
+            gap: .6rem;
+            padding: .5rem 1.25rem;
+            color: #495057;
+            text-decoration: none;
+            border-radius: 0;
+            font-size: .875rem;
+            font-weight: 500;
+            transition: background .12s, color .12s;
+        }
+        .sidebar-link:hover {
+            background: #e9f0f4;
+            color: var(--brand-primary);
+        }
+        .sidebar-link.active {
+            background: #deeef5;
+            color: var(--brand-primary);
+            font-weight: 600;
+            border-right: 3px solid var(--brand-primary);
+        }
+        .sidebar-link i { font-size: 1rem; opacity: .75; }
+        .sidebar-link.active i { opacity: 1; }
+
+        /* ── Main content ───────────────────────────────────────────────── */
+        .main-content {
+            flex: 1;
+            padding: 2rem 2.25rem;
+            min-width: 0;
+            background: #ffffff;
+        }
+
+        /* ── Page title ─────────────────────────────────────────────────── */
+        .page-title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: var(--brand-primary);
+            margin-bottom: 1.5rem;
+            letter-spacing: -.02em;
+        }
+
+        /* ── Cards ──────────────────────────────────────────────────────── */
+        .card {
+            border: 1px solid #e8ecf0;
+            box-shadow: 0 1px 3px rgba(0,0,0,.04);
+            border-radius: 10px;
+        }
+        .card-header {
+            background: #f8fafb;
+            border-bottom: 1px solid #e8ecf0;
+            font-weight: 600;
+            font-size: .85rem;
+            border-radius: 10px 10px 0 0 !important;
+            padding: .75rem 1.1rem;
+        }
+        .card-body { padding: 1.1rem; }
+
+        /* ── Tables ─────────────────────────────────────────────────────── */
+        .table { font-size: .85rem; }
+        .table thead th {
+            font-size: .75rem;
+            font-weight: 600;
+            letter-spacing: .04em;
+            text-transform: uppercase;
+            color: #6c757d;
+            border-bottom: 1px solid #e8ecf0;
+            background: #f8fafb;
+            padding: .6rem .75rem;
+        }
+        .table tbody td { padding: .65rem .75rem; vertical-align: middle; }
+        .table-hover > tbody > tr:hover > * {
+            background-color: rgba(15,78,102,.04);
+        }
+
+        /* ── Badges ─────────────────────────────────────────────────────── */
+        .badge { font-weight: 500; letter-spacing: .02em; }
+        .badge.bg-warning { color: #212529; }
+
+        /* ── Buttons ────────────────────────────────────────────────────── */
+        .btn { font-weight: 500; border-radius: 7px; }
+        .btn-primary               { background: var(--brand-primary); border-color: var(--brand-primary); }
+        .btn-primary:hover,
+        .btn-primary:focus         { background: var(--brand-primary-dark); border-color: var(--brand-primary-dark); }
+        .btn-outline-primary       { color: var(--brand-primary); border-color: var(--brand-primary); }
+        .btn-outline-primary:hover { background: var(--brand-primary); border-color: var(--brand-primary); color: #fff; }
+        .btn-outline-primary:focus { box-shadow: 0 0 0 .2rem rgba(15,78,102,.2); }
+
+        /* ── Links ──────────────────────────────────────────────────────── */
+        a                 { color: var(--brand-primary); }
+        a:hover           { color: var(--brand-primary-dark); }
+        .text-primary     { color: var(--brand-primary) !important; }
+        .border-primary   { border-color: var(--brand-primary) !important; }
+
+        /* ── dl rows in detail cards ────────────────────────────────────── */
+        dl.row dt { color: #6c757d; font-weight: 500; font-size: .82rem; }
+        dl.row dd { font-size: .88rem; margin-bottom: .45rem; }
+
+        /* ── Mobile sidebar toggle ──────────────────────────────────────── */
+        .sidebar-toggle {
+            display: none;
+            background: none;
+            border: none;
+            font-size: 1.4rem;
+            color: var(--brand-primary);
+            padding: 0;
+            cursor: pointer;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        .sidebar-backdrop {
+            display: none;
+            position: fixed;
+            inset: 0;
+            top: 60px;
+            background: rgba(0,0,0,.4);
+            z-index: 199;
+        }
+        .sidebar-backdrop.active { display: block; }
+
+        @@media (max-width: 767.98px) {
+            .sidebar-toggle { display: flex; align-items: center; }
+            .topbar-divider, .topbar-tagline { display: none; }
+            .topbar { padding: 0 1rem; }
+            .sidebar {
+                position: fixed;
+                top: 60px;
+                left: 0;
+                bottom: 0;
+                z-index: 200;
+                transform: translateX(-100%);
+                transition: transform .22s ease;
+                overflow-y: auto;
+            }
+            .sidebar.open { transform: translateX(0); }
+            .main-content { padding: 1.25rem 1rem; }
+            .card-body { overflow-x: auto; }
+            footer { flex-wrap: wrap; gap: .25rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Top bar -->
+    <header class="topbar">
+        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation">
+            <i class="bi bi-list"></i>
+        </button>
+        <a class="topbar-brand" href="/Admin">
+            <img src="/img/valenius2.png" alt="Valenius" class="app-icon" />
+        </a>
+        <div class="topbar-divider"></div>
+        <span class="topbar-tagline">WireGuard<sup>®</sup> Management Platform <span class="topbar-tagline-sep">·</span> Powered by WireGuard<sup>®</sup></span>
+        <div class="topbar-right">
+            @if (User.Identity?.IsAuthenticated == true)
+            {
+                <span class="user-name"><i class="bi bi-person-circle me-1"></i>@User.Identity.Name</span>
+                <form method="post" asp-page="/Admin/Logout" class="d-inline">
+                    <button type="submit" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-box-arrow-right me-1"></i>Logout
+                    </button>
+                </form>
+            }
+        </div>
+    </header>
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+    <div class="shell">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+
+            @if (User.IsInRole("Admin"))
+            {
+                <a href="/Admin/Overview" class="sidebar-link @(ViewData["Title"]?.ToString() == "Overview" ? "active" : "")">
+                    <i class="bi bi-grid-1x2-fill"></i> Overview
+                </a>
+                <hr class="sidebar-divider" />
+            }
+
+            <div class="sidebar-section-label">Clients</div>
+            <a href="/Admin" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Client") == true ? "active" : "")">
+                <i class="bi bi-display"></i> Clients
+            </a>
+            <a href="/Admin/ConnectionHistory" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Connection") == true ? "active" : "")">
+                <i class="bi bi-clock-history"></i> Connection history
+            </a>
+            <a href="/Admin/Downloads" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Downloads") == true ? "active" : "")">
+                <i class="bi bi-box-arrow-down"></i> Downloads
+            </a>
+
+            @if (User.IsInRole("Admin"))
+            {
+                <hr class="sidebar-divider" />
+                <div class="sidebar-section-label">Organisation</div>
+                <a href="/Admin/Customers" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Customer") == true ? "active" : "")">
+                    <i class="bi bi-building"></i> Customers
+                </a>
+                <a href="/Admin/Users" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("User") == true ? "active" : "")">
+                    <i class="bi bi-people"></i> Users
+                </a>
+
+                <hr class="sidebar-divider" />
+                <div class="sidebar-section-label">Server</div>
+                <a href="/Admin/Server/Dashboard" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Dashboard") == true ? "active" : "")">
+                    <i class="bi bi-speedometer2"></i> Dashboard
+                </a>
+
+                <hr class="sidebar-divider" />
+                <div class="sidebar-section-label">System</div>
+                <a href="/Admin/Releases" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Releases") == true ? "active" : "")">
+                    <i class="bi bi-cloud-upload"></i> Releases
+                </a>
+                <a href="/Admin/Alerts" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Alerts") == true ? "active" : "")">
+                    <i class="bi bi-shield-exclamation"></i> Security alerts
+                    <partial name="_AlertBadge" />
+                </a>
+                <a href="/Admin/AuditLog" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Audit") == true ? "active" : "")">
+                    <i class="bi bi-journal-text"></i> Audit log
+                </a>
+                <a href="/Admin/ErrorLog" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Error") == true ? "active" : "")">
+                    <i class="bi bi-exclamation-triangle"></i> Error log
+                </a>
+                <a href="/Admin/Settings" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Settings") == true ? "active" : "")">
+                    <i class="bi bi-gear"></i> Settings
+                </a>
+                <a href="/Admin/Backup" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Backup") == true ? "active" : "")">
+                    <i class="bi bi-safe2"></i> Backup &amp; Restore
+                </a>
+            }
+
+            <hr class="sidebar-divider" />
+            <a href="/Admin/Help" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Help") == true ? "active" : "")">
+                <i class="bi bi-question-circle"></i> Help
+            </a>
+
+        </nav>
+
+        <!-- Installation license banners -->
+        @if (_InstallLicense.Status == InstallationLicenseStatus.OssMode)
+        {
+            <div class="alert alert-danger rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+                <i class="bi bi-x-octagon-fill"></i>
+                <strong>License revoked or expired.</strong> Pro features are disabled. Contact <a href="mailto:support@stranto.com" class="alert-link">support@stranto.com</a> to restore your license.
+            </div>
+        }
+        else if (_InstallLicense.Status == InstallationLicenseStatus.Warning)
+        {
+            <div class="alert alert-warning rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+                <i class="bi bi-exclamation-triangle-fill"></i>
+                <strong>License server unreachable.</strong> Pro features remain active, but will be disabled if the server stays unreachable for 3 months. Check your network connectivity to <strong>license.valenius.stranto.com</strong>.
+            </div>
+        }
+
+        <!-- Per-customer license banners -->
+        @if (_License.IsInGracePeriod)
+        {
+            <div class="alert alert-warning rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+                <i class="bi bi-exclamation-triangle-fill"></i>
+                Your license expired on <strong>@_License.ExpiresAt!.Value.ToString("dd.MM.yyyy")</strong>.
+                Grace period ends in <strong>@_License.DaysUntilExpiry day(s)</strong>. Please renew to avoid service interruption.
+            </div>
+        }
+        else if (!_License.IsValid && _License.LicenseType != "community")
+        {
+            <div class="alert alert-danger rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+                <i class="bi bi-x-octagon-fill"></i>
+                <strong>License expired.</strong> Pro features are disabled. Please renew your license.
+            </div>
+        }
+
+        <!-- Page content -->
+        <main class="main-content">
+            @RenderBody()
+        </main>
+    </div>
+
+    <footer style="border-top:1px solid #e8ecf0; background:#f8fafb; padding:.45rem 1.75rem; font-size:.75rem; color:#adb5bd; display:flex; justify-content:space-between; align-items:center;">
+        <span>Valenius is a product of <a href="https://www.stranto.com/" target="_blank" rel="noopener" style="color:#adb5bd;">Stranto Business Solutions GmbH</a></span>
+        <span>Valenius Admin v@(System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "?")</span>
+    </footer>
+
+    <script src="/lib/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+    @await RenderSectionAsync("Scripts", required: false)
+    <script>
+    (function () {
+        var toggle = document.getElementById('sidebarToggle');
+        var sidebar = document.querySelector('.sidebar');
+        var backdrop = document.getElementById('sidebarBackdrop');
+        if (!toggle) return;
+        function openSidebar()  { sidebar.classList.add('open');    backdrop.classList.add('active'); }
+        function closeSidebar() { sidebar.classList.remove('open'); backdrop.classList.remove('active'); }
+        toggle.addEventListener('click', function () {
+            sidebar.classList.contains('open') ? closeSidebar() : openSidebar();
+        });
+        backdrop.addEventListener('click', closeSidebar);
+        sidebar.querySelectorAll('.sidebar-link').forEach(function (l) {
+            l.addEventListener('click', function () { if (window.innerWidth < 768) closeSidebar(); });
+        });
+    })();
+    </script>
+    <script>
+    // Auto-refresh traffic panels (totals + chart) every 60s without a page reload.
+    // Any element with class "traffic-auto" + data-traffic-url is polled; its
+    // [data-tf=total|rx|tx|chart] children are updated from the JSON the handler returns.
+    // A [data-tf-range] button group (optional) selects the chart time frame: the active
+    // button's key is appended as &range=<key> and clicking one re-fetches immediately.
+    (function () {
+        var panels = document.querySelectorAll('.traffic-auto[data-traffic-url]');
+        if (!panels.length) return;
+        function urlFor(panel) {
+            var base = panel.getAttribute('data-traffic-url');
+            var active = panel.querySelector('[data-tf-range].active');
+            return active ? base + '&range=' + encodeURIComponent(active.getAttribute('data-tf-range')) : base;
+        }
+        function refresh(panel) {
+            fetch(urlFor(panel), { headers: { 'X-Requested-With': 'fetch' } })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (d) {
+                    if (!d) return;
+                    Object.keys(d).forEach(function (key) {
+                        var el = panel.querySelector('[data-tf="' + key + '"]');
+                        if (!el || d[key] == null) return;
+                        if (key === 'chart') el.innerHTML = d[key]; else el.textContent = d[key];
+                    });
+                })
+                .catch(function () {});
+        }
+        panels.forEach(function (p) {
+            var buttons = p.querySelectorAll('[data-tf-range]');
+            buttons.forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    buttons.forEach(function (b) { b.classList.remove('active'); });
+                    btn.classList.add('active');
+                    refresh(p);
+                });
+            });
+            setInterval(function () { refresh(p); }, 60000);
+        });
+    })();
+    </script>
+</body>
+</html>

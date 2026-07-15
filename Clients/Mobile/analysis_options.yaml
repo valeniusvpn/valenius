@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+# Project-specific tightening can go here as the codebase grows.
+linter:
+  rules:
+    prefer_single_quotes: true

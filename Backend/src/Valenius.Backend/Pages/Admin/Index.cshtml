@@ -1,0 +1,321 @@
+@page
+@model Valenius.Backend.Pages.Admin.IndexModel
+@{
+    ViewData["Title"] = "Client Management";
+}
+
+<style>
+    /* Highlight rows whose WireGuard tunnel is currently up. */
+    tr.client-connected { --bs-table-bg: #f5f5f5; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="page-title mb-0">Clients</h1>
+    <small class="text-muted">Machines that have contacted this server</small>
+</div>
+
+<div class="mb-3 d-flex gap-2 flex-wrap">
+    <a asp-page="Index" asp-route-filter="all" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+       class="btn btn-sm @(Model.Filter == "all" ? "btn-primary" : "btn-outline-secondary")">
+        <i class="bi bi-grid me-1"></i>All <span id="count-total" class="ms-1 badge @(Model.Filter == "all" ? "bg-white text-primary" : "bg-secondary")">@Model.Counts.Total</span>
+    </a>
+    <a asp-page="Index" asp-route-filter="pending" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+       class="btn btn-sm @(Model.Filter == "pending" ? "btn-warning" : "btn-outline-warning")">
+        <i class="bi bi-hourglass-split me-1"></i>Pending <span id="count-pending" class="ms-1 badge @(Model.Filter == "pending" ? "bg-dark" : "bg-warning text-dark")">@Model.Counts.Pending</span>
+    </a>
+    <a asp-page="Index" asp-route-filter="active" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+       class="btn btn-sm @(Model.Filter == "active" ? "btn-success" : "btn-outline-success")">
+        <i class="bi bi-check-circle me-1"></i>Active <span id="count-active" class="ms-1 badge @(Model.Filter == "active" ? "bg-white text-success" : "bg-success")">@Model.Counts.Active</span>
+    </a>
+    <a asp-page="Index" asp-route-filter="inactive" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+       class="btn btn-sm @(Model.Filter == "inactive" ? "btn-danger" : "btn-outline-danger")">
+        <i class="bi bi-x-circle me-1"></i>Deactivated <span class="ms-1 badge @(Model.Filter == "inactive" ? "bg-white text-danger" : "bg-danger")">@Model.Counts.Inactive</span>
+    </a>
+    <a asp-page="Index" asp-route-filter="online" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+       class="btn btn-sm @(Model.Filter == "online" ? "btn-success" : "btn-outline-success") ms-2">
+        <i class="bi bi-circle-fill me-1" style="font-size:.55rem;vertical-align:middle;"></i>Online <span id="count-online" class="ms-1 badge @(Model.Filter == "online" ? "bg-white text-success" : "bg-success")">@Model.Counts.Online</span>
+    </a>
+    @if (Model.Counts.Connected > 0 || Model.Filter == "connected")
+    {
+        <a asp-page="Index" asp-route-filter="connected" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+           class="btn btn-sm @(Model.Filter == "connected" ? "btn-purple" : "btn-outline-purple")"
+           style="@(Model.Filter == "connected" ? "background:#6f42c1;border-color:#6f42c1;color:#fff;" : "color:#6f42c1;border-color:#6f42c1;")">
+            <i class="bi bi-shield-fill-check me-1"></i>WG connected <span id="count-connected" class="ms-1 badge" style="@(Model.Filter == "connected" ? "background:rgba(255,255,255,.25);color:#fff;" : "background:#6f42c1;color:#fff;")">@Model.Counts.Connected</span>
+        </a>
+    }
+</div>
+
+<div class="mb-3 d-flex gap-2 flex-wrap align-items-center">
+    <form method="get" asp-page="Index" id="searchForm" class="input-group input-group-sm" style="max-width: 340px;">
+        <input type="hidden" name="filter" value="@Model.Filter" />
+        <input type="hidden" name="customer" value="@Model.SelectedCustomer" />
+        <input type="hidden" name="pageSize" value="@Model.PageSizeRaw" />
+        <span class="input-group-text"><i class="bi bi-search"></i></span>
+        <input type="text" id="clientSearch" name="search" value="@Model.Search" class="form-control"
+               placeholder="Search by name, user or version…" autocomplete="off">
+        @if (!string.IsNullOrEmpty(Model.Search))
+        {
+            <a asp-page="Index" asp-route-filter="@Model.Filter" asp-route-customer="@Model.SelectedCustomer"
+               asp-route-pageSize="@Model.PageSizeRaw" class="btn btn-outline-secondary" title="Clear search">
+                <i class="bi bi-x-lg"></i>
+            </a>
+        }
+    </form>
+
+    @if (User.IsInRole("Admin"))
+    {
+        <div class="input-group input-group-sm" style="max-width: 280px;">
+            <span class="input-group-text"><i class="bi bi-building"></i></span>
+            <select id="customerSelect" class="form-select" data-current="@Model.SelectedCustomer">
+                <option value="all" selected="@(Model.SelectedCustomer == "all" ? "selected" : null)">All customers</option>
+                @foreach (var opt in Model.CustomerOptions)
+                {
+                    <option value="@opt.Value" selected="@(Model.SelectedCustomer == opt.Value ? "selected" : null)">@opt.Name (@opt.Count)</option>
+                }
+            </select>
+        </div>
+    }
+
+    <div class="input-group input-group-sm ms-auto" style="max-width: 170px;">
+        <span class="input-group-text"><i class="bi bi-list-ol"></i></span>
+        <select id="pageSizeSelect" class="form-select" data-current="@Model.PageSizeRaw">
+            @foreach (var size in Valenius.Backend.Pages.Admin.IndexModel.PageSizeOptions)
+            {
+                var label = size == "all" ? "All" : $"{size} / page";
+                <option value="@size" selected="@(Model.PageSizeRaw == size ? "selected" : null)">@label</option>
+            }
+        </select>
+    </div>
+</div>
+
+@if (!Model.Groups.Any())
+{
+    <div class="alert alert-info d-flex align-items-center gap-2">
+        <i class="bi bi-info-circle-fill"></i>
+        @(string.IsNullOrEmpty(Model.Search) ? "No clients match this filter." : "No clients match your search.")
+    </div>
+}
+else
+{
+    @foreach (var group in Model.Groups)
+    {
+        <div class="card mb-3 client-group">
+            <div class="card-header d-flex align-items-center gap-2">
+                @if (group.CustomerId.HasValue)
+                {
+                    <i class="bi bi-building text-primary" style="font-size:.9rem;"></i>
+                    @if (User.IsInRole("Admin"))
+                    {
+                        <a asp-page="/Admin/Customers/Details" asp-route-id="@group.CustomerId"
+                           class="fw-semibold text-decoration-none">@group.Name</a>
+                    }
+                    else
+                    {
+                        <span class="fw-semibold">@group.Name</span>
+                    }
+                }
+                else
+                {
+                    <i class="bi bi-dash-circle text-muted" style="font-size:.9rem;"></i>
+                    <span class="text-muted fw-semibold">Unassigned</span>
+                }
+                <span class="badge bg-secondary ms-1">@group.Clients.Count</span>
+            </div>
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th><i class="bi bi-pc-display me-1"></i>Name</th>
+                        <th><i class="bi bi-person me-1"></i>Last user</th>
+                        <th><i class="bi bi-tag me-1"></i>Version</th>
+                        <th><i class="bi bi-calendar-plus me-1"></i>Registered</th>
+                        <th><i class="bi bi-clock-history me-1"></i>Last seen</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in group.Clients)
+                    {
+                        <tr data-client-id="@row.Client.Id" class="@(row.IsConnected ? "client-connected" : null)"
+                            data-search="@($"{row.Client.EffectiveName} {row.LastUsername} {row.Client.ClientVersion}".ToLowerInvariant())">
+                            <td class="fw-semibold">
+                                <span class="status-indicator">
+                                @if (row.IsConnected)
+                                {
+                                    <i class="bi bi-star-fill me-1"
+                                       style="font-size:.6rem;vertical-align:middle;color:#6f42c1;"
+                                       title="VPN connected"></i>
+                                }
+                                else
+                                {
+                                    <i class="bi bi-circle-fill me-1 @(row.IsOnline ? "text-success" : "text-secondary")"
+                                       style="font-size:.5rem;vertical-align:middle;"
+                                       title="@(row.IsOnline ? "Online" : "Offline")"></i>
+                                }</span><i class="bi @row.Client.PlatformIcon text-muted me-1" title="@(row.Client.Platform ?? "Windows")"></i>@row.Client.EffectiveName
+                            </td>
+                            <td class="text-muted small">@(row.LastUsername ?? "-")</td>
+                            <td><code class="small">@(string.IsNullOrEmpty(row.Client.ClientVersion) ? "-" : row.Client.ClientVersion)</code></td>
+                            <td class="text-muted small">@row.Client.RegisteredAt.ToVienna().ToString("dd.MM.yyyy HH:mm")</td>
+                            <td class="text-muted small">@row.Client.LastSeenAt.ToVienna().ToString("dd.MM.yyyy HH:mm")</td>
+                            <td>
+                                @if (row.Client.IsActive)
+                                {
+                                    <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Active</span>
+                                }
+                                else if (row.Client.IsDuplicatePending)
+                                {
+                                    <span class="badge bg-warning text-dark" title="Same hostname as an existing client - needs a reassign decision"><i class="bi bi-files me-1"></i>Duplicate</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Pending</span>
+                                }
+                            </td>
+                            <td class="text-end">
+                                <a asp-page="./Details" asp-route-id="@row.Client.Id"
+                                   class="btn btn-sm btn-outline-primary me-1">
+                                    <i class="bi bi-eye me-1"></i>Details
+                                </a>
+                                <form method="post" asp-page-handler="Toggle" asp-route-id="@row.Client.Id"
+                                      asp-route-filter="@Model.Filter" asp-route-customer="@Model.SelectedCustomer"
+                                      asp-route-pageNum="@Model.CurrentPage" asp-route-pageSize="@Model.PageSizeRaw"
+                                      asp-route-search="@Model.Search" class="d-inline">
+                                    <button type="submit"
+                                            class="btn btn-sm @(row.Client.IsActive ? "btn-outline-danger" : "btn-outline-success")">
+                                        @if (row.Client.IsActive)
+                                        {
+                                            <i class="bi bi-pause-circle me-1"></i><text>Deactivate</text>
+                                        }
+                                        else
+                                        {
+                                            <i class="bi bi-play-circle me-1"></i><text>Activate</text>
+                                        }
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (!Model.ShowAll && Model.TotalPages > 1)
+    {
+        var from = (Model.CurrentPage - 1) * int.Parse(Model.PageSizeRaw) + 1;
+        var to = Math.Min(Model.CurrentPage * int.Parse(Model.PageSizeRaw), Model.FilteredCount);
+        <nav class="d-flex justify-content-between align-items-center flex-wrap gap-2" aria-label="Client pages">
+            <small class="text-muted">Showing @from–@to of @Model.FilteredCount</small>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item @(Model.CurrentPage <= 1 ? "disabled" : "")">
+                    <a class="page-link" asp-page="Index" asp-route-filter="@Model.Filter"
+                       asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+                       asp-route-pageNum="@(Model.CurrentPage - 1)" aria-label="Previous">
+                        <i class="bi bi-chevron-left"></i>
+                    </a>
+                </li>
+                @for (var p = 1; p <= Model.TotalPages; p++)
+                {
+                    <li class="page-item @(p == Model.CurrentPage ? "active" : "")">
+                        <a class="page-link" asp-page="Index" asp-route-filter="@Model.Filter"
+                           asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+                           asp-route-pageNum="@p">@p</a>
+                    </li>
+                }
+                <li class="page-item @(Model.CurrentPage >= Model.TotalPages ? "disabled" : "")">
+                    <a class="page-link" asp-page="Index" asp-route-filter="@Model.Filter"
+                       asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
+                       asp-route-pageNum="@(Model.CurrentPage + 1)" aria-label="Next">
+                        <i class="bi bi-chevron-right"></i>
+                    </a>
+                </li>
+            </ul>
+        </nav>
+    }
+}
+
+@section Scripts {
+<script>
+(function () {
+    // Customer / page-size selectors navigate via the query string, resetting to page 1.
+    function go(param, value) {
+        const url = new URL(window.location.href);
+        url.searchParams.set(param, value);
+        url.searchParams.set('pageNum', '1');
+        window.location.href = url.toString();
+    }
+    const cust = document.getElementById('customerSelect');
+    if (cust) cust.addEventListener('change', () => go('customer', cust.value));
+    const ps = document.getElementById('pageSizeSelect');
+    if (ps) ps.addEventListener('change', () => go('pageSize', ps.value));
+})();
+
+(function () {
+    // Server-side search: debounce typing into a form submit so it spans every page.
+    const form = document.getElementById('searchForm');
+    const search = document.getElementById('clientSearch');
+    if (!form || !search) return;
+
+    let timer;
+    search.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => form.submit(), 450);
+    });
+    // Enter submits immediately (default form behaviour) — cancel the pending debounce.
+    form.addEventListener('submit', () => clearTimeout(timer));
+
+    // Keep focus + caret at the end after the reload so typing isn't interrupted.
+    if (search.value) {
+        search.focus();
+        const v = search.value;
+        search.value = '';
+        search.value = v;
+    }
+})();
+
+(function () {
+    // Live status refresh: poll the LiveStatus handler and update each visible row's
+    // online / VPN-connected indicator, its highlight, and the filter-pill counts —
+    // without reloading the page. Row membership (paging / active filter) is NOT
+    // re-evaluated live; a full reload still reflects clients entering/leaving a filter.
+    const params = new URLSearchParams(window.location.search);
+    const query = new URLSearchParams({ handler: 'LiveStatus' });
+    if (params.get('customer')) query.set('customer', params.get('customer'));
+    if (params.get('search')) query.set('search', params.get('search'));
+
+    function indicatorHtml(st) {
+        if (st.connected) {
+            return '<i class="bi bi-star-fill me-1" style="font-size:.6rem;vertical-align:middle;color:#6f42c1;" title="VPN connected"></i>';
+        }
+        const cls = st.online ? 'text-success' : 'text-secondary';
+        const title = st.online ? 'Online' : 'Offline';
+        return '<i class="bi bi-circle-fill me-1 ' + cls + '" style="font-size:.5rem;vertical-align:middle;" title="' + title + '"></i>';
+    }
+
+    async function refresh() {
+        let data;
+        try {
+            const res = await fetch('?' + query.toString(), { headers: { 'X-Requested-With': 'fetch' } });
+            if (!res.ok) return;
+            data = await res.json();
+        } catch { return; } // transient network/nav error — try again next tick
+
+        (data.clients || []).forEach(function (st) {
+            const row = document.querySelector('tr[data-client-id="' + st.id + '"]');
+            if (!row) return;
+            row.classList.toggle('client-connected', st.connected);
+            const ind = row.querySelector('.status-indicator');
+            if (ind) ind.innerHTML = indicatorHtml(st);
+        });
+
+        const counts = data.counts || {};
+        Object.keys(counts).forEach(function (k) {
+            const el = document.getElementById('count-' + k);
+            if (el) el.textContent = counts[k];
+        });
+    }
+
+    setInterval(refresh, 10000);
+})();
+</script>
+}

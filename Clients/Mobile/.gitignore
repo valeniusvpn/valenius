@@ -1,0 +1,39 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+.pub-cache/
+.pub/
+pubspec.lock
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Android
+android/.gradle/
+android/local.properties
+android/key.properties
+**/*.keystore
+**/*.jks
+
+# Firebase config (contains the project API key; operator drops it in per build)
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+
+# Firebase service-account private key — SECRET, backend-only (Portainer), never commit
+**/*firebase-adminsdk*.json
+**/service-account*.json
+
+# iOS / macOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+**/DerivedData/
+
+# Misc
+*.log

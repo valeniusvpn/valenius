@@ -1,0 +1,485 @@
+@page
+@model Valenius.Backend.Pages.Admin.SettingsModel
+@{
+    ViewData["Title"] = "Settings";
+}
+
+<style>
+    .nav-tabs .nav-link { color: #495057; font-weight: 500; }
+    .nav-tabs .nav-link.active { color: var(--brand-primary); font-weight: 600; }
+    .tab-content.card-tabs { border: 1px solid #dee2e6; border-top: 0; border-radius: 0 0 10px 10px; background: #fff; padding: 1.5rem; max-width: 720px; }
+</style>
+
+<div class="d-flex align-items-center gap-2 mb-4">
+    <i class="bi bi-gear text-primary" style="font-size:1.4rem;"></i>
+    <h1 class="page-title mb-0">Settings</h1>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" style="max-width:720px;" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@success
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["SmtpError"] is string smtpErr)
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" style="max-width:720px;" role="alert">
+        <i class="bi bi-x-circle me-1"></i>@smtpErr
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<!-- Tab navigation -->
+<ul class="nav nav-tabs mb-0" id="settingsTabs" style="max-width:720px;">
+    <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-connectivity">
+            <i class="bi bi-pc-display me-1"></i>Client connectivity
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-auth">
+            <i class="bi bi-shield-lock me-1"></i>Authentication
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-email">
+            <i class="bi bi-envelope me-1"></i>E-mail
+            @if (Model.Settings.SmtpEnabled)
+            {
+                <span class="badge bg-success ms-1" style="font-size:.65rem;">Active</span>
+            }
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content card-tabs mb-4">
+
+    <!-- ── Client connectivity tab ───────────────────────────────────────── -->
+    <div class="tab-pane fade show active" id="tab-connectivity">
+        <div class="pt-2">
+
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-pc-display me-2"></i>Client connectivity</div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">
+                        These values go into <code>appsettings.json</code> on each Windows client, or into
+                        <code>valenius-setup.ini</code> alongside the installer for silent / GPO deployments.
+                        The API key is auto-generated on first run and stored in the database.
+                    </p>
+
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Backend URL</label>
+                        <div class="input-group input-group-sm">
+                            <input id="clientBackendUrl" type="text" class="form-control font-monospace"
+                                   value="@Model.BackendUrl" readonly />
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyField('clientBackendUrl','copyIconUrl')">
+                                <i class="bi bi-clipboard" id="copyIconUrl"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="form-label small fw-semibold">API key</label>
+                        <div class="input-group input-group-sm">
+                            <input id="clientApiKey" type="password" class="form-control font-monospace"
+                                   value="@Model.ClientApiKey" readonly />
+                            <button class="btn btn-outline-secondary" type="button"
+                                    onclick="var f=document.getElementById('clientApiKey');f.type=f.type==='password'?'text':'password'">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary" type="button" onclick="copyField('clientApiKey','copyIconKey')">
+                                <i class="bi bi-clipboard" id="copyIconKey"></i>
+                            </button>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap mt-2">
+                            <form method="post" asp-page-handler="RotateApiKey"
+                                  onsubmit="return confirm('Rotate the client API key? The current key stays valid until you retire it, so deployed clients roll forward automatically on their next heartbeat.');">
+                                <button class="btn btn-outline-warning btn-sm" type="submit">
+                                    <i class="bi bi-arrow-repeat"></i> Rotate key
+                                </button>
+                            </form>
+                            @if (Model.RotationInProgress)
+                            {
+                                <form method="post" asp-page-handler="RetireApiKey"
+                                      onsubmit="return confirm('Retire the previous key now? Any client still on the old key will be locked out until re-provisioned.');">
+                                    <button class="btn btn-outline-danger btn-sm" type="submit">
+                                        <i class="bi bi-x-circle"></i> Retire previous key
+                                    </button>
+                                </form>
+                                <span class="badge text-bg-warning">
+                                    Previous key still valid@(Model.ApiKeyRotatedAt is null ? "" : $" · rotated {Model.ApiKeyRotatedAt.Value.ToVienna():yyyy-MM-dd HH:mm}")
+                                </span>
+                            }
+                        </div>
+                        @if (TempData["ApiKeyError"] is string apiKeyErr && !string.IsNullOrEmpty(apiKeyErr))
+                        {
+                            <div class="text-danger small mt-1">@apiKeyErr</div>
+                        }
+                        <div class="form-text">
+                            Rotating generates a new key and hands it to deployed clients on their next heartbeat
+                            (they authenticate with the current key, then switch to the new one). Retire the previous
+                            key once the fleet has migrated. New installs still need the current key in
+                            <code>valenius-setup.ini</code> / at install time.
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="form-label small fw-semibold">valenius-setup.ini snippet</label>
+                        <div class="position-relative">
+                            <pre id="iniSnippet" class="bg-light border rounded p-2 mb-0" style="font-size:.8rem;user-select:all;">[Valenius]
+BackendUrl=@Model.BackendUrl
+ApiKey=@Model.ClientApiKey</pre>
+                            <div class="position-absolute top-0 end-0 m-1 d-flex gap-1">
+                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="downloadIni()" title="Download valenius-setup.ini">
+                                    <i class="bi bi-download"></i>
+                                </button>
+                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyField('iniSnippet','copyIconIni')">
+                                    <i class="bi bi-clipboard" id="copyIconIni"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-text">Place alongside the installer EXE for automatic configuration during silent install.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-0">
+                <div class="card-header"><i class="bi bi-clock-history me-2"></i>Traffic data retention</div>
+                <div class="card-body">
+                    <form method="post" asp-page-handler="SaveTraffic" class="row g-2 align-items-end">
+                        <div class="col-auto">
+                            <label asp-for="Settings.TrafficRetentionDays" class="form-label small fw-semibold">Keep traffic samples for (days)</label>
+                            <input asp-for="Settings.TrafficRetentionDays" type="number" min="1" max="365"
+                                   class="form-control form-control-sm" style="max-width:130px" />
+                        </div>
+                        <div class="col-auto">
+                            <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                        </div>
+                        <div class="col-12">
+                            <div class="form-text">
+                                How long per-client WireGuard traffic samples are kept for the charts. Older samples are
+                                pruned daily; lifetime totals are unaffected. Default 90.
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ── Authentication tab ─────────────────────────────────────────── -->
+    <div class="tab-pane fade" id="tab-auth">
+        <div class="pt-2">
+
+            <!-- Auth method toggles -->
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-toggles me-2"></i>Authentication methods</div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">
+                        At least one method must be enabled. Disabling OIDC while having only OIDC users
+                        (no password set) will lock those users out until a password is assigned via Admin&nbsp;→&nbsp;Users.
+                    </p>
+                    <form method="post" asp-page-handler="SaveAuth" id="authForm">
+                        <input type="hidden" asp-for="Settings.Id" />
+
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input auth-toggle" type="checkbox" role="switch"
+                                   asp-for="Settings.OidcEnabled" id="oidcSwitch" />
+                            <label class="form-check-label fw-semibold" for="oidcSwitch">
+                                Authentik / OIDC login
+                            </label>
+                            <div class="form-text ms-0 mt-0">Users can sign in via your Authentik (or compatible OIDC) provider.</div>
+                        </div>
+
+                        <div class="form-check form-switch mb-4">
+                            <input class="form-check-input auth-toggle" type="checkbox" role="switch"
+                                   asp-for="Settings.LocalAuthEnabled" id="localSwitch" />
+                            <label class="form-check-label fw-semibold" for="localSwitch">
+                                Integrated (username + password) login
+                            </label>
+                            <div class="form-text ms-0 mt-0">Users with a password set in Admin&nbsp;→&nbsp;Users can sign in locally.</div>
+                        </div>
+
+                        <div id="authError" class="alert alert-warning py-2 mb-3 d-none" role="alert">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            At least one authentication method must be enabled.
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-sm" id="authSaveBtn">
+                            <i class="bi bi-floppy me-1"></i>Save
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- OIDC configuration -->
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-diagram-3 me-2"></i>Authentik / OIDC configuration</div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">
+                        Configure your OIDC provider here instead of via environment variables.
+                        Settings are stored in the database and read on startup —
+                        <strong>a container restart is required for changes to take effect.</strong>
+                        Enable OIDC above after saving.
+                    </p>
+
+                    @if (Model.OidcConfiguredAtRuntime)
+                    {
+                        <div class="alert alert-success py-2 mb-3">
+                            <i class="bi bi-check-circle me-1"></i>
+                            OIDC is <strong>active</strong> in the running instance.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="alert alert-warning py-2 mb-3">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            OIDC is <strong>not configured</strong> (or not yet applied). Save settings and restart the container.
+                        </div>
+                    }
+
+                    <form method="post" asp-page-handler="SaveOidcConfig">
+                        <input type="hidden" asp-for="Settings.Id" />
+
+                        <div class="mb-3">
+                            <label asp-for="Settings.OidcAuthority" class="form-label small fw-semibold">Authority URL</label>
+                            <input asp-for="Settings.OidcAuthority" class="form-control form-control-sm"
+                                   placeholder="https://auth.example.com/application/o/yourapp/" />
+                            <div class="form-text">Discovery endpoint base URL (without <code>.well-known/openid-configuration</code>).</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="Settings.OidcClientId" class="form-label small fw-semibold">Client ID</label>
+                            <input asp-for="Settings.OidcClientId" class="form-control form-control-sm"
+                                   placeholder="your-client-id" />
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="Settings.OidcClientSecret" class="form-label small fw-semibold">Client secret</label>
+                            <div class="input-group input-group-sm">
+                                <input asp-for="Settings.OidcClientSecret" type="password" id="oidcSecret"
+                                       class="form-control form-control-sm"
+                                       placeholder="@(string.IsNullOrEmpty(Model.Settings.OidcClientSecret) ? "Enter secret" : "Leave blank to keep current secret")" />
+                                <button class="btn btn-outline-secondary btn-sm" type="button"
+                                        onclick="var f=document.getElementById('oidcSecret');f.type=f.type==='password'?'text':'password'">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
+                            <div class="form-text">Leave blank to keep the currently stored secret.</div>
+                        </div>
+
+                        <div class="mb-4">
+                            <label asp-for="Settings.OidcRedirectUri" class="form-label small fw-semibold">Redirect URI</label>
+                            <input asp-for="Settings.OidcRedirectUri" class="form-control form-control-sm"
+                                   placeholder="https://twister.example.com/signin-oidc" />
+                            <div class="form-text">Must match the redirect URI registered in your OIDC provider.</div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="bi bi-floppy me-1"></i>Save OIDC settings
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ── E-mail tab ─────────────────────────────────────────────────── -->
+    <div class="tab-pane fade" id="tab-email">
+        <div class="pt-2">
+
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-envelope me-2"></i>SMTP configuration</div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">
+                        Used for admin notifications. Transactional providers (SendGrid, Mailgun, Brevo, SMTP2Go)
+                        are recommended over direct M365 / Gmail SMTP.
+                        Use port <strong>587</strong> for STARTTLS or port <strong>465</strong> with the SSL toggle.
+                    </p>
+
+                    <form method="post" asp-page-handler="SaveSmtp">
+                        <input type="hidden" asp-for="Settings.Id" />
+
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   asp-for="Settings.SmtpEnabled" id="smtpEnabled" />
+                            <label class="form-check-label fw-semibold" for="smtpEnabled">
+                                Enable outbound e-mail
+                            </label>
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="form-label small fw-semibold mb-1">Quick presets</div>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button type="button" class="btn btn-outline-secondary btn-sm"
+                                        onclick="smtpPreset('smtp.sendgrid.net',587,'apikey',false)">
+                                    SendGrid
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm"
+                                        onclick="smtpPreset('smtp.mailgun.org',587,'',false)">
+                                    Mailgun
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm"
+                                        onclick="smtpPreset('smtp-relay.brevo.com',587,'',false)">
+                                    Brevo
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm"
+                                        onclick="smtpPreset('mail.smtp2go.com',587,'',false)">
+                                    SMTP2Go
+                                </button>
+                            </div>
+                            <div class="form-text">Fills host and port. Enter your credentials below.</div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-sm-8">
+                                <label asp-for="Settings.SmtpHost" class="form-label small fw-semibold">SMTP host</label>
+                                <input asp-for="Settings.SmtpHost" id="smtpHost" class="form-control form-control-sm"
+                                       placeholder="smtp.sendgrid.net" />
+                            </div>
+                            <div class="col-sm-4">
+                                <label asp-for="Settings.SmtpPort" class="form-label small fw-semibold">Port</label>
+                                <input asp-for="Settings.SmtpPort" id="smtpPort" type="number" class="form-control form-control-sm"
+                                       min="1" max="65535" placeholder="587" />
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="Settings.SmtpUsername" class="form-label small fw-semibold">
+                                Username <span class="text-muted fw-normal">(leave blank if not required)</span>
+                            </label>
+                            <input asp-for="Settings.SmtpUsername" class="form-control form-control-sm"
+                                   placeholder="apikey  or  user@example.com" />
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="Settings.SmtpPassword" class="form-label small fw-semibold">
+                                Password / API key
+                            </label>
+                            <div class="input-group input-group-sm">
+                                <input asp-for="Settings.SmtpPassword" type="password" id="smtpPassword"
+                                       class="form-control form-control-sm"
+                                       placeholder="@(string.IsNullOrEmpty(Model.Settings.SmtpPassword) ? "Enter password or API key" : "Leave blank to keep current value")" />
+                                <button class="btn btn-outline-secondary btn-sm" type="button"
+                                        onclick="var f=document.getElementById('smtpPassword');f.type=f.type==='password'?'text':'password'">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="Settings.EmailFrom" class="form-label small fw-semibold">From address</label>
+                            <input asp-for="Settings.EmailFrom" class="form-control form-control-sm"
+                                   placeholder="Valenius <noreply@example.com>" />
+                            <div class="form-text">Display name is optional: <code>Name &lt;addr&gt;</code> or plain <code>addr</code>.</div>
+                        </div>
+
+                        <div class="form-check form-switch mb-4">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   asp-for="Settings.SmtpUseSsl" id="smtpSsl" value="true" />
+                            <label class="form-check-label fw-semibold" for="smtpSsl">
+                                Use implicit SSL (port 465)
+                            </label>
+                            <div class="form-text ms-0 mt-0">Leave off for STARTTLS on port 587 (recommended for most relays).</div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="bi bi-floppy me-1"></i>Save SMTP settings
+                        </button>
+                    </form>
+
+                    <hr class="my-3" />
+
+                    <form method="post" asp-page-handler="TestSmtp" class="d-flex gap-2 align-items-end">
+                        <div class="flex-grow-1">
+                            <label class="form-label small fw-semibold mb-1">Send test e-mail to</label>
+                            <input type="email" name="testRecipient"
+                                   class="form-control form-control-sm"
+                                   placeholder="you@example.com"
+                                   value="@User.Claims.FirstOrDefault(c => c.Type == System.Security.Claims.ClaimTypes.Email)?.Value" />
+                        </div>
+                        <button type="submit" class="btn btn-outline-secondary btn-sm">
+                            <i class="bi bi-send me-1"></i>Send test
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+</div>
+
+@section Scripts {
+<script>
+    // ── Copy-to-clipboard helper ──────────────────────────────────────────
+    function copyField(fieldId, iconId) {
+        const el = document.getElementById(fieldId);
+        const text = el.tagName === 'PRE' ? el.innerText : el.value;
+        navigator.clipboard.writeText(text).then(() => {
+            const icon = document.getElementById(iconId);
+            icon.className = 'bi bi-clipboard-check';
+            setTimeout(() => icon.className = 'bi bi-clipboard', 2000);
+        });
+    }
+
+    // ── Download valenius-setup.ini ───────────────────────────────────────
+    function downloadIni() {
+        const text = document.getElementById('iniSnippet').innerText;
+        const blob = new Blob([text], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'valenius-setup.ini';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    // ── Auth toggles — enforce at least one enabled ───────────────────────
+    const authToggles = document.querySelectorAll('.auth-toggle');
+    const authError   = document.getElementById('authError');
+    const authSaveBtn = document.getElementById('authSaveBtn');
+    function checkAuthToggles() {
+        const anyOn = Array.from(authToggles).some(t => t.checked);
+        authError.classList.toggle('d-none', anyOn);
+        authSaveBtn.disabled = !anyOn;
+        authToggles.forEach(t => {
+            t.disabled = anyOn && t.checked && Array.from(authToggles).filter(x => x.checked).length === 1;
+        });
+    }
+    authToggles.forEach(t => t.addEventListener('change', checkAuthToggles));
+    checkAuthToggles();
+
+    // ── SMTP provider presets ─────────────────────────────────────────────
+    function smtpPreset(host, port, username, ssl) {
+        document.getElementById('smtpHost').value = host;
+        document.getElementById('smtpPort').value = port;
+        if (username) document.getElementById('Settings_SmtpUsername').value = username;
+        document.getElementById('smtpSsl').checked = ssl;
+    }
+
+    // ── Tab persistence ───────────────────────────────────────────────────
+    (function () {
+        const key   = 'settingsTab';
+        let saved   = null;
+        try { saved = sessionStorage.getItem(key); } catch (e) {}
+
+        @if (TempData["SettingsTab"] is string forcedTab)
+        {
+            <text>saved = '@forcedTab';</text>
+        }
+
+        if (saved) {
+            const btn = document.querySelector('#settingsTabs [data-bs-target="' + saved + '"]');
+            if (btn) new bootstrap.Tab(btn).show();
+        }
+        document.querySelectorAll('#settingsTabs [data-bs-toggle="tab"]').forEach(btn => {
+            btn.addEventListener('shown.bs.tab', e => {
+                try { sessionStorage.setItem(key, e.target.getAttribute('data-bs-target')); } catch (x) {}
+            });
+        });
+    }());
+</script>
+}

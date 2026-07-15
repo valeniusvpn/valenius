@@ -1,0 +1,93 @@
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  db:
+    container_name: valenius-database
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       valenius
+      POSTGRES_USER:     valenius
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - valenius-database-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U valenius -d valenius"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not exposed on the host by default — only reachable by the backend container.
+    # Uncomment the next two lines if you need direct psql access from the host:
+    ports:
+      - "5432:5432"
+
+  # ── Valenius Backend ──────────────────────────────────────────────
+  backend:
+    container_name: valenius-backend
+    build:
+      context: ..
+      dockerfile: Backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      # Clear the base image's ASPNETCORE_HTTP_PORTS so that Kestrel uses
+      # the "Urls" key from appsettings.json without the "Overriding HTTP_PORTS" warning.
+      ASPNETCORE_HTTP_PORTS: ""
+
+      # Database — points to the compose service above
+      ConnectionStrings__DefaultConnection: >-
+        Host=db;Port=5432;Database=valenius;Username=valenius;Password=${DB_PASSWORD}
+
+      # Data Protection key ring (survives container re-creates)
+      DataProtection__KeysPath: /app/keys
+
+      # API key is intentionally NOT set here — a literal $ in a compose value is treated
+      # as variable substitution, corrupting keys that contain $. The key from appsettings.json
+      # baked into the image is used instead. To change it, update appsettings.json and rebuild.
+
+      # Installation license key (Ed25519-signed, issued by the licensing server).
+      # Set VALENIUS_LICENSE_KEY in Portainer stack Environment variables.
+      # Leave unset to run as Community edition (no limits enforced).
+      VALENIUS_LICENSE_KEY: ${VALENIUS_LICENSE_KEY:-}
+
+      # Licensing server URL and client API key are hardcoded — no env vars needed.
+
+      # versions.json and installer EXE files live in a host-mounted directory
+      # so they can be updated without rebuilding the image.
+      Valenius__ManifestPath:  /app/data/versions.json
+      Valenius__DownloadsPath: /app/data/downloads
+
+      # Bootstrap admin — always-available local login for initial setup and emergency access.
+      # Set ADMIN_EMAIL and ADMIN_PASSWORD in .env (or Portainer stack env vars).
+      # Changing the password takes effect on the next container restart — no DB edit needed.
+      # The backend also accepts ADMIN_EMAIL / ADMIN_PASSWORD set directly (without the
+      # Valenius__ prefix) as a fallback, which is simpler in Portainer.
+      Valenius__AdminEmail:    ${ADMIN_EMAIL:-}
+      Valenius__AdminPassword: ${ADMIN_PASSWORD:-}
+
+      # Authentik / OIDC is configured via Admin -> Settings (stored in DB).
+      # No Authentik__ env vars are needed here.
+      # UPGRADE PATH: if you still have Authentik__ vars set, they are used as a
+      # one-time fallback to pre-populate the DB on the first restart after upgrading,
+      # then ignored afterward.  You can remove them from your .env once migrated.
+
+    extra_hosts:
+      # Allows the backend container to reach services on the Docker host.
+      # On Linux use the server's LAN IP as the sidecar URL — host.docker.internal
+      # maps to the Docker bridge gateway and may not route correctly to the sidecar.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Bind-mount: place versions.json + downloads/ here on the host
+      - ./data:/app/data
+      # Named volume: Data Protection keys must survive container re-creates
+      - valenius-keystore:/app/keys
+    ports:
+      # Expose to the host so your reverse proxy (NPM / Nginx / Caddy) can forward to it.
+      - "${BACKEND_PORT}:8080"
+
+volumes:
+  valenius-database-data:
+  valenius-keystore:

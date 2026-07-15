@@ -1,0 +1,264 @@
+@page "{id:int}"
+@model Valenius.Backend.Pages.Admin.Users.EditModel
+@{
+    ViewData["Title"] = $"User - {Model.AppUser.DisplayName}";
+    var isLocal = Model.AppUser.IsLocalUser;
+}
+
+<div class="mb-3">
+    <a asp-page="Index" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Back to users
+    </a>
+</div>
+
+<div class="d-flex align-items-center gap-2 mb-4">
+    @if (isLocal)
+    {
+        <i class="bi bi-person-lock text-success" style="font-size:1.4rem;"></i>
+    }
+    else
+    {
+        <i class="bi bi-shield-check text-info" style="font-size:1.4rem;"></i>
+    }
+    <h1 class="page-title mb-0">@Model.AppUser.DisplayName</h1>
+    @if (isLocal)
+    {
+        <span class="badge bg-success ms-1">Local</span>
+    }
+    else
+    {
+        <span class="badge bg-info text-dark ms-1">OIDC</span>
+    }
+</div>
+
+@if (TempData["Success"] is string ok)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@ok
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Error"] is string err)
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-x-circle me-1"></i>@err
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<div class="row g-3">
+
+    @* ── Left column ── *@
+    <div class="col-lg-5">
+
+        @* Role + customer *@
+        <div class="card mb-3">
+            <div class="card-header"><i class="bi bi-pencil me-2"></i>Role &amp; customer</div>
+            <div class="card-body">
+                <form method="post">
+                    <input type="hidden" name="id" value="@Model.AppUser.Id" />
+
+                    @if (!isLocal)
+                    {
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Subject (OIDC sub)</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   value="@Model.AppUser.Subject" readonly disabled />
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Email</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   value="@(Model.AppUser.Email ?? "-")" readonly disabled />
+                        </div>
+                    }
+
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Role</label>
+                        <select name="role" class="form-select form-select-sm">
+                            <option value="Admin" selected="@(Model.AppUser.Role == "Admin" ? "selected" : null)">Admin</option>
+                            <option value="User"  selected="@(Model.AppUser.Role == "User"  ? "selected" : null)">User</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Customer</label>
+                        <select name="customerId" class="form-select form-select-sm">
+                            <option value="">-- None --</option>
+                            @foreach (var c in Model.AllCustomers)
+                            {
+                                <option value="@c.Id" selected="@(Model.AppUser.CustomerId == c.Id ? "selected" : null)">@c.Name</option>
+                            }
+                        </select>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-sm w-100">
+                        <i class="bi bi-floppy me-1"></i>Save
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        @* Details (local users only) *@
+        @if (isLocal)
+        {
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-person-vcard me-2"></i>Profile details</div>
+                <div class="card-body">
+                    <form method="post" asp-page-handler="EditDetails">
+                        <input type="hidden" name="id" value="@Model.AppUser.Id" />
+
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Display name</label>
+                            <input type="text" name="displayName" class="form-control form-control-sm"
+                                   value="@Model.AppUser.DisplayName" required />
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Email <span class="text-muted fw-normal">(used to sign in)</span></label>
+                            <input type="email" name="email" class="form-control form-control-sm"
+                                   value="@Model.AppUser.Email" required />
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-sm w-100">
+                            <i class="bi bi-floppy me-1"></i>Save details
+                        </button>
+                    </form>
+                </div>
+            </div>
+        }
+
+    </div>
+
+    @* ── Right column: password + TOTP (local only) ── *@
+    @if (isLocal)
+    {
+        <div class="col-lg-5">
+            <!-- TOTP / authenticator app -->
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="bi bi-phone me-2"></i>Authenticator app (2FA)
+                    @if (Model.AppUser.TotpEnabled)
+                    {
+                        <span class="badge bg-success ms-2">Enabled</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-secondary ms-2">Not set up</span>
+                    }
+                </div>
+                <div class="card-body">
+                    @if (Model.AppUser.TotpEnabled)
+                    {
+                        <p class="small text-muted mb-3">
+                            Two-factor authentication is active. The user must enter a code from their
+                            authenticator app after their password on every sign-in.
+                        </p>
+                        <form method="post" asp-page-handler="DisableTotp">
+                            <input type="hidden" name="id" value="@Model.AppUser.Id" />
+                            <button type="submit" class="btn btn-outline-danger btn-sm"
+                                    onclick="return confirm('Disable two-factor authentication for @Model.AppUser.DisplayName?')">
+                                <i class="bi bi-shield-slash me-1"></i>Disable 2FA
+                            </button>
+                        </form>
+                    }
+                    else if (Model.PendingTotpSecret is not null)
+                    {
+                        <p class="small text-muted mb-2">
+                            Scan the QR code with <strong>Microsoft Authenticator</strong>,
+                            <strong>Google Authenticator</strong>, or any TOTP app.
+                            Then enter the 6-digit code below to activate.
+                        </p>
+                        <div class="text-center mb-3">
+                            <img src="data:image/png;base64,@Model.TotpQrBase64" alt="TOTP QR code"
+                                 style="max-width:200px;" class="rounded border p-1" />
+                        </div>
+                        <form method="post" asp-page-handler="EnableTotp">
+                            <input type="hidden" name="id"     value="@Model.AppUser.Id" />
+                            <input type="hidden" name="secret" value="@Model.PendingTotpSecret" />
+                            <div class="mb-3">
+                                <label class="form-label small fw-semibold">Verification code</label>
+                                <input type="text" name="code" class="form-control form-control-sm text-center"
+                                       inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                                       autocomplete="one-time-code" placeholder="000000"
+                                       style="letter-spacing:.3em;font-size:1.15rem;" required />
+                                <div class="form-text">Enter the code your app shows right now to confirm setup.</div>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="submit" class="btn btn-success btn-sm">
+                                    <i class="bi bi-shield-check me-1"></i>Activate 2FA
+                                </button>
+                                <form method="post" asp-page-handler="GenerateTotp" class="m-0">
+                                    <input type="hidden" name="id" value="@Model.AppUser.Id" />
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                        <i class="bi bi-arrow-repeat me-1"></i>New QR code
+                                    </button>
+                                </form>
+                            </div>
+                        </form>
+                    }
+                    else
+                    {
+                        <p class="small text-muted mb-3">
+                            Add an extra layer of security. After setup the user will need both their
+                            password and a code from their authenticator app to sign in.
+                        </p>
+                        <form method="post" asp-page-handler="GenerateTotp">
+                            <input type="hidden" name="id" value="@Model.AppUser.Id" />
+                            <button type="submit" class="btn btn-outline-primary btn-sm">
+                                <i class="bi bi-qr-code me-1"></i>Set up authenticator app
+                            </button>
+                        </form>
+                    }
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">
+                    <i class="bi bi-key me-2"></i>Password
+                    @if (Model.AppUser.PasswordHash is not null)
+                    {
+                        <span class="badge bg-success ms-2">Set</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-warning ms-2">Not set</span>
+                    }
+                </div>
+                <div class="card-body">
+                    <form method="post" asp-page-handler="SetPassword">
+                        <input type="hidden" name="id" value="@Model.AppUser.Id" />
+
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">New password</label>
+                            <input type="password" name="newPassword" class="form-control form-control-sm"
+                                   autocomplete="new-password" minlength="8" required />
+                            <div class="form-text">Minimum 8 characters.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Confirm password</label>
+                            <input type="password" name="confirmPassword" class="form-control form-control-sm"
+                                   autocomplete="new-password" minlength="8" required />
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-sm w-100">
+                            <i class="bi bi-key me-1"></i>Set password
+                        </button>
+                    </form>
+
+                    @if (Model.AppUser.PasswordHash is not null)
+                    {
+                        <hr class="my-3" />
+                        <form method="post" asp-page-handler="ClearPassword">
+                            <input type="hidden" name="id" value="@Model.AppUser.Id" />
+                            <button type="submit" class="btn btn-outline-danger btn-sm w-100"
+                                    onclick="return confirm('Clear the password? The user will not be able to sign in until a new password is set.')">
+                                <i class="bi bi-trash me-1"></i>Clear password
+                            </button>
+                        </form>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+
+</div>

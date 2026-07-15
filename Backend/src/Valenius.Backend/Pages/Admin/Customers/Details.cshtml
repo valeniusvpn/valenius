@@ -1,0 +1,1123 @@
+@page "{id:int}"
+@model Valenius.Backend.Pages.Admin.Customers.DetailsModel
+@{
+    ViewData["Title"] = $"Customer - {Model.Customer.Name}";
+    var c      = Model.Customer;
+    var _isWt  = c.ServerMode == "Valenius";
+    var _isPro = Model.IsProEdition;
+}
+
+<style>
+    .nav-tabs .nav-link { color: #495057; font-weight: 500; }
+    .nav-tabs .nav-link.active { color: var(--brand-primary); font-weight: 600; }
+    .nav-tabs .nav-link.tab-brand { color: #1c87b0; }
+    .nav-tabs .nav-link.tab-brand.active { color: #1c87b0; }
+    .tab-content.card-tabs { border: 1px solid #dee2e6; border-top: 0; border-radius: 0 0 10px 10px; background: #fff; padding: 1.5rem; }
+    .section-heading { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #6c757d; border-bottom: 1px solid #dee2e6; padding-bottom: .4rem; margin-bottom: 1rem; }
+    .section-heading-brand { color: #29ABE2; border-color: rgba(41,171,226,.3); }
+    .card-brand { border-left: 3px solid #29ABE2; }
+    .card-brand > .card-header { color: #1c87b0; background: rgba(41,171,226,.06); border-bottom-color: rgba(41,171,226,.2); font-weight: 600; }
+    .customer-hero { border: 1px solid #dee2e6; border-radius: 10px; background: linear-gradient(135deg,#fbfdff 0%,#f4f8fb 100%); }
+    .customer-hero .meta { font-size: .82rem; }
+    .customer-hero .meta .sep { color: #cdd5dc; margin: 0 .35rem; }
+</style>
+
+<div class="mb-3 d-flex gap-2">
+    <a asp-page="Index" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Back to customers
+    </a>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@success
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Warning"] is string warning)
+{
+    <div class="alert alert-warning alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-exclamation-triangle me-1"></i>@warning
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+@if (TempData["Error"] is string error)
+{
+    <div class="alert alert-danger alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-x-circle me-1"></i>@error
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<!-- ── Identity & status hero (always visible above the tabs) ───────────────── -->
+<div class="card customer-hero mb-3">
+    <div class="card-body py-3">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-building text-primary" style="font-size:1.6rem;"></i>
+            <div>
+                <h1 class="page-title mb-1">@c.Name</h1>
+                <div class="meta text-muted d-flex flex-wrap align-items-center">
+                    @if (_isWt)
+                    {
+                        <span class="badge" style="background:rgba(15,78,102,.12);color:#0F4E66;"><i class="bi bi-hdd-network me-1"></i>Valenius WireGuard®</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-secondary"><i class="bi bi-server me-1"></i>External server</span>
+                    }
+                    <span class="badge @(_isPro ? "bg-primary" : "bg-light text-dark border") ms-2">@(_isPro ? "Pro" : "OSS")</span>
+
+                    @if (_isWt)
+                    {
+                        <span class="sep">·</span>
+                        @if (Model.HasActiveSidecarCert)
+                        {
+                            <span class="text-success"><i class="bi bi-patch-check me-1"></i>Sidecar enrolled@(string.IsNullOrEmpty(Model.SidecarVersion) ? "" : $" · v{Model.SidecarVersion}")</span>
+                        }
+                        else
+                        {
+                            <span class="text-secondary"><i class="bi bi-patch-exclamation me-1"></i>Sidecar not enrolled</span>
+                        }
+                    }
+
+                    <span class="sep">·</span>
+                    <span>@Model.Clients.Count client@(Model.Clients.Count == 1 ? "" : "s") (@Model.ActiveCount active)</span>
+                    <span class="sep">·</span>
+                    <span>@Model.Users.Count user@(Model.Users.Count == 1 ? "" : "s")</span>
+                    @if (Model.License.MspModeEnabled)
+                    {
+                        <span class="sep">·</span>
+                        <span><i class="bi bi-diagram-3 me-1"></i>@c.MaxEndpoints endpoint@(c.MaxEndpoints == 1 ? "" : "s") allocated</span>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tab navigation -->
+<ul class="nav nav-tabs mb-0" id="customerTabs">
+    <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview">
+            <i class="bi bi-info-circle me-1"></i>Overview
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-general">
+            <i class="bi bi-building me-1"></i>General
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link tab-brand" data-bs-toggle="tab" data-bs-target="#tab-server">
+            <img src="~/img/app.png" style="height:14px;width:14px;object-fit:contain;vertical-align:-.1em;" class="me-1" alt="" />Integrated Server
+            @if (_isWt)
+            {
+                <span class="badge bg-success ms-1" style="font-size:.65rem;">Active</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-networks">
+            <i class="bi bi-diagram-3 me-1"></i>Networks &amp; External
+        </button>
+    </li>
+    @if (Model.License.MspModeEnabled)
+    {
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-endpoints">
+            <i class="bi bi-hdd-network me-1"></i>Endpoints
+        </button>
+    </li>
+    }
+</ul>
+
+<div class="tab-content card-tabs mb-4">
+
+    <!-- ── Overview tab ─────────────────────────────────────────────────────── -->
+    <div class="tab-pane fade show active" id="tab-overview">
+        <div class="pt-3">
+
+            <!-- Traffic -->
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-graph-up me-2"></i>WireGuard traffic</div>
+                <div class="card-body traffic-auto" data-traffic-url="?handler=Traffic&id=@Model.Customer.Id">
+                    <div class="d-flex justify-content-end mb-3">
+                        <partial name="_TrafficRangeSelector" />
+                    </div>
+                    <div class="row g-4">
+                        <div class="col-lg-8">
+                            <div class="d-flex gap-4 mb-3 flex-wrap">
+                                <div>
+                                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">Total usage</div>
+                                    <div class="fs-4 fw-semibold" data-tf="total">@TrafficFormat.Bytes(Model.CustomerRx + Model.CustomerTx)</div>
+                                </div>
+                                <div>
+                                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">
+                                        <span style="color:#2563eb">&#9679;</span> Downloaded
+                                    </div>
+                                    <div class="fs-5 fw-semibold" data-tf="rx">@TrafficFormat.Bytes(Model.CustomerRx)</div>
+                                </div>
+                                <div>
+                                    <div class="text-muted small text-uppercase" style="letter-spacing:.03em">
+                                        <span style="color:#d97706">&#9679;</span> Uploaded
+                                    </div>
+                                    <div class="fs-5 fw-semibold" data-tf="tx">@TrafficFormat.Bytes(Model.CustomerTx)</div>
+                                </div>
+                            </div>
+                            <div data-tf="chart">@Html.Raw(TrafficChart.Render(Model.TrafficBuckets, Valenius.Backend.Services.TrafficRange.Default))</div>
+                        </div>
+                        <div class="col-lg-4">
+                            <div class="text-muted small text-uppercase mb-2" style="letter-spacing:.03em">Top clients</div>
+                            @{
+                                var _topClients = Model.Clients
+                                    .Where(c => c.WgRxLifetime + c.WgTxLifetime > 0)
+                                    .OrderByDescending(c => c.WgRxLifetime + c.WgTxLifetime)
+                                    .Take(8).ToList();
+                            }
+                            @if (_topClients.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">No traffic recorded yet — needs the integrated Valenius server (sidecar).</p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm align-middle mb-0">
+                                    <tbody>
+                                        @foreach (var tc in _topClients)
+                                        {
+                                            <tr>
+                                                <td class="text-truncate" style="max-width:170px">
+                                                    <a asp-page="/Admin/Details" asp-route-id="@tc.Id">@tc.EffectiveName</a>
+                                                </td>
+                                                <td class="text-end fw-semibold">@TrafficFormat.Bytes(tc.WgRxLifetime + tc.WgTxLifetime)</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary -->
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-info-circle me-2"></i>Summary</div>
+                <div class="card-body">
+                    <dl class="row mb-0 small">
+                        <dt class="col-sm-3">Server mode</dt>
+                        <dd class="col-sm-9">@(_isWt ? "Valenius WireGuard® server (integrated)" : "External WireGuard® server")</dd>
+
+                        <dt class="col-sm-3">Edition</dt>
+                        <dd class="col-sm-9">@(_isPro ? "Pro" : "Community (OSS)")</dd>
+
+                        @if (_isWt)
+                        {
+                            <dt class="col-sm-3">Sidecar</dt>
+                            <dd class="col-sm-9">
+                                @if (Model.HasActiveSidecarCert)
+                                {
+                                    <span class="text-success">Enrolled</span>
+                                    @if (!string.IsNullOrEmpty(Model.SidecarVersion))
+                                    {
+                                        <span class="text-muted">· wg-sidecar v@Model.SidecarVersion</span>
+                                    }
+                                    @if (Model.SidecarListenPort.HasValue)
+                                    {
+                                        <span class="text-muted">· listen port @Model.SidecarListenPort</span>
+                                    }
+                                }
+                                else
+                                {
+                                    <span class="text-secondary">Not enrolled</span>
+                                }
+                            </dd>
+                        }
+
+                        <dt class="col-sm-3">Client prefix</dt>
+                        <dd class="col-sm-9">@(string.IsNullOrEmpty(c.ClientPrefix) ? "—" : c.ClientPrefix)</dd>
+
+                        <dt class="col-sm-3">Heartbeat interval</dt>
+                        <dd class="col-sm-9">@(c.HeartbeatIntervalMinutes?.ToString() ?? "5 (default)") min</dd>
+
+                        @if (!string.IsNullOrEmpty(c.Notes))
+                        {
+                            <dt class="col-sm-3">Notes</dt>
+                            <dd class="col-sm-9" style="white-space:pre-wrap;">@c.Notes</dd>
+                        }
+                    </dl>
+                </div>
+            </div>
+
+            <div class="row g-3">
+                <!-- Assigned clients -->
+                <div class="col-lg-6">
+                    <div class="card mb-0">
+                        <div class="card-header"><i class="bi bi-pc-display me-2"></i>Clients (@Model.Clients.Count)</div>
+                        @if (!Model.Clients.Any())
+                        {
+                            <div class="card-body text-muted small">No clients assigned to this customer.</div>
+                        }
+                        else
+                        {
+                            <table class="table table-sm mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Status</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var cl in Model.Clients)
+                                    {
+                                        <tr>
+                                            <td class="fw-semibold small">@cl.EffectiveName</td>
+                                            <td>
+                                                @if (cl.IsActive)
+                                                {
+                                                    <span class="badge bg-success">Active</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="badge bg-warning text-dark">Pending</span>
+                                                }
+                                            </td>
+                                            <td class="text-end">
+                                                <a asp-page="/Admin/Details" asp-route-id="@cl.Id"
+                                                   class="btn btn-xs btn-outline-primary" style="font-size:.75rem;padding:.15rem .5rem;">
+                                                    <i class="bi bi-eye"></i>
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    </div>
+                </div>
+
+                <!-- Assigned users -->
+                <div class="col-lg-6">
+                    <div class="card mb-0">
+                        <div class="card-header"><i class="bi bi-people me-2"></i>Users (@Model.Users.Count)</div>
+                        @if (!Model.Users.Any())
+                        {
+                            <div class="card-body text-muted small">No users assigned to this customer.</div>
+                        }
+                        else
+                        {
+                            <table class="table table-sm mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Display name</th>
+                                        <th>Role</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var u in Model.Users)
+                                    {
+                                        <tr>
+                                            <td class="small">@u.DisplayName</td>
+                                            <td>
+                                                @if (u.Role == "Admin")
+                                                {
+                                                    <span class="badge bg-primary">Admin</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="badge bg-secondary">User</span>
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ── General tab ──────────────────────────────────────────────────────── -->
+    <div class="tab-pane fade" id="tab-general">
+        <div class="row g-3 pt-3">
+
+            <!-- Settings -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-sliders me-1"></i>Settings</div>
+                <div class="card mb-0">
+                    <div class="card-header"><i class="bi bi-pencil me-2"></i>Edit customer</div>
+                    <div class="card-body">
+                        <form method="post" asp-page-handler="Save">
+                            <input type="hidden" name="id" value="@c.Id" />
+                            <div class="mb-3">
+                                <label class="form-label small fw-semibold">Name</label>
+                                <input type="text" name="name" class="form-control form-control-sm"
+                                       value="@c.Name" required maxlength="200" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label small fw-semibold">Client prefix <span class="text-muted fw-normal">(max 3 chars)</span></label>
+                                <input type="text" name="clientPrefix" class="form-control form-control-sm"
+                                       value="@c.ClientPrefix" maxlength="3" style="text-transform:uppercase;"
+                                       placeholder="e.g. ABC" />
+                                <div class="form-text">New clients whose hostname starts with this prefix are assigned automatically.</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label small fw-semibold">
+                                    Heartbeat interval <span class="text-muted fw-normal">(minutes, blank = default 5)</span>
+                                </label>
+                                <input type="number" name="heartbeatIntervalMinutes" class="form-control form-control-sm"
+                                       value="@c.HeartbeatIntervalMinutes" min="1" max="60"
+                                       placeholder="5" />
+                                <div class="form-text">How often clients check in with the backend (1-60 min).</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label small fw-semibold">Notes</label>
+                                <textarea name="notes" class="form-control form-control-sm" rows="3"
+                                          maxlength="500">@c.Notes</textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm">
+                                <i class="bi bi-floppy me-1"></i>Save changes
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-lightning-charge me-1"></i>Actions</div>
+                <div class="card border-danger mb-0">
+                    <div class="card-header text-danger bg-danger bg-opacity-10 border-bottom border-danger border-opacity-25">
+                        <i class="bi bi-exclamation-triangle me-2"></i>Danger zone
+                    </div>
+                    <div class="card-body">
+                        <p class="small text-muted mb-3">
+                            Delete this customer. Assigned clients and users will be unlinked but not deleted.
+                        </p>
+                        <form method="post" asp-page-handler="Delete"
+                              onsubmit="return confirm('Delete customer @c.Name?')">
+                            <input type="hidden" name="id" value="@c.Id" />
+                            <button type="submit" class="btn btn-outline-danger btn-sm">
+                                <i class="bi bi-trash me-1"></i>Delete customer
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Integrated Server tab (Valenius WireGuard® — Pro flagship) ─────────── -->
+    <div class="tab-pane fade" id="tab-server">
+
+        @if (TempData["WgSuccess"] is string wgSuccessMsg)
+        {
+            <div class="alert alert-success alert-dismissible fade show mt-3 mb-0" role="alert">
+                <i class="bi bi-check-circle me-2"></i>@wgSuccessMsg
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        }
+        @if (TempData["WgError"] is string wgErrorMsg)
+        {
+            <div class="alert alert-danger alert-dismissible fade show mt-3 mb-0" role="alert">
+                <i class="bi bi-x-circle me-2"></i>@wgErrorMsg
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        }
+
+        <div class="section-heading section-heading-brand mt-3">
+            <img src="~/img/app.png" style="height:15px;width:15px;object-fit:contain;vertical-align:-.1em;" class="me-1" alt="" />
+            Valenius WireGuard® server
+        </div>
+
+        @if (!_isPro)
+        {
+            <!-- OSS: full-tab Pro upsell -->
+            <div class="row justify-content-center">
+                <div class="col-lg-8">
+                    <div class="card border-0" style="background: linear-gradient(135deg,#f0f4ff 0%,#e8eeff 100%);">
+                        <div class="card-body py-5 text-center">
+                            <i class="bi bi-shield-lock-fill mb-3 d-block" style="font-size:3rem;color:var(--brand-primary);"></i>
+                            <h5 class="fw-bold mb-2" style="color:var(--brand-primary);">Valenius Pro — Integrated server</h5>
+                            <p class="text-muted mb-4 mx-auto" style="max-width:520px;">
+                                Upgrade to Pro to enable the integrated WireGuard® server for this customer and
+                                provision peers automatically — no manual config upload.
+                            </p>
+                            <ul class="list-unstyled text-start d-inline-block small mb-4">
+                                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Auto-provision VPN peers on client activation</li>
+                                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Mutual TLS connection to the WireGuard® sidecar</li>
+                                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Push configs directly to clients without manual upload</li>
+                                <li><i class="bi bi-check-circle-fill text-success me-2"></i>Per-client VPN IP allocation, config renewal &amp; MFA gating</li>
+                            </ul>
+                            <div>
+                                <a href="https://stranto.com/valenius" target="_blank" class="btn btn-sm" style="background:var(--brand-primary);color:#fff;">
+                                    <i class="bi bi-arrow-up-right-circle me-1"></i>Learn more about Pro
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <!-- Pro: on/off toggle -->
+            <form method="post" asp-page-handler="ToggleWtServer">
+                <input type="hidden" name="id" value="@c.Id" />
+                <div class="card card-brand mb-3">
+                    <div class="card-body">
+                        <div class="d-flex align-items-center gap-3">
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                       id="wtToggle" name="enabled" value="true"
+                                       @(_isWt ? "checked" : "")
+                                       onchange="this.closest('form').submit()" />
+                            </div>
+                            <div>
+                                <label for="wtToggle" class="fw-semibold mb-0">Enable Valenius WireGuard® server</label>
+                                <div class="small text-muted">Peers are auto-provisioned via the sidecar API when clients are activated.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </form>
+
+            @if (_isWt)
+            {
+                <div class="row g-3">
+                    <!-- Left column — configuration (settings) -->
+                    <div class="col-lg-6">
+
+                        <!-- Sidecar configuration -->
+                        <div class="card card-brand mb-3">
+                            <div class="card-header"><i class="bi bi-hdd-network me-2"></i>Sidecar configuration</div>
+                            <div class="card-body">
+
+                                @if (Model.TransitConflicts.Count > 0)
+                                {
+                                    <div class="alert alert-danger py-2 mb-3" role="alert">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>
+                                        <strong>VPN transit subnet conflict.</strong>
+                                        This sidecar's VPN network overlaps:
+                                        @string.Join(", ", Model.TransitConflicts.Select(c => $"{c.Name} ({c.Subnet})")).
+                                        Transit subnets must be globally unique. Until you renumber one sidecar's WireGuard
+                                        interface, the fast gateway connectivity check is disabled for these customers and
+                                        clients fall back to the handshake check.
+                                    </div>
+                                }
+
+                                @if (Model.SidecarTestMessage is not null)
+                                {
+                                    <div class="alert @(Model.SidecarTestSuccess ? "alert-success" : "alert-danger") alert-dismissible fade show py-2 mb-2" role="alert">
+                                        <i class="bi @(Model.SidecarTestSuccess ? "bi-check-circle" : "bi-x-circle") me-1"></i>@Model.SidecarTestMessage
+                                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                                    </div>
+                                    @if (Model.UdpCheckedPort.HasValue)
+                                    {
+                                        var udpOk = Model.UdpPortReachable;
+                                        <div class="alert @(udpOk == true ? "alert-success" : udpOk == false ? "alert-danger" : "alert-warning") py-2 mb-3" role="alert">
+                                            <i class="bi @(udpOk == true ? "bi-check-circle" : udpOk == false ? "bi-x-circle" : "bi-question-circle") me-1"></i>
+                                            WireGuard® UDP <code>@Model.UdpCheckedHost:@Model.UdpCheckedPort</code> —
+                                            @if (udpOk == true)
+                                            {
+                                                <text>reachable (no ICMP port unreachable received)</text>
+                                            }
+                                            else if (udpOk == false)
+                                            {
+                                                <text>unreachable — ICMP port unreachable (nothing listening on this port)</text>
+                                            }
+                                            else
+                                            {
+                                                <text>check inconclusive (DNS or network error)</text>
+                                            }
+                                        </div>
+                                    }
+                                }
+
+                                <form method="post" asp-page-handler="SaveServer" id="serverForm">
+                                    <input type="hidden" name="id" value="@c.Id" />
+
+                                    <div class="row g-2 mb-3">
+                                        <div class="col">
+                                            <label class="form-label small fw-semibold">Server address</label>
+                                            <input type="text" name="sidecarUrl" class="form-control form-control-sm" id="sidecarUrlInput"
+                                                   value="@c.SidecarUrl" placeholder="host.docker.internal" />
+                                            <div class="form-text">
+                                                Hostname or IP of the sidecar, reachable from the backend.<br>
+                                                Same host: <code>host.docker.internal</code> &nbsp;·&nbsp; Separate host: <code>10.0.1.2</code>
+                                            </div>
+                                        </div>
+                                        <div class="col-auto">
+                                            <label class="form-label small fw-semibold">Management port <span class="text-muted fw-normal">(MANAGEMENT_PORT)</span></label>
+                                            <input type="number" name="sidecarManagementPort" class="form-control form-control-sm" id="sidecarPortInput"
+                                                   value="@c.SidecarManagementPort" min="1" max="65535" placeholder="9003" style="width:110px;" />
+                                            <div class="form-text">Default 9003. mTLS, backend only.</div>
+                                        </div>
+                                        <div class="col-auto">
+                                            <label class="form-label small fw-semibold">Health port <span class="text-muted fw-normal">(HEALTH_PORT)</span></label>
+                                            <input type="number" name="sidecarHealthPort" class="form-control form-control-sm"
+                                                   value="@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : null)" min="1" max="65535" placeholder="9004" style="width:135px;" />
+                                            <div class="form-text">Default 9004. VPN clients probe this port.</div>
+                                        </div>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Server endpoint <span class="text-muted fw-normal">(public hostname or IP)</span></label>
+                                        <input type="text" name="serverEndpoint" class="form-control form-control-sm"
+                                               value="@c.ServerEndpoint" placeholder="vpn.example.com" />
+                                        <div class="form-text">Public hostname or IP of the WireGuard® server. Port is read from the server configuration automatically.</div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">WireGuard® listen port</label>
+                                        <div class="d-flex align-items-center gap-2 mt-1 flex-wrap">
+                                            @if (Model.SidecarListenPort.HasValue)
+                                            {
+                                                <span class="badge bg-success px-2 py-1" style="font-size:.85rem;font-family:monospace;">@Model.SidecarListenPort</span>
+                                                <span class="small text-muted">
+                                                    Detected — client configs will use
+                                                    <code>Endpoint = @(c.ServerEndpoint ?? "..."):@Model.SidecarListenPort</code>
+                                                </span>
+                                                @if (!string.IsNullOrEmpty(Model.SidecarVersion))
+                                                {
+                                                    <span class="badge fw-normal ms-auto"
+                                                          style="background:rgba(108,117,125,.1);color:#6c757d;">
+                                                        <i class="bi bi-box me-1"></i>wg-sidecar v@Model.SidecarVersion
+                                                    </span>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary px-2 py-1">-</span>
+                                                <span class="small text-muted">Not available — sidecar unreachable or not yet configured.</span>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">VPN subnet</label>
+                                        <div class="d-flex align-items-center gap-2 mt-1">
+                                            @if (!string.IsNullOrEmpty(Model.SidecarInterfaceAddress))
+                                            {
+                                                <span class="badge px-2 py-1 font-monospace"
+                                                      style="background:rgba(15,78,102,.12);color:#0F4E66;font-size:.85rem;">@Model.SidecarInterfaceAddress</span>
+                                                <span class="small text-muted">Read from server — .1 is the gateway, clients start at .2</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary px-2 py-1">-</span>
+                                                <span class="small text-muted">Not available — sidecar unreachable or not yet configured.</span>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">VPN prefix <span class="text-muted fw-normal">(letters only)</span></label>
+                                        <div class="input-group input-group-sm">
+                                            <input type="text" name="vpnPrefix" class="form-control form-control-sm"
+                                                   value="@c.VpnPrefix" placeholder="MyCompany"
+                                                   pattern="^[A-Za-z]*$" maxlength="50"
+                                                   title="Letters only -- no numbers or special characters" />
+                                            <span class="input-group-text text-muted">-VPN</span>
+                                        </div>
+                                        <div class="form-text">Profile name on the client, e.g. <code>MyCompany-VPN</code>. Leave blank to use the customer name.</div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">DNS server <span class="text-muted fw-normal">(optional)</span></label>
+                                        <input type="text" name="dnsServer" class="form-control form-control-sm"
+                                               value="@c.DnsServer" placeholder="10.100.0.1"
+                                               pattern="^(\d{1,3}\.){3}\d{1,3}$"
+                                               title="IPv4 address, e.g. 10.100.0.1" />
+                                        <div class="form-text">Written as <code>DNS =</code> in client configs. Can be overridden per client.</div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">DNS search domains <span class="text-muted fw-normal">(optional)</span></label>
+                                        <input type="text" name="dnsSearchDomains" class="form-control form-control-sm"
+                                               value="@c.DnsSearchDomains" placeholder="corp.internal, lan"
+                                               pattern="^[A-Za-z0-9][A-Za-z0-9.\-]*(\s*,\s*[A-Za-z0-9][A-Za-z0-9.\-]*)*$"
+                                               title="Comma-separated domains, e.g. corp.internal, lan" />
+                                        <div class="form-text">
+                                            Appended to <code>DNS =</code> as split-DNS (NRPT) rules so only these domains
+                                            resolve through this tunnel — lets clients run several VPNs at once, each with its
+                                            own DNS. Requires a DNS server above. Can be overridden per client.
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Allowed IPs <span class="text-muted fw-normal">(default for all clients)</span></label>
+                                        <input type="text" name="allowedIPs" class="form-control form-control-sm"
+                                               value="@c.AllowedIPs" placeholder="0.0.0.0/0, ::/0"
+                                               pattern="((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})(,\s*((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3}))*"
+                                               title="Comma-separated CIDRs, e.g. 0.0.0.0/0, ::/0 or 10.0.0.0/8" />
+                                        <div class="form-text">
+                                            Written as <code>AllowedIPs =</code> in client configs.
+                                            Leave blank for full tunnel (<code>0.0.0.0/0, ::/0</code>).
+                                            Use CIDR for split tunnel, e.g. <code>10.100.0.0/24</code>.
+                                            Can be overridden per client.
+                                        </div>
+                                    </div>
+                                    <div class="d-flex gap-2 mb-3">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm"
+                                                onclick="document.getElementById('testSidecarHost').value=document.getElementById('sidecarUrlInput').value;document.getElementById('testSidecarPort').value=document.getElementById('sidecarPortInput').value;document.getElementById('testForm').submit();">
+                                            <i class="bi bi-broadcast me-1"></i>Test mTLS connection
+                                        </button>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary btn-sm">
+                                        <i class="bi bi-floppy me-1"></i>Save
+                                    </button>
+                                </form>
+
+                                <form method="post" asp-page-handler="TestSidecar" id="testForm" style="display:none;">
+                                    <input type="hidden" name="id" value="@c.Id" />
+                                    <input type="hidden" name="sidecarHost" id="testSidecarHost" value="" />
+                                    <input type="hidden" name="sidecarManagementPort" id="testSidecarPort" value="" />
+                                </form>
+                            </div>
+                        </div>
+
+                        @if (Model.HasActiveSidecarCert && Model.SidecarListenPort.HasValue)
+                        {
+                        <!-- Session MFA defaults -->
+                        <div class="card card-brand mb-3">
+                            <div class="card-header"><i class="bi bi-shield-lock-fill me-2"></i>Session MFA defaults</div>
+                            <div class="card-body">
+                                <p class="small text-muted mb-3">
+                                    Default policy for this customer's <strong>User</strong> peers. Machine peers are never gated.
+                                    Override per client on the client's Details page.
+                                </p>
+                                @if (!Model.MfaEditable)
+                                {
+                                    <div class="alert alert-warning py-2 small mb-3">
+                                        <i class="bi bi-lock-fill me-1"></i>
+                                        Editing is locked — the Pro license is inactive or expired. Enforcement continues.
+                                    </div>
+                                }
+                                <form method="post" asp-page-handler="SaveMfaDefaults">
+                                    <fieldset disabled="@(Model.MfaEditable ? null : "disabled")">
+                                    <input type="hidden" name="id" value="@c.Id" />
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Default MFA policy</label>
+                                        <select name="defaultMfaPolicy" class="form-select form-select-sm">
+                                            <option value="Disabled" selected="@(c.DefaultMfaPolicy == MfaPolicy.Disabled ? "selected" : null)">Disabled</option>
+                                            <option value="PerConnection" selected="@(c.DefaultMfaPolicy == MfaPolicy.PerConnection ? "selected" : null)">Per connection (re-auth each connect)</option>
+                                            <option value="Interval" selected="@(c.DefaultMfaPolicy == MfaPolicy.Interval ? "selected" : null)">Interval (fixed lifetime)</option>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Session lifetime / cap (hours)</label>
+                                        <input type="number" name="mfaSessionLifetimeHours" min="1" max="720"
+                                               class="form-control form-control-sm" value="@c.MfaSessionLifetimeHours" />
+                                    </div>
+                                    <button type="submit" class="btn btn-primary btn-sm">
+                                        <i class="bi bi-floppy me-1"></i>Save MFA defaults
+                                    </button>
+                                    </fieldset>
+                                </form>
+                            </div>
+                        </div>
+                        }
+
+                    </div>
+
+                    <!-- Right column — enrollment & operations (actions) -->
+                    <div class="col-lg-6">
+
+                        <!-- mTLS enrollment -->
+                        <div class="card card-brand mb-3">
+                            <div class="card-header"><i class="bi bi-shield-lock me-2"></i>mTLS enrollment</div>
+                            <div class="card-body">
+
+                                @if (TempData["EnrollmentToken"] is string newToken)
+                                {
+                                    <div class="alert alert-warning" role="alert">
+                                        <strong><i class="bi bi-exclamation-triangle me-1"></i>Copy this token now -- it will not be shown again.</strong>
+                                        <div class="input-group mt-2">
+                                            <input type="text" id="enrollTokenInput" class="form-control form-control-sm font-monospace"
+                                                   value="@newToken" readonly />
+                                            <button class="btn btn-outline-secondary btn-sm" type="button"
+                                                    onclick="navigator.clipboard.writeText(document.getElementById('enrollTokenInput').value)">
+                                                <i class="bi bi-clipboard"></i>
+                                            </button>
+                                        </div>
+                                        <div class="mt-3 small">
+                                            Set these environment variables on the sidecar container and restart it:
+                                            <pre class="mt-1 mb-0 p-2 border rounded bg-light small">ENROLLMENT_TOKEN=@newToken
+BACKEND_URL=@Model.BackendUrl
+MANAGEMENT_PORT=@c.SidecarManagementPort
+HEALTH_PORT=@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : 9004)</pre>
+                                            After enrollment, set <strong>Server address</strong> to your sidecar host and click Save.
+                                        </div>
+                                        <div class="mt-2">
+                                            <a asp-page-handler="DownloadEnv" asp-route-id="@c.Id"
+                                               class="btn btn-sm btn-warning">
+                                                <i class="bi bi-download me-1"></i>Download .env file
+                                            </a>
+                                        </div>
+                                    </div>
+                                }
+
+                                <div class="d-flex align-items-center gap-3 mb-3">
+                                    <div>
+                                        @if (Model.HasActiveSidecarCert)
+                                        {
+                                            <span class="badge bg-success"><i class="bi bi-patch-check me-1"></i>Certificate issued</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary">Not yet enrolled</span>
+                                        }
+                                        @if (Model.EnrollmentTokenIsSet)
+                                        {
+                                            <span class="badge bg-warning text-dark ms-2"><i class="bi bi-key me-1"></i>Token pending use</span>
+                                        }
+                                    </div>
+                                </div>
+
+                                <div class="d-flex gap-2">
+                                    <form method="post" asp-page-handler="GenerateEnrollmentToken">
+                                        <input type="hidden" name="id" value="@c.Id" />
+                                        <button type="submit" class="btn btn-outline-primary btn-sm"
+                                                onclick="return !@Model.HasActiveSidecarCert.ToString().ToLower() || confirm('This will revoke the existing certificate when the sidecar next enrolls. Continue?');">
+                                            <i class="bi bi-key me-1"></i>@(Model.HasActiveSidecarCert ? "Re-enroll (generate new token)" : "Generate enrollment token")
+                                        </button>
+                                    </form>
+                                    @if (Model.EnrollmentTokenIsSet)
+                                    {
+                                        <a asp-page-handler="DownloadEnv" asp-route-id="@c.Id"
+                                           class="btn btn-outline-primary btn-sm">
+                                            <i class="bi bi-download me-1"></i>Download .env
+                                        </a>
+                                        <form method="post" asp-page-handler="RevokeEnrollmentToken">
+                                            <input type="hidden" name="id" value="@c.Id" />
+                                            <button type="submit" class="btn btn-outline-danger btn-sm">
+                                                <i class="bi bi-x-circle me-1"></i>Revoke unused token
+                                            </button>
+                                        </form>
+                                    }
+                                </div>
+                                <p class="small text-muted mt-2 mb-0">
+                                    The token is single-use and consumed on first sidecar boot. After enrollment, the sidecar's certificate is renewed automatically from the volume.
+                                </p>
+                            </div>
+                        </div>
+
+                        @if (Model.HasActiveSidecarCert && Model.SidecarListenPort.HasValue)
+                        {
+                        <!-- Peer re-sync (only when sidecar is enrolled and reachable) -->
+                        <div class="card card-brand mb-3">
+                            <div class="card-header"><i class="bi bi-arrow-repeat me-2"></i>Peer re-sync</div>
+                            <div class="card-body">
+                                <p class="small text-muted mb-3">
+                                    Clears all peers on the WireGuard® server and re-registers every active client from the database.
+                                    Updated configs are pushed to all affected clients on their next check-in.<br>
+                                    Use after a sidecar reinstall or whenever the server peer list gets out of sync.
+                                    This also runs automatically 10 seconds after enrollment.
+                                </p>
+                                <form method="post" asp-page-handler="Resync">
+                                    <input type="hidden" name="id" value="@c.Id" />
+                                    <button type="submit" class="btn btn-outline-warning btn-sm"
+                                            onclick="return confirm('This will remove ALL peers from the WireGuard® server and re-register them from the database.\nActive VPN sessions will be briefly interrupted.\n\nContinue?');">
+                                        <i class="bi bi-arrow-repeat me-1"></i>Re-sync all peers
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                        }
+
+                    </div>
+                </div>
+            }
+
+            <!-- Cross-customer sharing — visible for all Pro customers -->
+            <div class="section-heading section-heading-brand mt-3">
+                <i class="bi bi-share me-1"></i>Cross-customer sharing
+            </div>
+            <div class="card card-brand mb-3">
+                <div class="card-header"><i class="bi bi-share me-2"></i>Cross-customer sidecar sharing</div>
+                <div class="card-body">
+                    <p class="small text-muted mb-3">
+                        Control whether this customer participates in cross-customer profile provisioning.
+                        Both the source and target customer must opt in before an admin can create a cross-customer assignment.
+                    </p>
+                    <form method="post" asp-page-handler="SaveSharing">
+                        <input type="hidden" name="id" value="@c.Id" />
+                        <div class="mb-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                       id="allowShareSidecar" name="allowShareSidecar" value="true"
+                                       @(c.AllowShareSidecar ? "checked" : "") />
+                                <label class="form-check-label fw-semibold" for="allowShareSidecar">
+                                    Allow other customers' clients to use this sidecar
+                                </label>
+                            </div>
+                            <div class="form-text ms-4">
+                                Admins can provision clients from other customers onto this customer's WireGuard sidecar. Only relevant when the Valenius WireGuard server is enabled.
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                       id="allowReceiveForeignProfiles" name="allowReceiveForeignProfiles" value="true"
+                                       @(c.AllowReceiveForeignProfiles ? "checked" : "") />
+                                <label class="form-check-label fw-semibold" for="allowReceiveForeignProfiles">
+                                    Allow this customer's clients to receive foreign sidecar profiles
+                                </label>
+                            </div>
+                            <div class="form-text ms-4">
+                                Admins can assign profiles from other customers' sidecars to this customer's clients.
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="bi bi-floppy me-1"></i>Save sharing settings
+                        </button>
+                    </form>
+                </div>
+            </div>
+        }
+
+    </div>
+
+    <!-- ── Networks & External tab ──────────────────────────────────────────── -->
+    <div class="tab-pane fade" id="tab-networks">
+        <div class="row g-3 pt-3">
+
+            <!-- External WireGuard® server -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-server me-1"></i>External WireGuard® server</div>
+
+                @if (!_isPro)
+                {
+                    <!-- OSS: always on, cannot change -->
+                    <div class="card mb-0">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center gap-3">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" checked disabled />
+                                </div>
+                                <div>
+                                    <div class="fw-semibold">External WireGuard® server</div>
+                                    <div class="small text-muted">External WireGuard® server is the only available mode in the OSS edition. Configs are uploaded manually by administrators.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+                else if (!_isWt)
+                {
+                    <!-- Pro + WT server off: External is the primary mode, locked on -->
+                    <div class="card mb-0">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center gap-3">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" checked disabled />
+                                </div>
+                                <div>
+                                    <div class="fw-semibold">External WireGuard® server</div>
+                                    <div class="small text-muted">External WireGuard® server is the primary server mode. Enable the Valenius WireGuard® server to add auto-provisioning alongside manual uploads.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <!-- Pro + WT server on: AllowExternalConfig toggle -->
+                    <form method="post" asp-page-handler="ToggleExternal">
+                        <input type="hidden" name="id" value="@c.Id" />
+                        <div class="card mb-0">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center gap-3">
+                                    <div class="form-check form-switch mb-0">
+                                        <input class="form-check-input" type="checkbox" role="switch"
+                                               id="extToggle" name="enabled" value="true"
+                                               @(c.AllowExternalConfig ? "checked" : "")
+                                               onchange="this.closest('form').submit()" />
+                                    </div>
+                                    <div>
+                                        <label for="extToggle" class="fw-semibold mb-0">Allow external configurations</label>
+                                        <div class="small text-muted">When enabled, admins can also push manually-created .conf files alongside auto-provisioned ones.</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                }
+            </div>
+
+            <!-- Trusted networks -->
+            <div class="col-lg-6">
+                <div class="section-heading"><i class="bi bi-shield-lock me-1"></i>Trusted networks</div>
+                <div class="card mb-0">
+                    <div class="card-header"><i class="bi bi-shield-lock me-2"></i>Trusted networks (@Model.TrustedNetworks.Count)</div>
+                    <div class="card-body pb-2">
+                        <p class="small text-muted mb-2">
+                            When a client is <strong>outside</strong> all trusted networks, auto-connect activates the VPN automatically.
+                            Subnet is required; primary DNS is optional (adds an extra condition to the check).
+                        </p>
+                        @if (Model.TrustedNetworks.Any())
+                        {
+                            <table class="table table-sm mb-3">
+                                <thead>
+                                    <tr>
+                                        <th>Subnet</th>
+                                        <th>Primary DNS</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var n in Model.TrustedNetworks)
+                                    {
+                                        <tr>
+                                            <td class="small font-monospace">@n.Subnet</td>
+                                            <td class="small font-monospace text-muted">@(n.PrimaryDns ?? "-")</td>
+                                            <td class="text-end">
+                                                <form method="post" asp-page-handler="RemoveNetwork" style="display:inline;">
+                                                    <input type="hidden" name="id" value="@c.Id" />
+                                                    <input type="hidden" name="networkId" value="@n.Id" />
+                                                    <button type="submit" class="btn btn-xs btn-outline-danger"
+                                                            style="font-size:.75rem;padding:.15rem .5rem;"
+                                                            onclick="return confirm('Remove this network?')">
+                                                        <i class="bi bi-trash"></i>
+                                                    </button>
+                                                </form>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                        <form method="post" asp-page-handler="AddNetwork" class="row g-2 align-items-end">
+                            <input type="hidden" name="id" value="@c.Id" />
+                            <div class="col-sm-5">
+                                <label class="form-label small fw-semibold mb-1">Subnet (CIDR)</label>
+                                <input type="text" name="subnet" class="form-control form-control-sm"
+                                       placeholder="10.100.1.0/24" required
+                                       pattern="^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$"
+                                       title="IPv4 CIDR notation, e.g. 10.100.1.0/24" />
+                            </div>
+                            <div class="col-sm-5">
+                                <label class="form-label small fw-semibold mb-1">Primary DNS <span class="text-muted fw-normal">(optional)</span></label>
+                                <input type="text" name="primaryDns" class="form-control form-control-sm"
+                                       placeholder="10.100.1.10"
+                                       pattern="^(\d{1,3}\.){3}\d{1,3}$"
+                                       title="IPv4 address, e.g. 10.100.1.10" />
+                            </div>
+                            <div class="col-sm-2">
+                                <button type="submit" class="btn btn-outline-primary btn-sm w-100">
+                                    <i class="bi bi-plus-lg"></i> Add
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Endpoints tab (MSP mode only) ────────────────────────────────── -->
+    @if (Model.License.MspModeEnabled)
+    {
+    <div class="tab-pane fade" id="tab-endpoints">
+        <div class="row g-3 pt-3">
+            <div class="col-lg-6">
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-hdd-network me-2"></i>Endpoint allocation</div>
+                    <div class="card-body">
+                        <form method="post" asp-page-handler="SaveEndpoints">
+                            <input type="hidden" name="id" value="@c.Id" />
+                            <div class="mb-3">
+                                <label class="form-label small fw-semibold">Max endpoints for this customer</label>
+                                <input type="number" name="maxEndpoints" class="form-control form-control-sm"
+                                       value="@c.MaxEndpoints" min="0" />
+                                <div class="form-text">
+                                    @if (Model.License.MaxEndpoints < 0)
+                                    {
+                                        <span>License pool: unlimited</span>
+                                    }
+                                    else
+                                    {
+                                        <span>
+                                            License pool: @Model.License.MaxEndpoints total,
+                                            @Model.PoolRemaining remaining after current assignments.
+                                        </span>
+                                    }
+                                </div>
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm">
+                                <i class="bi bi-floppy me-1"></i>Save
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-info-circle me-2"></i>Usage</div>
+                    <div class="card-body">
+                        <dl class="row small mb-0" style="row-gap:.25rem;">
+                            <dt class="col-sm-6 text-muted">Active endpoints</dt>
+                            <dd class="col-sm-6 mb-0">@Model.ActiveCount</dd>
+                            <dt class="col-sm-6 text-muted">Allocated to this customer</dt>
+                            <dd class="col-sm-6 mb-0">@c.MaxEndpoints</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card mb-3">
+                    <div class="card-header"><i class="bi bi-qr-code me-2"></i>Device pairing</div>
+                    <div class="card-body">
+                        <p class="small text-muted mb-3">
+                            Generate a one-time QR code to activate a mobile device in the Valenius app
+                            and assign it to this customer.
+                        </p>
+                        <a asp-page="/Admin/PairDevice" asp-route-customerId="@c.Id"
+                           class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-qr-code me-1"></i>Pair a device
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    } @* end MspModeEnabled *@
+
+</div>
+
+
+@section Scripts {
+<script>
+    // Tab persistence — runs after Bootstrap JS (rendered via the Scripts section in the layout)
+    (function () {
+        var key = 'customerTab-@Model.Customer.Id';
+        var saved = null;
+        try { saved = localStorage.getItem(key); } catch (e) {}
+        @if (Model.SidecarTestMessage is not null)
+        {
+            <text>saved = '#tab-server';</text>
+        }
+        @if (TempData["WgTab"] as bool? == true)
+        {
+            <text>saved = '#tab-server';</text>
+        }
+        @if (TempData["NetTab"] as bool? == true)
+        {
+            <text>saved = '#tab-networks';</text>
+        }
+        @if (TempData["EndpointsTab"] as bool? == true)
+        {
+            <text>saved = '#tab-endpoints';</text>
+        }
+        if (saved) {
+            var btn = document.querySelector('#customerTabs [data-bs-target="' + saved + '"]');
+            if (btn) new bootstrap.Tab(btn).show();
+        }
+        document.querySelectorAll('#customerTabs [data-bs-toggle="tab"]').forEach(function (btn) {
+            btn.addEventListener('shown.bs.tab', function (e) {
+                try { localStorage.setItem(key, e.target.getAttribute('data-bs-target')); } catch (x) {}
+            });
+        });
+    }());
+</script>
+}
