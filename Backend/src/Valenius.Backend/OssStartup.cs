@@ -157,7 +157,15 @@ public static class OssStartup
                 .AddCookie(opts =>
                 {
                     opts.LoginPath             = "/login";
-                    opts.Cookie.SecurePolicy   = CookieSecurePolicy.Always;
+                    // SameAsRequest, not Always: a fresh install is reachable over plain HTTP
+                    // (no reverse proxy yet) for local testing per the self-hosting quick-start
+                    // (install.sh / documentation/self-hosting/community.md). Always marks the
+                    // cookie Secure unconditionally, so the browser drops it entirely, the redirect
+                    // to /Admin/ comes back unauthenticated, and login silently loops back to
+                    // /login even with the correct password. UseForwardedHeaders runs before
+                    // UseAuthentication (below), so behind the documented TLS-terminating reverse
+                    // proxy this still evaluates as HTTPS via X-Forwarded-Proto and stays Secure.
+                    opts.Cookie.SecurePolicy   = CookieSecurePolicy.SameAsRequest;
                     // Lax, not Strict: after external (OIDC) login the /signin-oidc callback sets
                     // this cookie and redirects to /Admin/. That navigation chain originated
                     // cross-site (at the IdP), so a Strict cookie is NOT sent on the /Admin/ request
