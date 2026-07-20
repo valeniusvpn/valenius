@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Build context is the repo root (WireguardTwister/) so Shared/ is reachable.
+# Build context is the repo root (Valenius/) so Shared/ is reachable.
 # docker-compose.yml sets:  context: ..   dockerfile: Backend/Dockerfile
 
 # ── Build stage ──────────────────────────────────────────────────────────────
@@ -7,15 +7,15 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Restore layer: copy project files first for cache efficiency
-COPY Shared/WireguardTwister.Shared/WireguardTwister.Shared.csproj             Shared/WireguardTwister.Shared/
-COPY Backend/src/WireguardTwister.Backend/WireguardTwister.Backend.csproj      Backend/src/WireguardTwister.Backend/
-RUN dotnet restore Backend/src/WireguardTwister.Backend/WireguardTwister.Backend.csproj
+COPY Shared/Valenius.Shared/Valenius.Shared.csproj             Shared/Valenius.Shared/
+COPY Backend/src/Valenius.Backend/Valenius.Backend.csproj      Backend/src/Valenius.Backend/
+RUN dotnet restore Backend/src/Valenius.Backend/Valenius.Backend.csproj
 
 # Source layer
-COPY Shared/WireguardTwister.Shared/        Shared/WireguardTwister.Shared/
-COPY Backend/src/WireguardTwister.Backend/  Backend/src/WireguardTwister.Backend/
+COPY Shared/Valenius.Shared/        Shared/Valenius.Shared/
+COPY Backend/src/Valenius.Backend/  Backend/src/Valenius.Backend/
 
-RUN dotnet publish Backend/src/WireguardTwister.Backend/WireguardTwister.Backend.csproj \
+RUN dotnet publish Backend/src/Valenius.Backend/Valenius.Backend.csproj \
     -c Release -o /app/publish --no-restore
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
@@ -40,4 +40,4 @@ EXPOSE 8080
 # ASPNETCORE_HTTP_PORTS=8080 is already set by the base image; do not repeat it
 # here to avoid the "Overriding HTTP_PORTS … Binding to URLS instead" warning.
 
-ENTRYPOINT ["dotnet", "WireguardTwister.Backend.dll"]
+ENTRYPOINT ["dotnet", "Valenius.Backend.dll"]

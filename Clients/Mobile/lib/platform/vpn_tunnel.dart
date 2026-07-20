@@ -18,6 +18,10 @@ abstract interface class VpnTunnelPlatform {
   Stream<TunnelSnapshot> states();
   Future<HandshakeInfo?> stats(String peerName);
 
+  /// This device's own local LAN CIDR(s) (e.g. "192.168.1.0/24"). Used by the
+  /// pre-connect LAN-conflict check. Empty on any failure (fail-open).
+  Future<List<String>> localLanCidrs();
+
   /// Configure OS-managed on-demand auto-connect (iOS `NEOnDemandRule`; a no-op
   /// where the OS has no equivalent, e.g. Android). When [enabled], the OS brings
   /// the tunnel up on network activity — even with the app not running — and

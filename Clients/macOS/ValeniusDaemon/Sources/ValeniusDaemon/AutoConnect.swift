@@ -107,6 +107,36 @@ enum TrustedNetworkDetector {
         return results
     }
 
+    /// Network CIDR (e.g. "192.168.1.0/24") for every non-loopback, non-utun IPv4 adapter
+    /// address, keeping the netmask that `localIPv4Addresses()` discards. Used by the
+    /// pre-connect LAN-conflict check to determine this machine's own local LAN(s) before
+    /// comparing against a profile's routes. Mirrors Windows NetworkDetector.GetLocalLanCidrs /
+    /// Linux config_manager.get_local_lan_cidrs.
+    static func localLanCidrs() -> [String] {
+        var results: [String] = []
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return [] }
+        defer { freeifaddrs(addrs) }
+        var ptr = addrs
+        while let cur = ptr {
+            defer { ptr = cur.pointee.ifa_next }
+            let name = String(cString: cur.pointee.ifa_name)
+            if name == "lo0" || name.hasPrefix("utun") { continue }
+            guard let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0,
+                  let ipInt = ipv4ToUInt32(String(cString: host)) else { continue }
+            guard let maskSa = cur.pointee.ifa_netmask, maskSa.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var maskHost = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(maskSa, socklen_t(maskSa.pointee.sa_len), &maskHost, socklen_t(maskHost.count), nil, 0, NI_NUMERICHOST) == 0,
+                  let maskInt = ipv4ToUInt32(String(cString: maskHost)) else { continue }
+            let prefix = maskInt.nonzeroBitCount
+            let network = ipInt & maskInt
+            results.append("\(uint32ToIPv4(network))/\(prefix)")
+        }
+        return results
+    }
+
     /// First global nameserver (SCDynamicStore State:/Network/Global/DNS), mirroring Linux's
     /// /etc/resolv.conf read.
     static func primaryDnsServer() -> String? {
@@ -126,4 +156,8 @@ private func ipv4ToUInt32(_ s: String) -> UInt32? {
         v = (v << 8) | n
     }
     return v
+}
+
+private func uint32ToIPv4(_ v: UInt32) -> String {
+    "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
 }

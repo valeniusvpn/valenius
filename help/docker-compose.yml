@@ -1,0 +1,33 @@
+# Docker Compose / Portainer stack for help.valenius.com — the task-oriented
+# help site (installation guides + "Working with Valenius").
+#
+# Deploy options:
+#   • Portainer → Stacks → Add stack → "Repository", point the compose path at
+#     help/docker-compose.yml. Portainer clones the repo and builds the image
+#     from the Dockerfile in this folder.
+#   • Local:  cd help && docker compose up -d --build
+#
+# The site is then reachable on the host port set by HELP_PORT (default 9010).
+# Put it behind your existing reverse proxy / TLS terminator and point
+# help.valenius.com at it.
+#
+# Like the documentation stacks, this is NOT rebuilt automatically on push —
+# publish content changes via "Pull and redeploy" in Portainer.
+
+services:
+  valenius-help:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: valenius-help:latest
+    container_name: valenius-help
+    restart: unless-stopped
+    ports:
+      # host:container — change the host side via the HELP_PORT env var in Portainer.
+      - "${HELP_PORT:-9010}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

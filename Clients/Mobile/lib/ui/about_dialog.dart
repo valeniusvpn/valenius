@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app/theme.dart';
 
-/// Shows an About dialog with the Valenius logo and the app version.
+const _privacyPolicyUrl = 'https://www.valenius.com/privacy-mobile.html';
+
+/// Shows an About dialog with the Valenius logo, app version, developer
+/// attribution, and a link to the mobile privacy policy.
 Future<void> showValeniusAbout(BuildContext context) async {
+  // Read fresh from the platform every time rather than caching, so the
+  // dialog always reflects the version of the APK actually installed.
   final info = await PackageInfo.fromPlatform();
   if (!context.mounted) return;
 
@@ -28,7 +34,7 @@ Future<void> showValeniusAbout(BuildContext context) async {
             ),
             const SizedBox(height: 20),
             Text(
-              'Version ${info.version} (${info.buildNumber})',
+              'Version ${info.version}',
               style: const TextStyle(color: ValeniusColors.profileText, fontSize: 14),
             ),
             const SizedBox(height: 6),
@@ -37,6 +43,27 @@ Future<void> showValeniusAbout(BuildContext context) async {
               style: TextStyle(color: ValeniusColors.dimText, fontSize: 12),
             ),
             const SizedBox(height: 20),
+            const Text(
+              'Developed by Stranto Business Solutions GmbH',
+              style: TextStyle(color: ValeniusColors.dimText, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            InkWell(
+              onTap: () => launchUrl(
+                Uri.parse(_privacyPolicyUrl),
+                mode: LaunchMode.externalApplication,
+              ),
+              child: const Text(
+                'Privacy Policy',
+                style: TextStyle(
+                  color: ValeniusColors.actionText,
+                  fontSize: 12,
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerRight,
               child: TextButton(

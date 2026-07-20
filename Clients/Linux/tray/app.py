@@ -1,10 +1,15 @@
 """Valenius tray application.
 
 Uses AppIndicator3 (or AyatanaAppIndicator3) for the system tray icon and a
-custom GTK3 window as the popup — matching the Windows tray UX.
+custom GTK3 window as an optional detailed popup — matching the Windows tray UX.
 
-The popup is shown/hidden by clicking the "Valenius" menu item.
-Right-click → "Exit" quits the tray app.
+AppIndicator3 hardcodes every click (left or right) to show its native
+Gtk.Menu — there is no "activate app directly" signal like Windows' NotifyIcon.
+So the native menu itself carries the profile list (status shown inline),
+Register/MFA rows, Auto Connect toggle, and the common actions, rebuilt on
+every poll so it always reflects live status. "Open Valenius window…" opens
+the richer CSS-styled popup for anything not exposed directly in the menu;
+middle-click is a shortcut straight to that popup.
 """
 from __future__ import annotations
 
@@ -255,29 +260,168 @@ class TrayApp:
         )
         self._indicator.set_icon_theme_path(str(ICONS_DIR))
         self._indicator.set_status(_indicator_mod.IndicatorStatus.ACTIVE)
-        self._indicator.set_menu(self._build_indicator_menu())
-        # AppIndicator3 hardcodes left-click to always show the menu (no override
-        # possible — there's no "primary activate" signal, unlike Windows' tray
-        # icon). Middle-click is the one hook it exposes for bypassing the menu:
-        # binding it to the same menu item's "activate" handler opens the popup
-        # directly without needing to click "Valenius" first.
+        self._rebuild_indicator_menu()
+
+    def _rebuild_indicator_menu(self):
+        """Rebuilds the native indicator menu from current status and re-attaches it.
+        Called on every poll tick (like _refresh_popup) so profile/status entries
+        never go stale — AppIndicator has no "about to show" hook to lazily build on."""
+        menu = self._build_indicator_menu()
+        self._indicator.set_menu(menu)
+        # Middle-click is the one hook AppIndicator3 exposes for bypassing the
+        # forced left-click menu — jumps straight to the detailed popup. Must be
+        # re-set every rebuild since the previous menu (and its items) is replaced.
         self._indicator.set_secondary_activate_target(self._open_item)
 
     def _build_indicator_menu(self) -> Gtk.Menu:
-        # Single item: AppIndicator on GNOME always requires a menu on left-click
-        # (there is no "activate app directly" signal like Windows' tray icon), so
-        # this is the unavoidable extra step before the real popup opens on a plain
-        # click. Exit lives in the popup footer, not here, so there's only one
-        # obvious thing to click. Middle-click bypasses this menu entirely — see
-        # set_secondary_activate_target() in _setup_indicator.
         menu = Gtk.Menu()
+        status = self._status
 
-        self._open_item = Gtk.MenuItem(label='Valenius')
+        if status is None:
+            item = Gtk.MenuItem(label='Daemon not running')
+            item.set_sensitive(False)
+            menu.append(item)
+            menu.append(Gtk.SeparatorMenuItem())
+            self._open_item = Gtk.MenuItem(label='Open Valenius window…')
+            self._open_item.connect('activate', lambda _: self._toggle_popup())
+            menu.append(self._open_item)
+            menu.append(Gtk.SeparatorMenuItem())
+            self._append_exit_item(menu)
+            menu.show_all()
+            return menu
+
+        if status.BackendUnconfigured:
+            self._open_item = Gtk.MenuItem(label='Connect to server…')
+            self._open_item.connect('activate', lambda _: self._action_set_backend_url())
+            menu.append(self._open_item)
+            menu.append(Gtk.SeparatorMenuItem())
+            self._append_exit_item(menu)
+            menu.show_all()
+            return menu
+
+        connected_names: set[str] = {t.Name for t in status.ConnectedTunnels}
+        verified_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.IsVerified}
+
+        if len(connected_names) > 1:
+            status_text = f"Connected • {len(connected_names)} tunnels active"
+        elif status.IsConnected:
+            status_text = f"Connected • {status.TunnelName}"
+        else:
+            status_text = "Not connected"
+        header = Gtk.MenuItem(label=f'Valenius — {status_text}')
+        header.set_sensitive(False)
+        menu.append(header)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        if status.RegistrationIsActive is not True:
+            item = Gtk.MenuItem(label='Register Client')
+            item.connect('activate', lambda _: self._action_register())
+            menu.append(item)
+
+        # ── MFA rows (same conditions as the popup) ────────────────────────────
+        mfa_locked = bool(status.MfaRequired and status.MfaAuthorizeUrl)
+        if status.MfaEnrollmentOpen and status.MfaEnrollmentUri:
+            uri = status.MfaEnrollmentUri
+            item = Gtk.MenuItem(label='Set up two-factor auth (MFA)…')
+            item.connect('activate', lambda _, u=uri: self._action_mfa_enroll(u))
+            menu.append(item)
+        elif mfa_locked:
+            unlock_text = (f'Approve {status.MfaApproveNumber} on your phone'
+                            if status.MfaApproveNumber is not None else 'Unlock VPN')
+            url = status.MfaAuthorizeUrl
+            item = Gtk.MenuItem(label=f'\U0001f512 {unlock_text}')
+            item.connect('activate', lambda _, u=url: self._action_mfa_authorize(u))
+            menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Profile list — status shown inline in the label (● / ✓ / 🔒), since
+        # dbusmenu (what actually renders this menu on GNOME/Ayatana) only
+        # reliably transmits plain label text, not arbitrary custom widgets or
+        # colored icons. ──────────────────────────────────────────────────────
+        if status.AvailableProfiles:
+            for profile in status.AvailableProfiles:
+                is_active = profile in connected_names
+                is_verified = profile in verified_names
+                menu.append(self._make_profile_menu_item(profile, is_active, is_verified, mfa_locked))
+        else:
+            item = Gtk.MenuItem(label='No profiles configured')
+            item.set_sensitive(False)
+            menu.append(item)
+
+        if not mfa_locked and len(connected_names) > 1:
+            item = Gtk.MenuItem(label='Disconnect All')
+            item.connect('activate', lambda _: self._action_disconnect_all())
+            menu.append(item)
+
+        if not mfa_locked and status.MfaSessionExpiresAt:
+            expires_str = _format_expiry(status.MfaSessionExpiresAt)
+            item = Gtk.MenuItem(label=f'Authorized until {expires_str}')
+            item.set_sensitive(False)
+            menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        item = Gtk.MenuItem(label='Upload Config…')
+        item.connect('activate', lambda _: self._action_upload())
+        menu.append(item)
+
+        # Fresh CheckMenuItem each rebuild: set_active() before connect() so the
+        # initial state never re-triggers the handler (no listener attached yet).
+        ac_item = Gtk.CheckMenuItem(label='Auto Connect')
+        ac_item.set_active(status.AutoConnectEnabled)
+        ac_item.connect('toggled', lambda _: self._action_toggle_autoconnect(
+            status.AutoConnectEnabled, reopen_popup=False))
+        menu.append(ac_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        item = Gtk.MenuItem(label='About')
+        item.connect('activate', lambda _: self._action_about())
+        menu.append(item)
+
+        item = Gtk.MenuItem(label='Send logs')
+        item.connect('activate', lambda _: self._action_send_logs())
+        menu.append(item)
+
+        if status.RegistrationIsActive is True and status.BackendReachable is True:
+            item = Gtk.MenuItem(label='Sync')
+            item.connect('activate', lambda _: self._action_sync())
+            menu.append(item)
+
+        self._open_item = Gtk.MenuItem(label='Open Valenius window…')
         self._open_item.connect('activate', lambda _: self._toggle_popup())
         menu.append(self._open_item)
 
+        menu.append(Gtk.SeparatorMenuItem())
+        self._append_exit_item(menu)
+
         menu.show_all()
         return menu
+
+    def _make_profile_menu_item(self, profile: str, active: bool, verified: bool,
+                                 mfa_locked: bool) -> Gtk.MenuItem:
+        if mfa_locked:
+            label = f'\U0001f512 {profile}'
+        elif active and verified:
+            label = f'✓ {profile} (Verified)'
+        elif active:
+            label = f'● {profile} (Connected)'
+        else:
+            label = f'○ {profile}'
+        item = Gtk.MenuItem(label=label)
+        if mfa_locked:
+            item.set_sensitive(False)
+        elif active:
+            item.connect('activate', lambda _, p=profile: self._action_disconnect(p))
+        else:
+            item.connect('activate', lambda _, p=profile: self._action_connect(p))
+        return item
+
+    def _append_exit_item(self, menu: Gtk.Menu):
+        item = Gtk.MenuItem(label='Exit')
+        item.connect('activate', lambda _: self._quit())
+        menu.append(item)
 
     def _update_indicator_icon(self, connected: bool):
         icon = 'valenius-connected' if connected else 'valenius-disconnected'
@@ -309,12 +453,14 @@ class TrayApp:
             # happens when the user opens the popup (see _toggle_popup).
             if status.BackendUnconfigured:
                 self._update_indicator_icon(False)
+                self._rebuild_indicator_menu()
                 if self._popup_visible:
                     self._hide_popup()
                 if not self._backend_prompt_auto_shown and not self._backend_prompt_open:
                     self._action_set_backend_url()
                 return True
             self._update_indicator_icon(status.IsConnected)
+            self._rebuild_indicator_menu()
             if self._popup_visible:
                 self._refresh_popup()
             if prev is not None and prev.IsConnected != status.IsConnected:
@@ -332,6 +478,7 @@ class TrayApp:
         except ipc.IpcError:
             self._status = None
             self._update_indicator_icon(False)
+            self._rebuild_indicator_menu()
         return True  # keep repeating
 
     def _auto_claim_config(self):
@@ -777,11 +924,12 @@ class TrayApp:
         else:
             dialog.destroy()
 
-    def _action_toggle_autoconnect(self, currently_enabled: bool):
+    def _action_toggle_autoconnect(self, currently_enabled: bool, reopen_popup: bool = True):
         try:
             ipc.set_auto_connect(not currently_enabled)
             self._poll()
-            self._show_popup()
+            if reopen_popup:
+                self._show_popup()
         except ipc.IpcError as e:
             self._show_error(str(e))
 

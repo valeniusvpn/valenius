@@ -192,6 +192,45 @@ public class ConfigManager
     }
 
     /// <summary>
+    /// Reads the interface Address CIDR(s) from a stored config (.conf or .conf.enc) — the
+    /// VPN IP assigned to this client, e.g. "10.100.0.5/32". Same in-memory decrypt as
+    /// <see cref="ReadAllowedIPs"/>. WireGuard allows a comma-separated list (e.g. IPv4 + IPv6)
+    /// on one Address line. Returns an empty array on any failure (fail-open for callers).
+    /// </summary>
+    public string[] ReadAddress(string storedPath)
+    {
+        try
+        {
+            string content;
+            if (storedPath.EndsWith(EncExt, StringComparison.OrdinalIgnoreCase))
+            {
+                var encBytes   = File.ReadAllBytes(storedPath);
+                var plainBytes = ProtectedData.Unprotect(encBytes, null, DataProtectionScope.LocalMachine);
+                content = System.Text.Encoding.UTF8.GetString(plainBytes);
+            }
+            else
+            {
+                content = File.ReadAllText(storedPath);
+            }
+
+            foreach (var raw in content.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (!line.StartsWith("Address", StringComparison.OrdinalIgnoreCase)) continue;
+                var eq = line.IndexOf('=');
+                if (eq < 0) continue;
+                return line[(eq + 1)..]
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            }
+            return [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Deletes the temp plaintext file(s) for <paramref name="tunnelName"/> after disconnect.
     /// Checks every per-connect subdirectory (plus the legacy flat path from older versions)
     /// and prunes emptied subdirectories. All best-effort: anything left behind is swept by

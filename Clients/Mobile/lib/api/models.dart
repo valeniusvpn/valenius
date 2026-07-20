@@ -43,6 +43,7 @@ class StatusResponse {
     required this.mfaApproveNumber,
     required this.pendingApprovals,
     required this.logUploadRequested,
+    required this.remoteLanCidrs,
     this.clientApiKey,
   });
 
@@ -77,6 +78,7 @@ class StatusResponse {
           .map((e) => PendingApproval.fromJson(e as Map<String, dynamic>))
           .toList(),
       logUploadRequested: m.boolean('logUploadRequested'),
+      remoteLanCidrs: m.list('remoteLanCidrs').map((e) => e as String).toList(),
       clientApiKey: m.string('clientApiKey'),
     );
   }
@@ -106,6 +108,12 @@ class StatusResponse {
 
   /// When true the client uploads its (app-only, redacted) logs to the backend.
   final bool logUploadRequested;
+
+  /// Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported by the sidecar.
+  /// Used by the pre-connect LAN-conflict check to detect the remote network even for
+  /// full-tunnel (0.0.0.0/0) profiles. Empty when unknown (External customers, or a sidecar
+  /// not yet upgraded).
+  final List<String> remoteLanCidrs;
 
   /// New client API key sent during a backend key rotation (only while this device is
   /// still on the previous key). The app persists it to secure storage and uses it for

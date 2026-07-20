@@ -412,6 +412,54 @@ actor ConfigManager {
         }
         return nil
     }
+
+    private func readAddress(atPath path: String) -> [String] {
+        guard let data = fm.contents(atPath: path) else { return [] }
+        let content: String
+        if path.hasSuffix(encExt) {
+            guard let plain = try? decrypt(data) else { return [] }
+            content = String(decoding: plain, as: UTF8.self)
+        } else {
+            content = String(decoding: data, as: UTF8.self)
+        }
+        for raw in content.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.lowercased().hasPrefix("address"), let eq = line.firstIndex(of: "=") else { continue }
+            return line[line.index(after: eq)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        return []
+    }
+
+    /// Returns a human-readable description of a conflict between this machine's own local LAN
+    /// and either (A) an explicit remote route in the new profile's AllowedIPs, (B) a remote LAN
+    /// CIDR reported by the backend for a full-tunnel profile (`remoteLanCidrs`), or (C) the VPN
+    /// IP the new profile would assign to this machine — or nil if there is none. Default-route
+    /// AllowedIPs entries (0.0.0.0/0) are excluded from (A), matching Windows/Linux. Mirrors
+    /// Windows FindLocalLanConflict / Linux find_local_lan_conflict.
+    func findLocalLanConflict(newProfileUser: String, newProfile: String, remoteLanCidrs: [String]) -> String? {
+        let localCidrs = TrustedNetworkDetector.localLanCidrs()
+        guard !localCidrs.isEmpty, let newPath = storedPath(newProfileUser, newProfile) else { return nil }
+
+        let remoteCidrs = readAllowedIps(atPath: newPath).filter { !$0.hasPrefix("0.0.0.0/0") } + remoteLanCidrs
+        let assignedAddresses = readAddress(atPath: newPath)
+
+        for local in localCidrs {
+            for remote in remoteCidrs where cidrsOverlapV4(local, remote) {
+                return "Your local network (\(local)) overlaps with a network routed through this VPN " +
+                       "(\(remote)). Connecting would make local devices unreachable or misroute traffic " +
+                       "meant for the remote network. Contact your administrator or change your local " +
+                       "network before connecting."
+            }
+            for addr in assignedAddresses where cidrsOverlapV4(local, addr) {
+                return "Your local network (\(local)) overlaps with the VPN address assigned to this " +
+                       "device (\(addr)). Connecting would make this device unreachable on your local " +
+                       "network. Contact your administrator before connecting."
+            }
+        }
+        return nil
+    }
 }
 
 enum ConfigError: Error, CustomStringConvertible {

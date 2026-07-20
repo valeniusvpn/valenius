@@ -45,6 +45,14 @@ class ValeniusVpn {
     );
   }
 
+  /// This device's own local LAN CIDR(s) (e.g. "192.168.1.0/24"), one per active
+  /// non-loopback, non-VPN Wi-Fi/ethernet/cellular link. Used by the pre-connect
+  /// LAN-conflict check. Empty on any failure (fail-open, matches the desktop clients).
+  Future<List<String>> localLanCidrs() async {
+    final result = await _method.invokeListMethod<String>('localLanCidrs');
+    return result ?? const [];
+  }
+
   /// Stream of `{name, state}` where state is connecting | connected | down.
   Stream<TunnelStateEvent> states() =>
       _events.receiveBroadcastStream().map((dynamic e) {

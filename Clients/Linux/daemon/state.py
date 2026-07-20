@@ -67,6 +67,10 @@ class DaemonState:
         self._server_profile_name: Optional[str] = None
         self._server_vpn_ip: Optional[str] = None
         self._server_health_port: int = 8443
+        # Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported via /info and
+        # relayed by the backend. Refreshed on every heartbeat/poll. Used by the pre-connect
+        # LAN-conflict check to detect the remote network for full-tunnel profiles.
+        self._remote_lan_cidrs: list[str] = []
         self._heartbeat_interval = 5
         self._tray_last_seen: Optional[datetime] = None
         # MFA state — written by heartbeat_once, read by build_tunnel_status
@@ -263,6 +267,14 @@ class DaemonState:
         with self._lock:
             self._server_vpn_ip = vpn_ip or None
             self._server_health_port = health_port
+
+    def set_remote_lan_cidrs(self, cidrs: Optional[list[str]]) -> None:
+        with self._lock:
+            self._remote_lan_cidrs = list(cidrs) if cidrs else []
+
+    def get_remote_lan_cidrs(self) -> list[str]:
+        with self._lock:
+            return list(self._remote_lan_cidrs)
 
     def get_gateway_probe(self, profile: Optional[str]) -> Optional[tuple[str, int]]:
         """Gateway /health target (ip, port) for the server profile, or None.

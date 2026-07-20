@@ -240,6 +240,9 @@
         { IsInGracePeriod: true }                        => ("bg-warning text-dark", "Grace period",   "bi-exclamation-triangle-fill"),
         { IsValid: false, LicenseType: not "community" } => ("bg-danger",            "Expired",        "bi-x-octagon-fill"),
         { LicenseType: "community" }                     => ("bg-secondary",         "Community",      "bi-people-fill"),
+        // LicenseLoader falls a fully-expired trial back to a plain CommunityLicenseContext, so
+        // reaching this case always means the trial is still active (not expired, not in grace).
+        { LicenseType: "trial" }                         => ("bg-info text-dark",    $"Trial — {_lic.DaysUntilExpiry}d left", "bi-hourglass-split"),
         _                                                => ("bg-success",            "Valid",          "bi-patch-check-fill"),
     };
     var _installBorderClass = _install.Status switch

@@ -130,6 +130,52 @@ public class WireGuardController
         return null;
     }
 
+    // ── Local LAN conflict detection ──────────────────────────────────────────
+
+    /// <summary>
+    /// Returns a human-readable description of a conflict between this machine's own local LAN
+    /// and either (A) an explicit remote route in the new config's AllowedIPs, (B) a remote LAN
+    /// CIDR reported by the backend for a full-tunnel profile (<paramref name="statusRemoteLanCidrs"/>),
+    /// or (C) the VPN IP the new config would assign to this machine — or null if there is none.
+    /// Default-route AllowedIPs entries (0.0.0.0/0) are excluded from (A): a full tunnel isn't a
+    /// routable "network" to compare against, and the remote network behind it is only knowable
+    /// via (B) when the backend can supply it (Valenius-managed sidecar). Fail-open on either side
+    /// being unreadable — this is a safety net, not a hard gate when detection itself is uncertain.
+    /// </summary>
+    public string? FindLocalLanConflict(string newConfigPath, IEnumerable<string>? statusRemoteLanCidrs)
+    {
+        var localCidrs = NetworkDetector.GetLocalLanCidrs();
+        if (localCidrs.Length == 0) return null;
+
+        var remoteCidrs = _configs.ReadAllowedIPs(newConfigPath)
+            .Where(c => !IsDefaultRoute(c))
+            .Concat(statusRemoteLanCidrs ?? [])
+            .ToList();
+        var assignedAddresses = _configs.ReadAddress(newConfigPath);
+
+        foreach (var local in localCidrs)
+        {
+            foreach (var remote in remoteCidrs)
+            {
+                if (CidrsOverlap(local, remote))
+                    return $"Your local network ({local}) overlaps with a network routed through this VPN " +
+                           $"({remote}). Connecting would make local devices unreachable or misroute traffic " +
+                           "meant for the remote network. Contact your administrator or change your local " +
+                           "network before connecting.";
+            }
+
+            foreach (var addr in assignedAddresses)
+            {
+                if (CidrsOverlap(local, addr))
+                    return $"Your local network ({local}) overlaps with the VPN address assigned to this " +
+                           $"device ({addr}). Connecting would make this device unreachable on your local " +
+                           "network. Contact your administrator before connecting.";
+            }
+        }
+
+        return null;
+    }
+
     private static bool IsDefaultRoute(string cidr) =>
         cidr.Trim() is "0.0.0.0/0" or "::/0";
 

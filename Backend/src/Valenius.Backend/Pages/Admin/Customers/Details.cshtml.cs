@@ -25,6 +25,12 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
     public int?    SidecarListenPort       { get; private set; }
     public string? SidecarInterfaceAddress { get; private set; }
     public string? SidecarVersion          { get; private set; }
+
+    /// <summary>Physical LAN CIDR(s) the sidecar detected on its host, freshly fetched from
+    /// /info (falls back to the last-cached <see cref="Customer.SidecarLanCidrs"/> value when the
+    /// live call fails). This is what's sent to clients as StatusResponse.RemoteLanCidrs for the
+    /// pre-connect LAN-conflict check.</summary>
+    public List<string> DetectedLanCidrs { get; private set; } = [];
     public bool    HasActiveSidecarCert    { get; private set; }
     public bool    EnrollmentTokenIsSet    { get; private set; }
     public bool?   UdpPortReachable        { get; private set; }
@@ -34,7 +40,15 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
     /// <summary>Other customers whose sidecar transit subnet overlaps this one's. Non-empty
     /// means the gateway /health verification is disabled (handshake fallback) until resolved.</summary>
     public List<(string Name, string Subnet)> TransitConflicts { get; private set; } = [];
-    public string  BackendUrl              => $"{Request.Scheme}://{Request.Host}";
+    // Forced to https regardless of Request.Scheme: this backend sits behind a reverse proxy
+    // that terminates TLS, and Request.Scheme silently falls back to http whenever the proxy's
+    // IP falls outside the trusted KnownNetworks for X-Forwarded-Proto (see OssStartup.cs) -
+    // which produced a real bug: a sidecar given http://... as BACKEND_URL gets redirected to
+    // https by the proxy, and Go's http.Client downgrades POST to GET on 301/302, turning
+    // enrollment into "405 Method Not Allowed" instead of a working POST. A sidecar's backend
+    // URL should never legitimately be plain http in production, so this value is intentionally
+    // not Request.Scheme-derived here.
+    public string  BackendUrl              => $"https://{Request.Host}";
 
     public ILicenseContext License             => license;
     public bool            IsProEdition        => sidecar is not NullSidecarService;
@@ -95,6 +109,9 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         SidecarInterfaceAddress = info?.InterfaceAddress;
         SidecarVersion          = info?.Version;
         TransitConflicts        = await ComputeTransitConflictsAsync(customer, info?.InterfaceAddress);
+        DetectedLanCidrs         = info?.LanCidrs is { Count: > 0 } fresh
+            ? fresh
+            : (customer.SidecarLanCidrs?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? []).ToList();
     }
 
     /// <summary>
@@ -230,7 +247,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             return RedirectToPage(new { id });
         }
 
-        var backendUrl = $"{Request.Scheme}://{Request.Host}";
+        var backendUrl = BackendUrl; // forced https — see the property's comment
         var content = $"""
             # Valenius sidecar enrollment
             # Customer : {customer.Name}
@@ -244,13 +261,14 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             # WG_CONF_PATH=/etc/wireguard/wg0.conf   # defaults to /etc/wireguard/WG_INTERFACE.conf
 
             MANAGEMENT_PORT={customer.SidecarManagementPort}
+            HEALTH_PORT={(customer.SidecarHealthPort > 0 ? customer.SidecarHealthPort : 9004)}
             BACKEND_URL={backendUrl}
             ENROLLMENT_TOKEN={customer.EnrollmentToken}
             """;
 
         var bytes    = System.Text.Encoding.UTF8.GetBytes(content);
         var filename = $"sidecar-{SanitizeName(customer.Name)}.env";
-        return File(bytes, "text/plain", filename);
+        return File(bytes, "text/plain; charset=utf-8", filename);
     }
 
     private static string SanitizeName(string name) =>

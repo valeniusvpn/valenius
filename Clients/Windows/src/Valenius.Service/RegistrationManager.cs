@@ -27,6 +27,13 @@ public class RegistrationManager
     public void SetServerHealthUrl(string? url) => _serverHealthUrl = url;
     public void SetServerVpnIp(string? ip)      => _serverVpnIp     = ip;
 
+    // Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported via /info and
+    // relayed by the backend. In-memory only, refreshed on every heartbeat. Used by the
+    // pre-connect LAN-conflict check to detect the remote network for full-tunnel profiles.
+    private volatile string[] _remoteLanCidrs = [];
+    public string[] GetRemoteLanCidrs() => _remoteLanCidrs;
+    public void SetRemoteLanCidrs(string[]? cidrs) => _remoteLanCidrs = cidrs ?? [];
+
     private volatile bool _skipConnectivityCheck;
     public bool GetSkipConnectivityCheck()       => _skipConnectivityCheck;
     public void SetSkipConnectivityCheck(bool v) => _skipConnectivityCheck = v;

@@ -180,6 +180,13 @@ actor DaemonCore {
             return .fail("AllowedIPs in '\(tunnelName)' overlap with the active tunnel '\(conflict)'. Disconnect '\(conflict)' first.")
         }
 
+        // Local-LAN conflict check — mirrors Windows FindLocalLanConflict / Linux
+        // find_local_lan_conflict. No override: the user must resolve the conflict first.
+        let remoteLanCidrs = await state.getRemoteLanCidrs()
+        if let lanConflict = await configs.findLocalLanConflict(newProfileUser: username, newProfile: tunnelName, remoteLanCidrs: remoteLanCidrs) {
+            return .fail(lanConflict, isLanConflict: true)
+        }
+
         // Decrypt in memory (never to disk) and bring the tunnel up via wireguard-go/UAPI.
         let content: String
         do {
@@ -458,6 +465,11 @@ actor DaemonCore {
         let serverVpnIp = j.string("ServerVpnIp")
         let serverHealthUrl = j.string("ServerHealthUrl")
         await state.setServerGateway(vpnIp: serverVpnIp, healthPort: healthPort(from: serverHealthUrl))
+
+        // Remote LAN CIDR(s) behind a Valenius-managed sidecar, for the pre-connect
+        // LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
+        let remoteLanCidrs = (j.array("RemoteLanCidrs") ?? []).compactMap { $0 as? String }
+        await state.setRemoteLanCidrs(remoteLanCidrs)
 
         // MFA state — passed through to the app via buildTunnelStatus; enroll/unlock UI is M5.
         await state.setMfaState(

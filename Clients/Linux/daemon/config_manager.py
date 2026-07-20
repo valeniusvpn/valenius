@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -469,6 +470,30 @@ def read_allowed_ips(stored_path: Path) -> list[str]:
         return []
 
 
+def read_address(stored_path: Path) -> list[str]:
+    """Read the interface Address CIDR(s) from a stored config. Decrypts in-memory if .conf.enc.
+
+    Same decrypt pattern as read_allowed_ips. WireGuard allows a comma-separated list (e.g.
+    IPv4 + IPv6) on one Address line. Returns [] on any error (fail-open).
+    """
+    try:
+        if stored_path.name.endswith(_ENC_EXT):
+            content = _decrypt(stored_path.read_bytes()).decode()
+        else:
+            content = stored_path.read_text()
+        for raw in content.splitlines():
+            line = raw.strip()
+            if not line.lower().startswith('address'):
+                continue
+            eq = line.find('=')
+            if eq < 0:
+                continue
+            return [part.strip() for part in line[eq + 1:].split(',') if part.strip()]
+        return []
+    except Exception:
+        return []
+
+
 def _parse_cidr_v4(cidr: str) -> tuple[int, int]:
     addr, _, prefix = cidr.partition('/')
     prefix_len = int(prefix) if prefix else 32
@@ -491,6 +516,83 @@ def _cidrs_overlap(a: str, b: str) -> bool:
         return (a_net & mask) == (b_net & mask)
     except Exception:
         return False
+
+
+def _int_to_ipv4(addr_int: int) -> str:
+    return '.'.join(str((addr_int >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def get_local_lan_cidrs() -> list[str]:
+    """Return this machine's local LAN CIDR(s) (e.g. "192.168.1.0/24"), one per up, non-loopback,
+    non-WireGuard, non-virtual IPv4 adapter address. Used by the pre-connect LAN-conflict check to
+    determine this machine's own local LAN(s) before comparing against a profile's routes.
+    Best-effort: returns [] on any failure (fail-open, matches read_allowed_ips/read_address).
+    """
+    try:
+        wg_ifaces: set[str] = set()
+        try:
+            wg_out = subprocess.run(
+                ['wg', 'show', 'interfaces'], capture_output=True, text=True, timeout=5,
+            ).stdout
+            wg_ifaces = set(wg_out.split())
+        except Exception:
+            pass  # wg not installed / no interfaces — fine, nothing to exclude
+
+        out = subprocess.run(
+            ['ip', '-4', 'addr', 'show'], capture_output=True, text=True, timeout=5,
+        ).stdout
+        cidrs: list[str] = []
+        current: Optional[str] = None
+        skip = False
+        for line in out.splitlines():
+            m = re.match(r'^\d+:\s+(\S+):', line)
+            if m:
+                current = m.group(1).rstrip(':@')
+                skip = (current == 'lo' or current in wg_ifaces
+                        or current.startswith(('docker', 'veth', 'br-', 'virbr')))
+                continue
+            m = re.match(r'^\s+inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)', line)
+            if m and current and not skip:
+                net_int, prefix = _parse_cidr_v4(f"{m.group(1)}/{m.group(2)}")
+                cidrs.append(f"{_int_to_ipv4(net_int)}/{prefix}")
+        return cidrs
+    except Exception:
+        return []
+
+
+def find_local_lan_conflict(new_path: Path, status_remote_lan_cidrs: Optional[list[str]] = None) -> Optional[str]:
+    """Return a human-readable description of a conflict between this machine's own local LAN
+    and either (A) an explicit remote route in new_path's AllowedIPs, (B) a remote LAN CIDR
+    reported by the backend for a full-tunnel profile (status_remote_lan_cidrs), or (C) the VPN IP
+    new_path would assign to this machine — or None if there is none.
+
+    Default-route AllowedIPs entries (0.0.0.0/0) are excluded from (A): a full tunnel isn't a
+    routable "network" to compare against, and the remote network behind it is only knowable via
+    (B) when the backend can supply it (Valenius-managed sidecar). Fail-open when local LAN
+    detection itself comes back empty — this is a safety net, not a hard gate on uncertain input.
+    Mirrors Windows WireGuardController.FindLocalLanConflict / macOS findLocalLanConflict.
+    """
+    local_cidrs = get_local_lan_cidrs()
+    if not local_cidrs:
+        return None
+
+    remote_cidrs = [c for c in read_allowed_ips(new_path) if not c.startswith('0.0.0.0/0')]
+    remote_cidrs += status_remote_lan_cidrs or []
+    assigned_addresses = read_address(new_path)
+
+    for local in local_cidrs:
+        for remote in remote_cidrs:
+            if _cidrs_overlap(local, remote):
+                return (f"Your local network ({local}) overlaps with a network routed through this "
+                        f"VPN ({remote}). Connecting would make local devices unreachable or misroute "
+                        "traffic meant for the remote network. Contact your administrator or change "
+                        "your local network before connecting.")
+        for addr in assigned_addresses:
+            if _cidrs_overlap(local, addr):
+                return (f"Your local network ({local}) overlaps with the VPN address assigned to "
+                        f"this device ({addr}). Connecting would make this device unreachable on "
+                        "your local network. Contact your administrator before connecting.")
+    return None
 
 
 def get_config_path_by_tunnel_name(tunnel_name: str) -> Optional[Path]:

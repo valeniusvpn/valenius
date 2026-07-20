@@ -12,6 +12,9 @@ Clients/Windows/installer/publish/
 Backend/.env
 Server/.env
 
+# install.sh output (generated secrets + compose file — never commit)
+deploy/
+
 # Windows client appsettings (contains BackendUrl — varies per deployment)
 Clients/Windows/src/Valenius.Service/appsettings.json
 

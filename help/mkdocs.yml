@@ -1,0 +1,97 @@
+site_name: Valenius Help
+site_url: https://help.valenius.com/
+site_description: >-
+  Step-by-step installation guides and day-to-day usage help for Valenius —
+  the WireGuard® VPN management platform.
+site_author: Valenius / Stranto
+copyright: Copyright &copy; Stranto. WireGuard is a registered trademark of Jason A. Donenfeld.
+
+use_directory_urls: true
+
+# English only at launch. German (and possibly Slovak) will be added via
+# mkdocs-static-i18n once the content is stable — see docs/help.md (concept)
+# in the main repo. Keep page files translation-ready: one page per topic,
+# no language-specific structure.
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  # Teal instead of the technical docs' indigo — the help site is deliberately
+  # branded to look distinct from documentation.valenius.com.
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.keys
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra_css:
+  - assets/extra.css
+
+nav:
+  - Home: index.md
+  - Install:
+      - install/index.md
+      - Prerequisites: install/prerequisites.md
+      - Backend — Community edition: install/backend-community.md
+      - Backend — Pro edition: install/backend-pro.md
+      - Integrated WireGuard server (Pro): install/integrated-server.md
+      - Windows client: install/client-windows.md
+      - Linux client: install/client-linux.md
+      - macOS client: install/client-macos.md
+      - Mobile app: install/client-mobile.md
+      - First steps after install: install/first-steps.md
+  - Working with Valenius:
+      - working/index.md
+      - Overview dashboard: working/overview-dashboard.md
+      - Clients: working/clients.md
+      - Customers: working/customers.md
+      - Users & sign-in: working/users-sign-in.md
+      - Releases & auto-update: working/releases-updates.md
+      - Settings: working/settings.md
+      - MFA session gating: working/mfa.md
+      - Traffic dashboard: working/traffic.md
+      - Audit log: working/audit-log.md
+      - Device pairing (QR): working/device-pairing.md
+      - Diagnostic logs: working/diagnostics.md
+      - For users: working/for-users.md

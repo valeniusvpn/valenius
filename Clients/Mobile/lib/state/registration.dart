@@ -113,6 +113,11 @@ final backendFactoryProvider =
 final gatewayTargetsProvider =
     StateProvider<Map<String, GatewayTarget>>((_) => const {});
 
+/// Physical LAN CIDR(s) behind a Valenius-managed sidecar from the latest heartbeat
+/// (`StatusResponse.remoteLanCidrs`). Used by the pre-connect LAN-conflict check to
+/// detect the remote network for full-tunnel profiles. Empty when unknown.
+final remoteLanCidrsProvider = StateProvider<List<String>>((_) => const []);
+
 /// TOTP MFA state from the latest heartbeat. `required` means the peer is gated
 /// and needs authorization before it will connect.
 class MfaState {
@@ -160,6 +165,8 @@ final registrationControllerProvider =
         ref.read(profilesControllerProvider.notifier).load(),
     onGatewayTargets: (targets) =>
         ref.read(gatewayTargetsProvider.notifier).state = targets,
+    onRemoteLanCidrs: (cidrs) =>
+        ref.read(remoteLanCidrsProvider.notifier).state = cidrs,
     onMfaState: (mfa) => ref.read(mfaStateProvider.notifier).state = mfa,
     onMfaGate: (gatedProfile) =>
         ref.read(connectionControllerProvider.notifier).onMfaGate(gatedProfile),
@@ -249,6 +256,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     required this.backendFactory,
     required this.onConfigsChanged,
     required this.onGatewayTargets,
+    required this.onRemoteLanCidrs,
     required this.onMfaState,
     required this.onMfaGate,
     required this.onPendingApprovals,
@@ -264,6 +272,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   final BackendApi Function(String, String) backendFactory;
   final void Function() onConfigsChanged;
   final void Function(Map<String, GatewayTarget>) onGatewayTargets;
+  final void Function(List<String>) onRemoteLanCidrs;
   final void Function(MfaState) onMfaState;
 
   /// Called when a heartbeat reports the MFA gate is required again (session
@@ -295,6 +304,12 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     Duration(seconds: 8),
   ];
 
+  // The very first reachability check, right as the app opens, can race the
+  // OS network stack before it's finished initializing (seen as a false
+  // "backend unreachable" flash on launch even though the backend is fine).
+  // Give it a few seconds to settle before probing for the first time.
+  static const _initialCheckDelay = Duration(seconds: 5);
+
   // While an MFA gate is actively pending (enrollment open or authorization
   // required), poll much faster than the normal heartbeat interval — the user
   // is typically staring at the screen waiting, e.g. for another device to
@@ -315,6 +330,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     final storedApiKey = await keyStore.read(_apiKeyStorageKey);
     if (storedApiKey != null && storedApiKey.isNotEmpty) api.setApiKey(storedApiKey);
     _api = api;
+    await Future<void>.delayed(_initialCheckDelay);
     await refresh();
     await _registerPushToken();
     _scheduleNextPoll();
@@ -436,6 +452,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
               g.profileName:
                   GatewayTarget(ip: g.gatewayIp, healthPort: g.healthPort),
         });
+        onRemoteLanCidrs(resp.remoteLanCidrs);
         _mfaPending = resp.mfaRequired || resp.mfaEnrollmentOpen;
         onMfaState(MfaState(
           required: resp.mfaRequired,

@@ -58,6 +58,17 @@ struct PopupView: View {
         .frame(width: 300)
         .background(Color(red: 0.11, green: 0.12, blue: 0.14))
         .preferredColorScheme(.dark)
+        .alert(
+            "Network conflict — can't connect",
+            isPresented: Binding(
+                get: { state.lanConflictMessage != nil },
+                set: { if !$0 { state.lanConflictMessage = nil } }
+            )
+        ) {
+            Button("OK") { state.lanConflictMessage = nil }
+        } message: {
+            Text(state.lanConflictMessage ?? "")
+        }
     }
 
     // MARK: Header

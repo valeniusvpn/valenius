@@ -68,6 +68,10 @@ class PipeResponse:
     Success: bool
     Error: Optional[str] = None
     DataJson: Optional[str] = None
+    # True when Error is a pre-connect local-LAN-conflict refusal (this machine's own LAN
+    # overlaps a network reachable through the VPN, or the assigned VPN IP itself). Mirrors
+    # Windows PipeResponse.IsLanConflict / macOS PipeResponse.isLanConflict.
+    IsLanConflict: bool = False
 
     def to_json(self) -> str:
         d: dict = {'Success': self.Success}
@@ -75,6 +79,8 @@ class PipeResponse:
             d['Error'] = self.Error
         if self.DataJson is not None:
             d['DataJson'] = self.DataJson
+        if self.IsLanConflict:
+            d['IsLanConflict'] = self.IsLanConflict
         return json.dumps(d)
 
     @staticmethod
@@ -84,6 +90,7 @@ class PipeResponse:
             Success=d['Success'],
             Error=d.get('Error'),
             DataJson=d.get('DataJson'),
+            IsLanConflict=d.get('IsLanConflict', False),
         )
 
 

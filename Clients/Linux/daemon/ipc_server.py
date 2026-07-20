@@ -216,5 +216,5 @@ def _ok_data(obj) -> PipeResponse:
     return PipeResponse(Success=True, DataJson=obj.to_json())
 
 
-def _fail(msg: str) -> PipeResponse:
-    return PipeResponse(Success=False, Error=msg)
+def _fail(msg: str, is_lan_conflict: bool = False) -> PipeResponse:
+    return PipeResponse(Success=False, Error=msg, IsLanConflict=is_lan_conflict)

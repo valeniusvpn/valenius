@@ -53,7 +53,12 @@ services:
       # Leave unset to run as Community edition (no limits enforced).
       VALENIUS_LICENSE_KEY: ${VALENIUS_LICENSE_KEY:-}
 
-      # Licensing server URL and client API key are hardcoded — no env vars needed.
+      # Licensing server revocation-check credential. The server URL itself is a hardcoded
+      # constant in code (never changes, not a secret) — only the API key is configurable.
+      # There is NO hardcoded default for it — leave unset to disable revocation checking
+      # (fail-open, not fail-closed), or set it here to match ValeniusLicensing's own
+      # CLIENT_API_KEY (Portainer stack Environment variables).
+      LICENSING_CLIENT_API_KEY: ${LICENSING_CLIENT_API_KEY:-}
 
       # versions.json and installer EXE files live in a host-mounted directory
       # so they can be updated without rebuilding the image.

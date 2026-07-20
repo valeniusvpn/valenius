@@ -41,6 +41,10 @@ public class PipeResponse
     public bool Success { get; set; }
     public string? Error { get; set; }
     public string? DataJson { get; set; }
+    /// <summary>True when <see cref="Error"/> is a pre-connect local-LAN-conflict refusal
+    /// (the client's own LAN overlaps a network reachable through the VPN, or the assigned VPN
+    /// IP itself). The TrayApp shows a blocking modal for this instead of the usual balloon.</summary>
+    public bool IsLanConflict { get; set; }
 }
 
 /// <summary>One connected WireGuard tunnel. Multiple may be active simultaneously

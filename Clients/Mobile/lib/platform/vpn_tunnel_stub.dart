@@ -42,6 +42,9 @@ class StubVpnTunnel implements VpnTunnelPlatform {
   Stream<TunnelSnapshot> states() => _controller.stream;
 
   @override
+  Future<List<String>> localLanCidrs() async => const [];
+
+  @override
   Future<HandshakeInfo?> stats(String peerName) async {
     if (_peers[peerName] != PeerState.connected) return null;
     return HandshakeInfo(

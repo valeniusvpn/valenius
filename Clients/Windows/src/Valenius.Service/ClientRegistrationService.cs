@@ -217,6 +217,7 @@ public class ClientRegistrationService : BackgroundService
         _registration.SetServerProfileName(result.ServerProfileName);
         _registration.SetServerHealthUrl(result.ServerHealthUrl);
         _registration.SetServerVpnIp(result.ServerVpnIp);
+        _registration.SetRemoteLanCidrs(result.RemoteLanCidrs);
         _registration.SetSkipConnectivityCheck(result.SkipConnectivityCheck);
         _registration.SetGatewayProfiles(
             (result.GatewayProfiles ?? [])

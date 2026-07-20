@@ -1,0 +1,14 @@
+/* Inline "Pro" badge — marks Pro-only features throughout the site.
+   Usage in Markdown:  <span class="pro-badge">Pro</span>  */
+.md-typeset .pro-badge {
+    display: inline-block;
+    background: var(--md-primary-fg-color);
+    color: var(--md-primary-bg-color);
+    font-size: .62rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    border-radius: .25rem;
+    padding: .1rem .4rem;
+    vertical-align: middle;
+}

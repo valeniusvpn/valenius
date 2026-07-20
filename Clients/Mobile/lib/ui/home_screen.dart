@@ -73,13 +73,39 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with WidgetsBindingObse
 
     ref.listen(connectionControllerProvider, (prev, next) {
       if (next.error != null && next.errorAt != prev?.errorAt) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(SnackBar(
-            content: Text(next.error!),
-            backgroundColor: ValeniusColors.deleteHot,
-            duration: const Duration(seconds: 6),
-          ));
+        if (next.isLanConflict) {
+          // Blocking alert, not a snackbar — this refusal must not be missed or
+          // auto-dismissed like a transient connect error.
+          showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: ValeniusColors.hover,
+              icon: const Icon(Icons.error, color: Colors.red, size: 40),
+              title: const Text(
+                "Network conflict — can't connect",
+                style: TextStyle(color: Colors.white),
+              ),
+              content: Text(
+                next.error!,
+                style: const TextStyle(color: ValeniusColors.actionText),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text(next.error!),
+              backgroundColor: ValeniusColors.deleteHot,
+              duration: const Duration(seconds: 6),
+            ));
+        }
       }
     });
 

@@ -1,0 +1,16 @@
+# Build output (regenerated inside the image)
+site/
+
+# Python / tooling cruft
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+
+# Git metadata is not needed in the build context
+.git/
+.gitignore

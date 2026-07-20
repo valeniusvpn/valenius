@@ -252,6 +252,14 @@ public class PipeServer : BackgroundService
                 if (conflict is not null)
                     return Fail(conflict);
 
+                // Reject if this machine's own local LAN overlaps a network reachable through
+                // this profile (explicit AllowedIPs, or the backend-reported remote LAN for a
+                // full-tunnel profile against a Valenius-managed sidecar) or the VPN IP it would
+                // be assigned. No override — the user must resolve the conflict before connecting.
+                var lanConflict = _wg.FindLocalLanConflict(configPath, _registration.GetRemoteLanCidrs());
+                if (lanConflict is not null)
+                    return Fail(lanConflict, isLanConflict: true);
+
                 // Capture WAN IP before the tunnel comes up so we record the real
                 // client public IP, not the VPN endpoint address.
                 var wanIp = await _registrationSvc.GetWanIpAsync(ct);
@@ -563,6 +571,13 @@ public class PipeServer : BackgroundService
     {
         Success = false,
         Error = error
+    };
+
+    private static PipeResponse Fail(string error, bool isLanConflict) => new()
+    {
+        Success = false,
+        Error = error,
+        IsLanConflict = isLanConflict
     };
 
     internal static async Task<string> ReadMessageAsync(PipeStream pipe, CancellationToken ct)

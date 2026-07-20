@@ -57,6 +57,43 @@ internal static class NetworkDetector
         return false;
     }
 
+    /// <summary>
+    /// Returns the network CIDR (e.g. "192.168.1.0/24") of every up, non-loopback, non-tunnel
+    /// IPv4 adapter address on this machine. Used by the pre-connect LAN-conflict check to
+    /// determine this machine's own local LAN(s) before comparing against a profile's routes.
+    /// </summary>
+    public static string[] GetLocalLanCidrs()
+    {
+        var adapters = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(a => a.OperationalStatus == OperationalStatus.Up
+                     && a.NetworkInterfaceType != NetworkInterfaceType.Loopback
+                     && a.NetworkInterfaceType != NetworkInterfaceType.Tunnel);
+
+        var cidrs = new List<string>();
+        foreach (var adapter in adapters)
+        {
+            foreach (var u in adapter.GetIPProperties().UnicastAddresses)
+            {
+                if (u.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                if (u.PrefixLength is < 0 or > 32) continue;
+
+                var addrBytes = u.Address.GetAddressBytes();
+                var netBytes  = (byte[])addrBytes.Clone();
+                var fullBytes = u.PrefixLength / 8;
+                var remainingBits = u.PrefixLength % 8;
+                for (var i = fullBytes; i < netBytes.Length; i++) netBytes[i] = 0;
+                if (remainingBits > 0)
+                {
+                    var mask = (byte)(0xFF << (8 - remainingBits));
+                    netBytes[fullBytes] = (byte)(addrBytes[fullBytes] & mask);
+                }
+
+                cidrs.Add($"{new IPAddress(netBytes)}/{u.PrefixLength}");
+            }
+        }
+        return cidrs.ToArray();
+    }
+
     // ── CIDR helpers ──────────────────────────────────────────────────────────
 
     private static bool TryParseCidr(string cidr, out IPAddress networkAddress, out int prefixLength)

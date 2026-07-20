@@ -3,8 +3,11 @@ package com.valenius.valenius_vpn
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.Looper
+import java.net.Inet4Address
 import com.wireguard.android.backend.GoBackend
 import com.wireguard.android.backend.Tunnel
 import com.wireguard.config.Config
@@ -74,6 +77,7 @@ class ValeniusVpnPlugin :
             "up" -> up(call.argument<String>("name")!!, call.argument<String>("config")!!, result)
             "down" -> down(result)
             "stats" -> stats(call.argument<String>("name")!!, result)
+            "localLanCidrs" -> result.success(localLanCidrs())
             // No Android equivalent of iOS NEOnDemandRule; auto-connect on Android
             // is a separate (not-yet-built) mechanism. Accept and no-op so the
             // shared Dart seam stays uniform.
@@ -95,6 +99,43 @@ class ValeniusVpnPlugin :
         }
         pendingPermission = result
         act.startActivityForResult(intent, VPN_REQUEST_CODE)
+    }
+
+    /**
+     * This device's own local LAN CIDR(s) (e.g. "192.168.1.0/24"), one per IPv4 link
+     * address on every currently-active non-VPN network (Wi-Fi, ethernet, cellular NAT
+     * gateway, etc). Used by the pre-connect LAN-conflict check. Fail-open: any error
+     * yields an empty list rather than blocking a connect that can't be evaluated.
+     */
+    private fun localLanCidrs(): List<String> {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cidrs = mutableListOf<String>()
+            for (network in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(network) ?: continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                val props = cm.getLinkProperties(network) ?: continue
+                for (linkAddress in props.linkAddresses) {
+                    val addr = linkAddress.address
+                    if (addr !is Inet4Address || addr.isLoopbackAddress) continue
+                    val prefix = linkAddress.prefixLength
+                    cidrs.add("${maskIpv4(addr.address, prefix)}/$prefix")
+                }
+            }
+            cidrs
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun maskIpv4(addressBytes: ByteArray, prefix: Int): String {
+        val masked = ByteArray(4)
+        for (i in 0 until 4) {
+            val bitsInThisByte = (prefix - i * 8).coerceIn(0, 8)
+            val mask = if (bitsInThisByte == 0) 0 else (0xFF shl (8 - bitsInThisByte)) and 0xFF
+            masked[i] = (addressBytes[i].toInt() and mask).toByte()
+        }
+        return masked.joinToString(".") { (it.toInt() and 0xFF).toString() }
     }
 
     private fun up(name: String, configText: String, result: Result) {

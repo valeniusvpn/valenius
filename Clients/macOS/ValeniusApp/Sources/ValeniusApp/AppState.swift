@@ -10,6 +10,10 @@ import ValeniusShared
 final class AppState: ObservableObject {
     @Published var status: TunnelStatus = TunnelStatus()
     @Published var lastError: String?
+    /// Set instead of `lastError` when a connect attempt was refused for a local-LAN conflict —
+    /// the view shows a blocking alert for this instead of the usual inline error text, since it
+    /// must not be missed or silently replaced by the next poll's state.
+    @Published var lanConflictMessage: String?
     @Published var busyProfiles: Set<String> = []   // rows with an in-flight connect/disconnect
     @Published var daemonReachable = true
 
@@ -142,10 +146,16 @@ final class AppState: ObservableObject {
         lastError = nil
         ipcQueue.async { [weak self] in
             var failure: String?
-            do { try op() } catch { failure = "\(error)" }
+            var lanConflict: String?
+            do { try op() }
+            catch IpcError.failure(let message, let isLanConflict) {
+                if isLanConflict { lanConflict = message } else { failure = message }
+            }
+            catch { failure = "\(error)" }
             Task { @MainActor in
                 self?.busyProfiles.remove(profile)
                 if let failure { self?.lastError = failure }
+                if let lanConflict { self?.lanConflictMessage = lanConflict }
                 self?.refresh()
             }
         }

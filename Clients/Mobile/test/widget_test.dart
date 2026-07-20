@@ -71,6 +71,7 @@ class _FakeApi implements BackendApi {
         mfaApproveNumber: null,
         pendingApprovals: const [],
         logUploadRequested: false,
+        remoteLanCidrs: const [],
       );
 
   @override

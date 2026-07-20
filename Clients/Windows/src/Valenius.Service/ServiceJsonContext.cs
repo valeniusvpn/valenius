@@ -54,7 +54,11 @@ internal record ClientStatusResponse(
     /// <summary>New client API key sent during a backend key rotation (only when this client
     /// authenticated with the old key). The service persists it and uses it for subsequent
     /// requests. Null in the normal case.</summary>
-    string? ClientApiKey = null);
+    string? ClientApiKey = null,
+    /// <summary>Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported by the
+    /// sidecar. Used by the pre-connect LAN-conflict check to detect the remote network even
+    /// for full-tunnel (0.0.0.0/0) profiles. Null/empty when unknown.</summary>
+    string[]? RemoteLanCidrs = null);
 
 internal record PendingForeignConfigEntry(string FileName, string Content);
 internal record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);

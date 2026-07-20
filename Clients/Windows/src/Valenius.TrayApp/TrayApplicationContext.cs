@@ -206,7 +206,10 @@ public class TrayApplicationContext : ApplicationContext
                 Command     = CommandType.Connect,
                 ProfileName = profileName
             });
-            if (!response.Success)
+            if (!response.Success && response.IsLanConflict)
+                using (var form = new LanConflictForm(response.Error ?? "Unknown network conflict."))
+                    form.ShowDialog();
+            else if (!response.Success)
                 ShowBalloon("Connect failed", response.Error ?? "Unknown error", ToolTipIcon.Error);
             else
                 ShowBalloon("Valenius", "VPN connected.", ToolTipIcon.Info);

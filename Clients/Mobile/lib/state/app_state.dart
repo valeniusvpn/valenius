@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../config/lan_conflict.dart';
 import '../diagnostics/diagnostics.dart';
 import '../platform/health_probe.dart';
 import '../platform/vpn_tunnel.dart';
 import '../platform/vpn_tunnel_stub.dart';
+import 'registration.dart' show remoteLanCidrsProvider;
 
 /// The tunnel implementation. `main.dart` overrides this with the native
 /// WireGuard adapter in production; tests keep the stub.
@@ -27,6 +29,7 @@ final connectionControllerProvider =
     ref.watch(vpnTunnelProvider),
     ref.watch(healthProbeProvider),
     networkChanges: ref.watch(connectivityChangesProvider),
+    remoteLanCidrs: () => ref.read(remoteLanCidrsProvider),
   );
 });
 
@@ -40,6 +43,7 @@ class VpnConnectionState {
     this.busy = false,
     this.error,
     this.errorAt,
+    this.isLanConflict = false,
   });
 
   final String? activeProfile;
@@ -56,19 +60,35 @@ class VpnConnectionState {
   final String? error;
   final DateTime? errorAt;
 
+  /// True when [error] is a pre-connect local-LAN-conflict refusal (this device's own
+  /// LAN overlaps a network reachable through the VPN, or the assigned VPN IP itself).
+  /// The UI shows a blocking alert for this instead of the usual snackbar.
+  final bool isLanConflict;
+
   bool isConnected(String name) => activeProfile == name;
 }
 
 class ConnectionController extends StateNotifier<VpnConnectionState> {
-  ConnectionController(this._tunnel, this._probe, {Stream<void>? networkChanges})
-      : super(const VpnConnectionState()) {
+  ConnectionController(
+    this._tunnel,
+    this._probe, {
+    Stream<void>? networkChanges,
+    List<String> Function() remoteLanCidrs = _noRemoteLanCidrs,
+  })  : _remoteLanCidrs = remoteLanCidrs,
+        super(const VpnConnectionState()) {
     if (networkChanges != null) {
       _netSub = networkChanges.listen((_) => unawaited(_onNetworkChanged()));
     }
   }
 
+  static List<String> _noRemoteLanCidrs() => const [];
+
   final VpnTunnelPlatform _tunnel;
   final HealthProbe _probe;
+
+  /// Physical LAN CIDR(s) behind a Valenius-managed sidecar from the latest heartbeat
+  /// (`StatusResponse.remoteLanCidrs`) — read lazily at connect time.
+  final List<String> Function() _remoteLanCidrs;
 
   /// The gateway target for the active profile (if any), kept so a network-change
   /// re-verify can reuse the same /health probe the connect path used.
@@ -143,6 +163,24 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
   Future<void> _connect(String name, String configText, GatewayTarget? gateway) async {
     state = const VpnConnectionState(busy: true);
     try {
+      // Pre-connect LAN-conflict check — mirrors the desktop clients. No override: the
+      // conflict must be resolved (change local network, or ask an admin) before connecting.
+      final localLanCidrs = await _tunnel.localLanCidrs();
+      final conflict = findLocalLanConflict(
+        configText: configText,
+        localLanCidrs: localLanCidrs,
+        remoteLanCidrs: _remoteLanCidrs(),
+      );
+      if (conflict != null) {
+        DiagnosticsLog.instance.add('connect: "$name" refused (LAN conflict): $conflict');
+        state = VpnConnectionState(
+          error: conflict,
+          errorAt: DateTime.now(),
+          isLanConflict: true,
+        );
+        return;
+      }
+
       await _tunnel.up([TunnelConfig(name: name, wgQuickConf: configText)]);
       _activeGateway = gateway;
       state = VpnConnectionState(activeProfile: name);

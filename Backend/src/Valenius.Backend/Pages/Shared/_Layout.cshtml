@@ -301,6 +301,39 @@
     </header>
     <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 
+    <!-- Installation license banners -->
+    @if (_InstallLicense.Status == InstallationLicenseStatus.OssMode)
+    {
+        <div class="alert alert-danger rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+            <i class="bi bi-x-octagon-fill"></i>
+            <strong>License revoked or expired.</strong> Pro features are disabled. Contact <a href="mailto:support@stranto.com" class="alert-link">support@stranto.com</a> to restore your license.
+        </div>
+    }
+    else if (_InstallLicense.Status == InstallationLicenseStatus.Warning)
+    {
+        <div class="alert alert-warning rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+            <i class="bi bi-exclamation-triangle-fill"></i>
+            <strong>License server unreachable.</strong> Pro features remain active, but will be disabled if the server stays unreachable for 3 months. Check your network connectivity to <strong>license.valenius.stranto.com</strong>.
+        </div>
+    }
+
+    <!-- Per-customer license banners -->
+    @if (_License.IsInGracePeriod)
+    {
+        <div class="alert alert-warning rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+            <i class="bi bi-exclamation-triangle-fill"></i>
+            Your license expired on <strong>@_License.ExpiresAt!.Value.ToString("dd.MM.yyyy")</strong>.
+            Grace period ends in <strong>@_License.DaysUntilExpiry day(s)</strong>. Please renew to avoid service interruption.
+        </div>
+    }
+    else if (!_License.IsValid && _License.LicenseType != "community")
+    {
+        <div class="alert alert-danger rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
+            <i class="bi bi-x-octagon-fill"></i>
+            <strong>License expired.</strong> Pro features are disabled. Please renew your license.
+        </div>
+    }
+
     <div class="shell">
         <!-- Sidebar -->
         <nav class="sidebar">
@@ -370,39 +403,6 @@
             </a>
 
         </nav>
-
-        <!-- Installation license banners -->
-        @if (_InstallLicense.Status == InstallationLicenseStatus.OssMode)
-        {
-            <div class="alert alert-danger rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
-                <i class="bi bi-x-octagon-fill"></i>
-                <strong>License revoked or expired.</strong> Pro features are disabled. Contact <a href="mailto:support@stranto.com" class="alert-link">support@stranto.com</a> to restore your license.
-            </div>
-        }
-        else if (_InstallLicense.Status == InstallationLicenseStatus.Warning)
-        {
-            <div class="alert alert-warning rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
-                <i class="bi bi-exclamation-triangle-fill"></i>
-                <strong>License server unreachable.</strong> Pro features remain active, but will be disabled if the server stays unreachable for 3 months. Check your network connectivity to <strong>license.valenius.stranto.com</strong>.
-            </div>
-        }
-
-        <!-- Per-customer license banners -->
-        @if (_License.IsInGracePeriod)
-        {
-            <div class="alert alert-warning rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
-                <i class="bi bi-exclamation-triangle-fill"></i>
-                Your license expired on <strong>@_License.ExpiresAt!.Value.ToString("dd.MM.yyyy")</strong>.
-                Grace period ends in <strong>@_License.DaysUntilExpiry day(s)</strong>. Please renew to avoid service interruption.
-            </div>
-        }
-        else if (!_License.IsValid && _License.LicenseType != "community")
-        {
-            <div class="alert alert-danger rounded-0 mb-0 py-2 px-3 small d-flex align-items-center gap-2" role="alert" style="border-left:none;border-right:none;border-radius:0!important;">
-                <i class="bi bi-x-octagon-fill"></i>
-                <strong>License expired.</strong> Pro features are disabled. Please renew your license.
-            </div>
-        }
 
         <!-- Page content -->
         <main class="main-content">

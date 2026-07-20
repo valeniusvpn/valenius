@@ -29,6 +29,10 @@ actor DaemonState {
     private var serverProfileName: String?
     private var serverVpnIp: String?
     private var serverHealthPort: Int = 8443
+    /// Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported via /info and
+    /// relayed by the backend. Refreshed on every heartbeat/poll. Used by the pre-connect
+    /// LAN-conflict check to detect the remote network for full-tunnel profiles.
+    private var remoteLanCidrs: [String] = []
     private var skipConnectivityCheck = false
     private var heartbeatIntervalMinutes: Int = 5
     private var appLastSeen: Date?
@@ -195,6 +199,9 @@ actor DaemonState {
         serverVpnIp = (vpnIp?.isEmpty ?? true) ? nil : vpnIp
         serverHealthPort = healthPort
     }
+
+    func setRemoteLanCidrs(_ cidrs: [String]) { remoteLanCidrs = cidrs }
+    func getRemoteLanCidrs() -> [String] { remoteLanCidrs }
 
     func setSkipConnectivityCheck(_ v: Bool) { skipConnectivityCheck = v }
     func getSkipConnectivityCheck() -> Bool { skipConnectivityCheck }

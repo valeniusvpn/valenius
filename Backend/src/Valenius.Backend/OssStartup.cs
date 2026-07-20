@@ -492,6 +492,10 @@ public static class OssStartup
             """ALTER TABLE "ClientReleases" ADD COLUMN IF NOT EXISTS "Channel" VARCHAR(10) NOT NULL DEFAULT 'stable'""");
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "UpdateChannel" VARCHAR(10) NOT NULL DEFAULT 'stable'""");
+        // Sidecar-reported physical LAN CIDR(s) behind the host, cached from /info — lets clients
+        // detect a pre-connect LAN conflict even for full-tunnel (0.0.0.0/0) profiles.
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "SidecarLanCidrs" VARCHAR(500) NULL""");
 
         // Seed ServerSettings row (Id = 1).
         if (!db.ServerSettings.Any())
@@ -784,7 +788,7 @@ public static class OssStartup
             });
         });
 
-        app.MapGet("/api/download/{fileName}", (string fileName) =>
+        app.MapGet("/api/download/{fileName}", (string fileName, HttpContext ctx) =>
         {
             var safeName = Path.GetFileName(fileName);
             // Prefer an admin-uploaded file on the volume; fall back to a baked-in asset.
@@ -793,6 +797,31 @@ public static class OssStartup
                 filePath = Path.Combine(assetsPath, safeName);
             if (!File.Exists(filePath))
                 return Results.NotFound($"File '{safeName}' not found.");
+
+            // Text assets (host-prep script, deploy compose) carry a {{BACKEND_URL}} placeholder
+            // that must resolve to THIS backend's own address, not a fixed example — the same
+            // baked-in file is served identically by every Pro deployment (Stranto's own and every
+            // MSP customer's), so a hardcoded example URL would be wrong for everyone except one
+            // specific installation. Binary downloads (installers, etc.) skip this entirely.
+            if (safeName.EndsWith(".sh", StringComparison.OrdinalIgnoreCase)
+                || safeName.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)
+                || safeName.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
+            {
+                // Forced to https, not ctx.Request.Scheme: this backend sits behind a reverse
+                // proxy that terminates TLS, and Scheme silently falls back to http whenever the
+                // proxy's IP falls outside the trusted KnownNetworks for X-Forwarded-Proto (see
+                // UseForwardedHeaders above). A sidecar handed http://... as BACKEND_URL gets
+                // redirected to https by the proxy, and most HTTP clients (Go's included)
+                // downgrade POST to GET on 301/302, turning enrollment into a bare
+                // "405 Method Not Allowed" instead of a working POST.
+                var backendUrl = $"https://{ctx.Request.Host}";
+                var text = File.ReadAllText(filePath).Replace("{{BACKEND_URL}}", backendUrl);
+                // Both files use non-ASCII box-drawing/em-dash characters in their header comments.
+                // Without an explicit charset, "text/plain" defaults to Latin-1 in most browsers,
+                // mangling every UTF-8 multi-byte character into mojibake (e.g. "──" -> "â”€â”€").
+                return Results.Text(text, "text/plain", System.Text.Encoding.UTF8);
+            }
+
             var stream = File.OpenRead(filePath);
             return Results.File(stream, "application/octet-stream", safeName);
         });

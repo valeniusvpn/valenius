@@ -72,6 +72,17 @@ public class Customer
     [MaxLength(45)]
     public string? SidecarVpnSubnet { get; set; }
 
+    /// <summary>
+    /// Comma-separated physical LAN CIDR(s) behind the sidecar host, cached from /info (e.g.
+    /// "192.168.1.0/24"). Unlike <see cref="SidecarVpnSubnet"/> (the VPN's own transit subnet),
+    /// this is the real network the sidecar host sits on — reachable to clients only when their
+    /// profile's AllowedIPs is a full-tunnel default route, where the actual routed network can't
+    /// otherwise be inferred client-side. Null for External customers (no sidecar) and for
+    /// sidecars that haven't been upgraded to report it yet.
+    /// </summary>
+    [MaxLength(500)]
+    public string? SidecarLanCidrs { get; set; }
+
     /// <summary>Single-use enrollment token set by an admin to bootstrap mTLS on a new sidecar.
     /// Cleared immediately after the sidecar successfully enrolls.</summary>
     [MaxLength(128)]

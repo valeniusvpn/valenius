@@ -60,17 +60,32 @@ public struct PipeResponse: Codable, Sendable {
     public var success: Bool
     public var error: String?
     public var dataJson: String?
+    /// True when `error` is a pre-connect local-LAN-conflict refusal (this machine's own LAN
+    /// overlaps a network reachable through the VPN, or the assigned VPN IP itself). The app
+    /// shows a blocking alert for this instead of the usual inline error text. Mirrors Windows
+    /// PipeResponse.IsLanConflict / Linux PipeResponse.IsLanConflict.
+    public var isLanConflict: Bool
 
-    public init(success: Bool, error: String? = nil, dataJson: String? = nil) {
+    public init(success: Bool, error: String? = nil, dataJson: String? = nil, isLanConflict: Bool = false) {
         self.success = success
         self.error = error
         self.dataJson = dataJson
+        self.isLanConflict = isLanConflict
     }
 
     enum CodingKeys: String, CodingKey {
         case success = "Success"
         case error = "Error"
         case dataJson = "DataJson"
+        case isLanConflict = "IsLanConflict"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        success = try c.decode(Bool.self, forKey: .success)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        dataJson = try c.decodeIfPresent(String.self, forKey: .dataJson)
+        isLanConflict = try c.decodeIfPresent(Bool.self, forKey: .isLanConflict) ?? false
     }
 
     public static func ok(dataJson: String? = nil) -> PipeResponse {
@@ -82,8 +97,8 @@ public struct PipeResponse: Codable, Sendable {
         return PipeResponse(success: true, dataJson: json)
     }
 
-    public static func fail(_ message: String) -> PipeResponse {
-        PipeResponse(success: false, error: message)
+    public static func fail(_ message: String, isLanConflict: Bool = false) -> PipeResponse {
+        PipeResponse(success: false, error: message, isLanConflict: isLanConflict)
     }
 }
 

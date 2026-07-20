@@ -161,6 +161,12 @@ class DaemonCore:
                     f"Disconnect '{conflict}' first."
                 )
 
+        # Local-LAN conflict check — mirrors Windows WireGuardController.FindLocalLanConflict /
+        # macOS findLocalLanConflict. No override: the user must resolve the conflict first.
+        lan_conflict = configs_mod.find_local_lan_conflict(config_path, self.state.get_remote_lan_cidrs())
+        if lan_conflict:
+            return _fail(lan_conflict, is_lan_conflict=True)
+
         wan_ip = await self.backend.get_wan_ip()
         try:
             wg_path = configs_mod.prepare_config_path(config_path)
@@ -382,6 +388,10 @@ class DaemonCore:
         server_health_url = resp.get('ServerHealthUrl', resp.get('serverHealthUrl'))
         self.state.set_server_gateway(server_vpn_ip, _health_port_from_url(server_health_url))
 
+        # Remote LAN CIDR(s) behind a Valenius-managed sidecar, for the pre-connect
+        # LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
+        self.state.set_remote_lan_cidrs(resp.get('RemoteLanCidrs', resp.get('remoteLanCidrs')))
+
         # MFA state — pass through to tray via build_tunnel_status.
         mfa_expires_raw = resp.get('MfaSessionExpiresAt', resp.get('mfaSessionExpiresAt'))
         self.state.set_mfa_state(
@@ -414,13 +424,17 @@ class DaemonCore:
                 log.info("Staged foreign config: %s", filename)
 
         # Backend-initiated connect/disconnect for the server/primary tunnel only.
-        pending_connect = resp.get('PendingConnect', resp.get('pendingConnect'))
-        if pending_connect and not self.state.is_connected(pending_connect):
-            asyncio.create_task(self.cmd_connect('PendingConnect', pending_connect))
+        # PendingConnect/PendingDisconnect are plain bools (StatusResponse), not tunnel
+        # names — resolve the actual tunnel via get_server_profile_name(), same as MfaRequired below.
+        if resp.get('PendingConnect', resp.get('pendingConnect', False)):
+            server_profile = self.state.get_server_profile_name()
+            if server_profile and not self.state.is_connected(server_profile):
+                asyncio.create_task(self.cmd_connect('PendingConnect', server_profile))
 
-        pending_disconnect = resp.get('PendingDisconnect', resp.get('pendingDisconnect'))
-        if pending_disconnect and self.state.is_connected(pending_disconnect):
-            asyncio.create_task(self.cmd_disconnect('PendingDisconnect', pending_disconnect))
+        if resp.get('PendingDisconnect', resp.get('pendingDisconnect', False)):
+            server_profile = self.state.get_server_profile_name()
+            if server_profile and self.state.is_connected(server_profile):
+                asyncio.create_task(self.cmd_disconnect('PendingDisconnect', server_profile))
 
         # MFA session expired (the gate returned) while the gated tunnel is still up: the sidecar
         # already dropped the peer server-side, so the local tunnel is dead but still active and

@@ -1,3 +1,4 @@
+import Darwin
 import Flutter
 import NetworkExtension
 
@@ -61,6 +62,8 @@ public class ValeniusVpnPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     case "stats":
       let name = (call.arguments as? [String: Any])?["name"] as? String
       stats(name: name, result: result)
+    case "localLanCidrs":
+      result(Self.localLanCidrs())
     case "setOnDemand":
       let a = call.arguments as? [String: Any]
       setOnDemand(enabled: (a?["enabled"] as? Bool) ?? false,
@@ -254,6 +257,50 @@ public class ValeniusVpnPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   }
 
   // MARK: - Helpers
+
+  /// This device's own local LAN CIDR(s) (e.g. "192.168.1.0/24"), one per non-loopback,
+  /// non-tunnel IPv4 adapter address (Wi-Fi `en0`, cellular `pdp_ip*`, etc). Used by the
+  /// pre-connect LAN-conflict check. Mirrors the macOS daemon's
+  /// TrustedNetworkDetector.localLanCidrs (same getifaddrs technique).
+  private static func localLanCidrs() -> [String] {
+    var results: [String] = []
+    var addrs: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&addrs) == 0 else { return [] }
+    defer { freeifaddrs(addrs) }
+    var ptr = addrs
+    while let cur = ptr {
+      defer { ptr = cur.pointee.ifa_next }
+      let name = String(cString: cur.pointee.ifa_name)
+      if name == "lo0" || name.hasPrefix("utun") { continue }
+      guard let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) else { continue }
+      var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+      guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0,
+            let ipInt = ipv4ToUInt32(String(cString: host)) else { continue }
+      guard let maskSa = cur.pointee.ifa_netmask, maskSa.pointee.sa_family == UInt8(AF_INET) else { continue }
+      var maskHost = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+      guard getnameinfo(maskSa, socklen_t(maskSa.pointee.sa_len), &maskHost, socklen_t(maskHost.count), nil, 0, NI_NUMERICHOST) == 0,
+            let maskInt = ipv4ToUInt32(String(cString: maskHost)) else { continue }
+      let prefix = maskInt.nonzeroBitCount
+      let network = ipInt & maskInt
+      results.append("\(uint32ToIPv4(network))/\(prefix)")
+    }
+    return results
+  }
+
+  private static func ipv4ToUInt32(_ s: String) -> UInt32? {
+    let octets = s.split(separator: ".")
+    guard octets.count == 4 else { return nil }
+    var v: UInt32 = 0
+    for o in octets {
+      guard let n = UInt32(o), n <= 255 else { return nil }
+      v = (v << 8) | n
+    }
+    return v
+  }
+
+  private static func uint32ToIPv4(_ v: UInt32) -> String {
+    "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
+  }
 
   /// Extract the host from the peer `Endpoint = host:port` line, for the
   /// display-only serverAddress. Returns nil if absent.

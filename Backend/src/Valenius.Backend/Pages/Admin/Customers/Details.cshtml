@@ -595,6 +595,19 @@
                                                 <span class="small text-muted">Not available — sidecar unreachable or not yet configured.</span>
                                             }
                                         </div>
+                                        @if (Model.SidecarListenPort.HasValue)
+                                        {
+                                            <div class="alert alert-warning py-2 px-3 small mt-2 mb-0 d-flex align-items-start gap-2">
+                                                <i class="bi bi-firewall mt-1"></i>
+                                                <div>
+                                                    <strong>Open UDP port @Model.SidecarListenPort</strong> inbound on this sidecar
+                                                    host's firewall / cloud security group (read live from the sidecar's own
+                                                    <code>/info</code> endpoint, not a fixed default — it changes if the host was
+                                                    prepared with a non-default <code>--port</code>). Without this, clients can
+                                                    reach the management API but WireGuard&reg; handshakes will never complete.
+                                                </div>
+                                            </div>
+                                        }
                                     </div>
                                     <div class="mb-3">
                                         <label class="form-label small fw-semibold">VPN subnet</label>
@@ -609,6 +622,25 @@
                                             {
                                                 <span class="badge bg-secondary px-2 py-1">-</span>
                                                 <span class="small text-muted">Not available — sidecar unreachable or not yet configured.</span>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-semibold">Detected LAN</label>
+                                        <div class="d-flex flex-wrap align-items-center gap-2 mt-1">
+                                            @if (Model.DetectedLanCidrs.Count > 0)
+                                            {
+                                                @foreach (var cidr in Model.DetectedLanCidrs)
+                                                {
+                                                    <span class="badge px-2 py-1 font-monospace"
+                                                          style="background:rgba(15,78,102,.12);color:#0F4E66;font-size:.85rem;">@cidr</span>
+                                                }
+                                                <span class="small text-muted">The physical network(s) behind the sidecar host itself — not the VPN subnet above. Sent to clients so a full-tunnel (0.0.0.0/0) profile can still detect a conflict with the client's own local network.</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary px-2 py-1">-</span>
+                                                <span class="small text-muted">Not available — sidecar unreachable, or running an older build that doesn't report this yet.</span>
                                             }
                                         </div>
                                     </div>
@@ -725,7 +757,14 @@
 
                         <!-- mTLS enrollment -->
                         <div class="card card-brand mb-3">
-                            <div class="card-header"><i class="bi bi-shield-lock me-2"></i>mTLS enrollment</div>
+                            <div class="card-header d-flex align-items-center">
+                                <i class="bi bi-shield-lock me-2"></i>mTLS enrollment
+                                <button type="button" class="btn btn-sm btn-outline-secondary ms-auto"
+                                        data-bs-toggle="modal" data-bs-target="#modalSidecarSetup"
+                                        title="Step-by-step server install instructions for this customer">
+                                    <i class="bi bi-info-circle me-1"></i>How to install the server
+                                </button>
+                            </div>
                             <div class="card-body">
 
                                 @if (TempData["EnrollmentToken"] is string newToken)
@@ -1083,6 +1122,110 @@ HEALTH_PORT=@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : 9004)</pre>
     </div>
     } @* end MspModeEnabled *@
 
+</div>
+
+<!-- Setup instructions modal — real URLs/values for this backend, not generic placeholders -->
+<div class="modal fade" id="modalSidecarSetup" tabindex="-1" aria-labelledby="modalSidecarSetupLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-scrollable modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalSidecarSetupLabel">
+                    <i class="bi bi-info-circle me-2"></i>Install the WireGuard&reg; server for @c.Name
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted">
+                    Run these steps on the customer's own Docker/Portainer host. It never needs the source
+                    repository — only a pre-built, publicly-pullable image and two small downloaded files.
+                </p>
+
+                <h6 class="fw-semibold">1. Prep the host (once, as root)</h6>
+                <p class="small text-muted mb-1">
+                    Creates the WireGuard&reg; interface config and enables IP forwarding. Defaults to
+                    interface <code>wg99</code>, <code>10.99.0.1/24</code>, port <code>51820</code>.
+                </p>
+                <div class="input-group mb-3">
+                    <textarea id="sidecarStep1" class="form-control form-control-sm font-monospace" rows="2" readonly>curl -fsSL @Model.BackendUrl/api/download/prepare-sidecar-host.sh -o prepare-sidecar-host.sh
+sudo sh prepare-sidecar-host.sh</textarea>
+                    <button class="btn btn-outline-secondary btn-sm" type="button"
+                            onclick="navigator.clipboard.writeText(document.getElementById('sidecarStep1').value)">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+
+                <h6 class="fw-semibold">2. Enrollment token</h6>
+                @if (!string.IsNullOrEmpty(c.EnrollmentToken))
+                {
+                    <p class="small text-muted mb-1">
+                        Current pending token for @c.Name (cleared automatically once the sidecar enrolls):
+                    </p>
+                    <div class="input-group mb-3">
+                        <input type="text" id="sidecarStep2Token" class="form-control form-control-sm font-monospace"
+                               value="@c.EnrollmentToken" readonly />
+                        <button class="btn btn-outline-secondary btn-sm" type="button"
+                                onclick="navigator.clipboard.writeText(document.getElementById('sidecarStep2Token').value)">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                    </div>
+                }
+                else
+                {
+                    <p class="small text-muted mb-3">
+                        No token is currently set. Click <strong>Generate enrollment token</strong> above first,
+                        then reopen this dialog — the token will appear here.
+                    </p>
+                }
+
+                <h6 class="fw-semibold">3. Create the Portainer stack</h6>
+                <p class="small text-muted mb-1">
+                    In Portainer: <strong>Stacks &rarr; Add stack &rarr; Web editor</strong> (never a
+                    git-connected stack — the source repository must stay private). Paste in the contents of:
+                </p>
+                <div class="input-group mb-3">
+                    <input type="text" id="sidecarStep3" class="form-control form-control-sm font-monospace"
+                           value="@Model.BackendUrl/api/download/docker-compose.deploy.yml" readonly />
+                    <a class="btn btn-outline-secondary btn-sm" target="_blank"
+                       href="@Model.BackendUrl/api/download/docker-compose.deploy.yml">
+                        <i class="bi bi-box-arrow-up-right"></i>
+                    </a>
+                    <button class="btn btn-outline-secondary btn-sm" type="button"
+                            onclick="navigator.clipboard.writeText(document.getElementById('sidecarStep3').value)">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+
+                <h6 class="fw-semibold">4. Set the stack's environment variables</h6>
+                <div class="input-group mb-3">
+                    <textarea id="sidecarStep4" class="form-control form-control-sm font-monospace" rows="4" readonly>SIDECAR_IMAGE=ghcr.io/valeniusvpn/valenius-sidecar:latest
+WG_INTERFACE=wg99
+ENROLLMENT_TOKEN=@(string.IsNullOrEmpty(c.EnrollmentToken) ? "<generate one in step 2 first>" : c.EnrollmentToken)
+BACKEND_URL=@Model.BackendUrl</textarea>
+                    <button class="btn btn-outline-secondary btn-sm" type="button"
+                            onclick="navigator.clipboard.writeText(document.getElementById('sidecarStep4').value)">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+                <p class="small text-muted mb-3">
+                    Deploy the stack, then <code>docker compose -f docker-compose.deploy.yml logs -f wg-sidecar</code>
+                    to confirm enrollment succeeds.
+                </p>
+
+                <h6 class="fw-semibold">5. Point this customer at the new server</h6>
+                <p class="small text-muted mb-0">
+                    Back on this page: set <strong>Server address</strong> to the new host's IP or hostname,
+                    click <strong>Save</strong>, then <strong>Test Sidecar</strong> to confirm it's reachable.
+                    Once reachable, check the <strong>WireGuard&reg; listen port</strong> shown further up this
+                    page — read live from the sidecar itself, so it's correct even if the host was prepared with
+                    a non-default port — and open that <strong>UDP</strong> port inbound on this host's firewall
+                    or cloud security group. Then use <strong>Resync</strong> to register this customer's existing clients.
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 

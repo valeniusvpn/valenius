@@ -7,7 +7,8 @@ public sealed record ServerInfo(
     [property: JsonPropertyName("publicKey")]        string  PublicKey,
     [property: JsonPropertyName("listenPort")]       int     ListenPort,
     [property: JsonPropertyName("interfaceAddress")] string? InterfaceAddress,
-    [property: JsonPropertyName("version")]          string? Version);
+    [property: JsonPropertyName("version")]          string? Version,
+    [property: JsonPropertyName("lanCidrs")]         List<string>? LanCidrs = null);
 
 /// <param name="Active">
 /// Ping-confirmed liveness verdict from the sidecar's presence monitor. Null when talking

@@ -101,15 +101,15 @@ public class OverviewModel(
         if (string.IsNullOrEmpty(licenseId))
             return new JsonResult(new { reachable = true, lastCheckedIso = (string?)null });
 
-        // Licensing credentials come from configuration/env — never hardcoded in source
-        // (this file is in the OSS project). The server URL is not a secret and keeps a
-        // default; the API key must be supplied via LICENSING_CLIENT_API_KEY (or
-        // Licensing:ClientApiKey). If it's absent, revocation checking is disabled — report
-        // benignly rather than failing the admin page (matches the "empty key ⇒ enforcement
-        // off" rule).
-        var serverUrl    = config["Licensing:ServerUrl"] ?? config["LICENSING_SERVER_URL"]
-                           ?? "https://license.valenius.stranto.com";
-        var clientApiKey = config["Licensing:ClientApiKey"] ?? config["LICENSING_CLIENT_API_KEY"];
+        // The server URL is not a secret and never changes, so it's a plain constant here too
+        // (kept identical to LicenseRevocationChecker's, the Pro-side background version of this
+        // same check) — never read from config, so the appsettings.json empty-string-placeholder
+        // trap (see LicenseRevocationChecker.cs) can't recur for it. The API key IS a real
+        // credential and this file ships in the public OSS mirror, so it must stay config/env-only
+        // (LICENSING_CLIENT_API_KEY or Licensing:ClientApiKey) — never hardcoded here. Empty-string
+        // safe: an appsettings.json placeholder must not silently satisfy the first check and skip
+        // the env var (same trap as the server URL used to have).
+        var clientApiKey = config["Licensing:ClientApiKey"] is { Length: > 0 } k1 ? k1 : config["LICENSING_CLIENT_API_KEY"];
         if (string.IsNullOrEmpty(clientApiKey))
             return new JsonResult(new { reachable = true, lastCheckedIso = (string?)null });
 
@@ -119,7 +119,7 @@ public class OverviewModel(
         {
             var http = httpClientFactory.CreateClient();
             http.Timeout = TimeSpan.FromSeconds(5);
-            var url = $"{serverUrl.TrimEnd('/')}/api/v1/license/{Uri.EscapeDataString(licenseId)}/status";
+            var url = $"https://license.valenius.stranto.com/api/v1/license/{Uri.EscapeDataString(licenseId)}/status";
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.Add("X-Api-Key", clientApiKey);
             using var resp = await http.SendAsync(req);

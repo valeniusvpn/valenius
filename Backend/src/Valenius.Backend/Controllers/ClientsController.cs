@@ -333,6 +333,16 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         //      pending (unactivated) keyless device gets nothing, so an unknown caller can never
         //      pull the key just by guessing a ClientKey.
         // Null in the normal case (already on the current key).
+        // Remote LAN CIDR(s) behind the sidecar, for the client's pre-connect LAN-conflict check.
+        // Only meaningful for Valenius-managed servers — External customers have no sidecar to ask.
+        string[]? remoteLanCidrs = null;
+        if (client.Customer?.ServerMode == "Valenius" && !string.IsNullOrEmpty(client.Customer.SidecarLanCidrs))
+        {
+            remoteLanCidrs = client.Customer.SidecarLanCidrs
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (remoteLanCidrs.Length == 0) remoteLanCidrs = null;
+        }
+
         var presentedKey       = Request.Headers.TryGetValue("X-Api-Key", out var pk) ? pk.ToString() : null;
         var presentedIsGraceKey = apiKeyStore.IsAccepted(presentedKey);   // current or valid previous
         var rotatedApiKey = (!string.IsNullOrEmpty(apiKeyStore.Key)
@@ -368,7 +378,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             pendingApprovals.Length > 0 ? pendingApprovals : null,
             logUploadRequested,
             string.IsNullOrEmpty(client.UpdateChannel) ? "stable" : client.UpdateChannel,
-            rotatedApiKey);
+            rotatedApiKey,
+            remoteLanCidrs);
     }
 
     [HttpPost("event")]
@@ -818,7 +829,17 @@ public record StatusResponse(
     /// requests, so an admin can rotate the fleet's key without touching each client. Null in
     /// the normal case (already on the current key). Delivered over the authenticated TLS
     /// channel.</summary>
-    string? ClientApiKey = null);
+    string? ClientApiKey = null,
+    /// <summary>
+    /// Physical LAN CIDR(s) behind the Valenius-managed sidecar (e.g. "192.168.1.0/24"),
+    /// self-reported by the sidecar. Only populated for ServerMode == "Valenius" customers whose
+    /// sidecar has reported it. Used by the client's pre-connect LAN-conflict check to detect the
+    /// remote network even when the profile's AllowedIPs is a full-tunnel default route
+    /// (0.0.0.0/0), where the routed network can't otherwise be inferred from the config alone.
+    /// Null/empty when unknown (External customers, or a sidecar not yet upgraded) — the client
+    /// then simply skips that half of the check.
+    /// </summary>
+    string[]? RemoteLanCidrs = null);
 public record MfaApprovalEntry(int ChallengeId, string RequesterName, string? RequesterIp, int[] Choices, DateTime ExpiresAt);
 public record PendingConfigResponse(string FileName, string Content);
 public record PendingForeignConfigEntry(string FileName, string Content);

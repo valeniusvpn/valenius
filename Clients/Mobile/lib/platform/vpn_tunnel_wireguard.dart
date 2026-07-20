@@ -56,6 +56,9 @@ class WireGuardVpnTunnel implements VpnTunnelPlatform {
       });
 
   @override
+  Future<List<String>> localLanCidrs() => _plugin.localLanCidrs();
+
+  @override
   Future<HandshakeInfo?> stats(String peerName) async {
     final s = await _plugin.stats(peerName);
     if (s == null) return null;

@@ -11,14 +11,16 @@ let ipcSocketPath = "/var/run/valenius.sock"
 enum IpcError: Error, CustomStringConvertible {
     case daemonNotRunning
     case timedOut
-    case failure(String)
+    /// isLanConflict: true when this is a pre-connect local-LAN-conflict refusal — the app
+    /// shows a blocking alert for this instead of the usual inline error text.
+    case failure(String, isLanConflict: Bool)
     case other(String)
 
     var description: String {
         switch self {
         case .daemonNotRunning: return "The Valenius background service isn't running."
         case .timedOut: return "The background service didn't respond in time."
-        case .failure(let m): return m
+        case .failure(let m, _): return m
         case .other(let m): return m
         }
     }
@@ -121,11 +123,15 @@ enum IpcClient {
     }
 
     private static func expectOk(_ resp: PipeResponse) throws {
-        if !resp.success { throw IpcError.failure(resp.error ?? "The operation failed.") }
+        if !resp.success {
+            throw IpcError.failure(resp.error ?? "The operation failed.", isLanConflict: resp.isLanConflict)
+        }
     }
 
     private static func decode<T: Decodable>(_ resp: PipeResponse) throws -> T {
-        guard resp.success else { throw IpcError.failure(resp.error ?? "The operation failed.") }
+        guard resp.success else {
+            throw IpcError.failure(resp.error ?? "The operation failed.", isLanConflict: resp.isLanConflict)
+        }
         guard let json = resp.dataJson, let data = json.data(using: .utf8) else {
             throw IpcError.other("Empty response from the background service.")
         }
