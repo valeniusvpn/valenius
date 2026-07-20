@@ -2,7 +2,7 @@
 # Turnkey installer for the Valenius Community edition (self-hosted, AGPLv3).
 #
 # Builds the backend image, generates strong random secrets, writes an .env +
-# docker-compose.yml into ./deploy, starts the stack, and prints the login
+# docker-compose.yml into ./valenius, starts the stack, and prints the login
 # details on success. Mirrors documentation/docs/self-hosting/community.md —
 # keep the two in sync if you change this script.
 #
@@ -11,14 +11,14 @@
 #   ADMIN_EMAIL=me@example.com BACKEND_PORT=9001 ./install.sh --yes   # non-interactive
 #
 # Re-running after a successful install refuses to touch existing secrets;
-# pass --force to wipe ./deploy and start over.
+# pass --force to wipe ./valenius and start over.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-DEPLOY_DIR="deploy"
+DEPLOY_DIR="valenius"
 IMAGE_TAG="valenius-backend:latest"
 FORCE=0
 ASSUME_YES=0
