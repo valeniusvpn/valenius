@@ -82,22 +82,37 @@
 
                 <div class="mb-4">
                     <label class="form-label d-block">Server mode</label>
-                    <div class="d-flex gap-3 flex-wrap">
+                    <div class="d-flex gap-3 flex-wrap align-items-center">
                         <div>
                             <input type="radio" class="btn-check" name="serverMode" id="modeValenius"
-                                   value="Valenius" checked autocomplete="off" />
+                                   value="Valenius" autocomplete="off"
+                                   checked="@(Model.IsProEdition ? "checked" : null)"
+                                   disabled="@(Model.IsProEdition ? null : "disabled")" />
                             <label class="btn btn-outline-primary" for="modeValenius">
                                 <i class="bi bi-shield-fill-check me-1"></i>Valenius
                             </label>
+                            @if (!Model.IsProEdition)
+                            {
+                                <span class="badge bg-primary ms-1">Pro</span>
+                            }
                         </div>
                         <div>
                             <input type="radio" class="btn-check" name="serverMode" id="modeExternal"
-                                   value="External" autocomplete="off" />
+                                   value="External" autocomplete="off"
+                                   checked="@(Model.IsProEdition ? null : "checked")" />
                             <label class="btn btn-outline-secondary" for="modeExternal">
                                 <i class="bi bi-upload me-1"></i>External
                             </label>
                         </div>
                     </div>
+                    @if (!Model.IsProEdition)
+                    {
+                        <div class="form-text mt-2">
+                            <i class="bi bi-info-circle me-1"></i>The integrated Valenius server
+                            (automatic peer provisioning) is a Pro feature — Community uses
+                            External mode, uploading WireGuard® <code>.conf</code> files by hand.
+                        </div>
+                    }
                     <div class="form-text mt-2" id="modeHint">
                         Peers are provisioned automatically via the wg-sidecar.
                     </div>

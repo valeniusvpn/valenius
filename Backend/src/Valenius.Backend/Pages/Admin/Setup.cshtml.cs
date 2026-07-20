@@ -11,6 +11,7 @@ namespace Valenius.Backend.Pages.Admin;
 [Authorize(Policy = "AdminOnly")]
 public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAuditService audit) : PageModel
 {
+    public bool    IsProEdition      => sidecar is not NullSidecarService;
     public string  Step              { get; private set; } = "welcome";
     public int?    CreatedCustomerId { get; private set; }
     public string? CarriedName       { get; private set; }
@@ -54,6 +55,10 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
         if (await db.Customers.AnyAsync())
             return RedirectToPage("/Admin/Overview");
 
+        // The "Valenius" (integrated server) option is greyed out in the UI on Community —
+        // defend against a hand-crafted POST bypassing that (same rule as ToggleWtServer).
+        if (!IsProEdition) serverMode = "External";
+
         if (string.IsNullOrWhiteSpace(name))
         {
             Error = "Customer name is required.";
@@ -86,6 +91,10 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
     {
         if (await db.Customers.AnyAsync())
             return RedirectToPage("/Admin/Overview");
+
+        // This step only exists to configure the integrated server — unreachable from the UI
+        // on Community (see OnPostCustomerAsync), but guard against a direct POST regardless.
+        if (!IsProEdition) return Forbid();
 
         if (string.IsNullOrWhiteSpace(setupName))
             return RedirectToPage();
