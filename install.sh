@@ -103,8 +103,11 @@ BACKEND_PORT=${BACKEND_PORT}
 EOF
 
 cat > "$DEPLOY_DIR/docker-compose.yml" <<'EOF'
+name: valenius
+
 services:
   db:
+    container_name: valenius-db
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
@@ -120,6 +123,7 @@ services:
       retries: 5
 
   backend:
+    container_name: valenius-backend
     image: valenius-backend:latest
     restart: unless-stopped
     depends_on:
