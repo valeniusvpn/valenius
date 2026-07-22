@@ -46,6 +46,15 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2; exit 1; }
 
 [ -f "Backend/Dockerfile" ] || die "Run this from the repo root (Backend/Dockerfile not found here)."
 
+# chmod +x install.sh (needed to run it at all) makes git track an executable-bit
+# change, which then collides with "git pull" on the next upgrade ("your local changes
+# to install.sh would be overwritten"). Git only supports ignoring mode changes
+# repo-wide (there's no per-file equivalent), which is fine for a deployment checkout.
+# No-op if this isn't a git checkout (e.g. a downloaded tarball).
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  git config core.fileMode false
+fi
+
 command -v docker >/dev/null 2>&1 || die "Docker is not installed or not on PATH. Install Docker Engine first."
 docker compose version >/dev/null 2>&1 || die "The 'docker compose' plugin is not available. Install/update Docker."
 
