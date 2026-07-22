@@ -24,6 +24,14 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2; exit 1; }
 [ -f "Backend/Dockerfile" ] || die "Run this from the repo root (Backend/Dockerfile not found here)."
 [ -f "$DEPLOY_DIR/docker-compose.yml" ] || die "No $DEPLOY_DIR/docker-compose.yml found here -- run ./install.sh first to set up the stack."
 
+# proupgrade.sh switches the backend service's image to ${IMAGE_TAG} (the pre-built
+# Pro image) -- rebuilding and pushing the OSS image below would be a silent no-op
+# against a Pro stack (it'd report success without ever updating the running
+# container), so refuse early instead of leaving that trap for the next admin.
+if grep -q '\${IMAGE_TAG}' "$DEPLOY_DIR/docker-compose.yml"; then
+  die "This stack is running Pro (upgraded via proupgrade.sh) -- update.sh only rebuilds the Community image and would not actually update it. Run './proupgrade.sh' again instead (it pulls the latest published Pro image and lets you refresh the license), or manually: (cd $DEPLOY_DIR && docker compose pull backend && docker compose up -d)."
+fi
+
 command -v docker >/dev/null 2>&1 || die "Docker is not installed or not on PATH."
 docker compose version >/dev/null 2>&1 || die "The 'docker compose' plugin is not available. Install/update Docker."
 git rev-parse --git-dir >/dev/null 2>&1 || die "This isn't a git checkout, so there's no source to pull. Re-clone from https://github.com/valeniusvpn/valenius and copy your $DEPLOY_DIR/.env over."
