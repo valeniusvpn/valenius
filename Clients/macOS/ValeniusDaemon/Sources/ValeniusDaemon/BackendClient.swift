@@ -28,20 +28,75 @@ enum UpdaterError: Error, CustomStringConvertible {
 /// deployment keeps the new key.
 private let apiKeyPath = "\(appSupportDir)/apikey"
 
+/// A user-entered backend URL (first-run setup dialog) is persisted here (root-only), taking
+/// precedence over appsettings.json — mirrors Windows' backend.dat / BackendUrlProvider. Kept
+/// separate from appsettings so the persisted user choice always wins over (and is never
+/// clobbered by) the bundled default/template.
+private let backendUrlPath = "\(appSupportDir)/backend.dat"
+
 actor BackendClient {
-    let baseUrl: String
+    private(set) var baseUrl: String
     private var apiKey: String
     private var channel = "stable" // auto-update channel, refreshed from the heartbeat
     private let session = URLSession(configuration: .ephemeral)
 
     init(baseUrl: String, apiKey: String) {
-        self.baseUrl = baseUrl.hasSuffix("/") ? String(baseUrl.dropLast()) : baseUrl
+        let fallback = baseUrl.hasSuffix("/") ? String(baseUrl.dropLast()) : baseUrl
+        if let persisted = try? String(contentsOfFile: backendUrlPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !persisted.isEmpty {
+            self.baseUrl = persisted
+        } else {
+            self.baseUrl = fallback
+        }
         if let persisted = try? String(contentsOfFile: apiKeyPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            !persisted.isEmpty {
             self.apiKey = persisted
         } else {
             self.apiKey = apiKey
         }
+    }
+
+    /// True once a non-empty backend URL is available (from backend.dat or appsettings.json).
+    var isConfigured: Bool { !baseUrl.isEmpty }
+
+    /// Set the backend URL from a user-entered DNS host (scheme optional). Normalizes to
+    /// `https://host`, persists it, and switches immediately. Returns the normalized URL, or
+    /// nil if the input has no usable host. Mirrors Windows BackendUrlProvider.Set.
+    func setBaseUrl(_ dnsOrUrl: String?) -> String? {
+        let normalized = Self.normalizeUrl(dnsOrUrl)
+        guard !normalized.isEmpty else { return nil }
+        baseUrl = normalized
+        do {
+            try FileManager.default.createDirectory(
+                atPath: appSupportDir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try normalized.write(toFile: backendUrlPath, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backendUrlPath)
+            log("Backend URL set to \(normalized) and persisted.")
+        } catch {
+            logError("Could not persist backend URL; using it for this session only: \(error)")
+        }
+        return normalized
+    }
+
+    /// Coerce a user-entered DNS/URL to the canonical https form the rest of the client
+    /// assumes: strip any scheme the user typed/pasted, drop path/query and surrounding
+    /// whitespace/slashes, then prepend https://. Returns "" when no host remains. Mirrors
+    /// Windows BackendUrlProvider.Normalize.
+    static func normalizeUrl(_ input: String?) -> String {
+        var s = (input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if let schemeRange = s.range(of: "://") {
+            s = String(s[schemeRange.upperBound...])
+        }
+        while s.hasPrefix("/") { s.removeFirst() }
+        if let cut = s.firstIndex(where: { "/?#".contains($0) }) {
+            s = String(s[..<cut])
+        }
+        s = s.trimmingCharacters(in: .whitespaces)
+        while s.hasSuffix(".") { s.removeLast() }
+        return s.isEmpty ? "" : "https://" + s
     }
 
     func currentApiKey() -> String { apiKey }
@@ -70,7 +125,7 @@ actor BackendClient {
     }
 
     private func request(method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 15) async -> [String: Any]? {
-        guard let url = URL(string: baseUrl + path) else { return nil }
+        guard !baseUrl.isEmpty, let url = URL(string: baseUrl + path) else { return nil }
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")

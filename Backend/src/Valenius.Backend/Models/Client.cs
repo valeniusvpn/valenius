@@ -121,6 +121,14 @@ public class Client
     /// via POST /api/clients/logs on its next heartbeat. Cleared atomically after being sent.</summary>
     public bool PendingLogRequest { get; set; }
 
+    /// <summary>When true, the client runs its local repair checks on its next heartbeat instead of
+    /// waiting for its next service restart — currently the data-directory ACL self-heal, which
+    /// fixes "access to path ... is denied" errors caused by a corrupted/empty ACL on a file under
+    /// its ProgramData tree (e.g. a poisoned temp\*.conf left over from a crashed connect). A
+    /// generic hook other client-side repairs can join later. Windows-only; cleared atomically
+    /// after being sent.</summary>
+    public bool PendingConfigRepair { get; set; }
+
     /// <summary>Auto-update channel this client tracks: "stable" (default) or "beta". Admin-set
     /// per client; surfaced in the heartbeat so the updater polls the matching release stream.</summary>
     [MaxLength(10)]

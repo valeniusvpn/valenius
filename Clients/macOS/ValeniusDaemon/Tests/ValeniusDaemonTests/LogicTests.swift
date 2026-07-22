@@ -142,6 +142,20 @@ final class LogicTests: XCTestCase {
         XCTAssertTrue(out.contains("Endpoint = 1.2.3.4:51820"))
     }
 
+    // MARK: Backend URL normalization (first-run setup dialog)
+
+    func testBackendUrlNormalization() {
+        XCTAssertEqual(BackendClient.normalizeUrl("vpn.company.com"), "https://vpn.company.com")
+        XCTAssertEqual(BackendClient.normalizeUrl("https://vpn.company.com"), "https://vpn.company.com")
+        XCTAssertEqual(BackendClient.normalizeUrl("http://vpn.company.com/"), "https://vpn.company.com")
+        XCTAssertEqual(BackendClient.normalizeUrl("  vpn.company.com  "), "https://vpn.company.com")
+        XCTAssertEqual(BackendClient.normalizeUrl("vpn.company.com/some/path?x=1"), "https://vpn.company.com")
+        XCTAssertEqual(BackendClient.normalizeUrl("vpn.company.com."), "https://vpn.company.com")
+        XCTAssertEqual(BackendClient.normalizeUrl(""), "")
+        XCTAssertEqual(BackendClient.normalizeUrl("   "), "")
+        XCTAssertEqual(BackendClient.normalizeUrl(nil), "")
+    }
+
     // MARK: DNS split (nameservers vs search domains)
 
     func testDnsSplit() throws {

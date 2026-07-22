@@ -8,7 +8,7 @@ import '../diagnostics/diagnostics.dart';
 import '../platform/health_probe.dart';
 import '../platform/vpn_tunnel.dart';
 import '../platform/vpn_tunnel_stub.dart';
-import 'registration.dart' show remoteLanCidrsProvider;
+import 'registration.dart' show registrationControllerProvider, remoteLanCidrsProvider;
 
 /// The tunnel implementation. `main.dart` overrides this with the native
 /// WireGuard adapter in production; tests keep the stub.
@@ -23,13 +23,18 @@ final connectivityChangesProvider = Provider<Stream<void>?>(
   (_) => Connectivity().onConnectivityChanged.map((_) {}),
 );
 
-final connectionControllerProvider =
+// Explicit type annotation breaks the mutual-inference cycle with
+// registrationControllerProvider (each reads the other's .notifier via ref.read).
+final StateNotifierProvider<ConnectionController, VpnConnectionState>
+    connectionControllerProvider =
     StateNotifierProvider<ConnectionController, VpnConnectionState>((ref) {
   return ConnectionController(
     ref.watch(vpnTunnelProvider),
     ref.watch(healthProbeProvider),
     networkChanges: ref.watch(connectivityChangesProvider),
-    remoteLanCidrs: () => ref.read(remoteLanCidrsProvider),
+    remoteLanCidrsByProfile: () => ref.read(remoteLanCidrsProvider),
+    reportEvent: (eventType, tunnelName) =>
+        ref.read(registrationControllerProvider.notifier).logEvent(eventType, tunnelName),
   );
 });
 
@@ -73,22 +78,33 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
     this._tunnel,
     this._probe, {
     Stream<void>? networkChanges,
-    List<String> Function() remoteLanCidrs = _noRemoteLanCidrs,
-  })  : _remoteLanCidrs = remoteLanCidrs,
+    Map<String, List<String>> Function() remoteLanCidrsByProfile =
+        _noRemoteLanCidrs,
+    Future<void> Function(String eventType, String tunnelName)? reportEvent,
+  })  : _remoteLanCidrsByProfile = remoteLanCidrsByProfile,
+        _reportEvent = reportEvent ?? _noReportEvent,
         super(const VpnConnectionState()) {
     if (networkChanges != null) {
       _netSub = networkChanges.listen((_) => unawaited(_onNetworkChanged()));
     }
   }
 
-  static List<String> _noRemoteLanCidrs() => const [];
+  static Map<String, List<String>> _noRemoteLanCidrs() => const {};
+  static Future<void> _noReportEvent(String eventType, String tunnelName) async {}
 
   final VpnTunnelPlatform _tunnel;
   final HealthProbe _probe;
 
-  /// Physical LAN CIDR(s) behind a Valenius-managed sidecar from the latest heartbeat
-  /// (`StatusResponse.remoteLanCidrs`) — read lazily at connect time.
-  final List<String> Function() _remoteLanCidrs;
+  /// Reports Connect/Disconnect/Verified to the backend (drives the admin client list's
+  /// presence/connected indicators — see RegistrationController.logEvent). Defaults to a
+  /// no-op so tests that don't care about backend reporting don't need to supply one.
+  final Future<void> Function(String eventType, String tunnelName) _reportEvent;
+
+  /// Per-profile physical LAN CIDR(s) behind that profile's own sidecar, from the latest
+  /// heartbeat (`StatusResponse.RemoteLanCidrsByProfile[]`) — read lazily at connect time.
+  /// Keyed by profile name; never apply one profile's entry to a different profile's
+  /// connect (see the provider doc for why).
+  final Map<String, List<String>> Function() _remoteLanCidrsByProfile;
 
   /// The gateway target for the active profile (if any), kept so a network-change
   /// re-verify can reuse the same /health probe the connect path used.
@@ -169,7 +185,7 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
       final conflict = findLocalLanConflict(
         configText: configText,
         localLanCidrs: localLanCidrs,
-        remoteLanCidrs: _remoteLanCidrs(),
+        remoteLanCidrs: _remoteLanCidrsByProfile()[name] ?? const [],
       );
       if (conflict != null) {
         DiagnosticsLog.instance.add('connect: "$name" refused (LAN conflict): $conflict');
@@ -185,6 +201,7 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
       _activeGateway = gateway;
       state = VpnConnectionState(activeProfile: name);
       DiagnosticsLog.instance.add('connect: "$name" up');
+      unawaited(_reportEvent('Connect', name));
       unawaited(_verify(name, gateway));
     } catch (e) {
       _activeGateway = null;
@@ -194,11 +211,13 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
   }
 
   Future<void> _disconnect() async {
+    final name = state.activeProfile;
     state = VpnConnectionState(activeProfile: state.activeProfile, busy: true);
     try {
       await _tunnel.down();
       _activeGateway = null;
       state = const VpnConnectionState();
+      if (name != null) unawaited(_reportEvent('Disconnect', name));
     } catch (e) {
       state = VpnConnectionState(
         activeProfile: state.activeProfile,
@@ -308,6 +327,16 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
         verified: true,
         verifiedViaGateway: viaGateway,
       );
+      // Mirrors Windows/Linux/macOS reporting a "Verified" event upstream — required so the
+      // admin client list's "connected" star (which now demands actual gateway verification
+      // for sidecar clients, not just Connect) ever lights up for this app. Deliberately only
+      // the gateway-verified case reports; a handshake-only pass does not (handshake
+      // freshness isn't a reliable enough signal to gate a display indicator on). Called from
+      // both the initial post-connect verify and the network-change re-verify — the backend
+      // side (WgTunnelTracker.MarkVerified) is idempotent, so reporting again on re-verify is
+      // harmless and, unlike the desktop clients, keeps the star correct even if the initial
+      // connect only managed a handshake pass before later gateway-verifying.
+      if (viaGateway) unawaited(_reportEvent('Verified', name));
     }
   }
 }

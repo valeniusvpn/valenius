@@ -17,6 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pollTimer: Timer?
     private var aboutWindow: NSWindow?      // single-instance About (Windows invariant)
     private var mfaEnrollWindow: NSWindow?  // single-instance enrollment dialog
+    private var backendUrlWindow: NSWindow? // single-instance first-run server-address dialog
+    /// Set once the backend-URL prompt has auto-shown, so the background poll doesn't keep
+    /// reopening it if the user cancels (mirrors Windows TrayApplicationContext._backendPromptAutoShown).
+    private var backendUrlAutoShown = false
     private var cancellables = Set<AnyCancellable>()
 
     private static let pollInterval: TimeInterval = 5
@@ -46,6 +50,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates()
             .sink { [weak self] open in
                 if open { self?.showMfaEnroll() } else { self?.closeMfaEnroll() }
+            }
+            .store(in: &cancellables)
+
+        // Auto-present the first-run server-address dialog once (fresh install/dev-run with no
+        // BackendUrl configured), and dismiss it once a URL is saved. Mirrors Windows
+        // TrayApplicationContext.UpdateUi's BackendUnconfigured handling.
+        state.$status
+            .map(\.backendUnconfigured)
+            .removeDuplicates()
+            .sink { [weak self] unconfigured in
+                guard let self else { return }
+                if unconfigured {
+                    if !self.backendUrlAutoShown { self.showBackendUrl() }
+                } else {
+                    self.closeBackendUrl()
+                }
             }
             .store(in: &cancellables)
 
@@ -98,6 +118,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePopover(_ sender: Any?) {
         guard let button = statusItem.button else { return }
+        // Not configured yet: the status item's job is to collect the server address, so
+        // prompt for it instead of showing the (empty) popover. Mirrors Windows ShowPopupAsync.
+        if state.status.backendUnconfigured {
+            showBackendUrl()
+            return
+        }
         if popover.isShown {
             popover.performClose(sender)
         } else {
@@ -180,6 +206,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func closeMfaEnroll() {
         mfaEnrollWindow?.close()
         mfaEnrollWindow = nil
+    }
+
+    // MARK: First-run backend URL setup
+
+    private func showBackendUrl() {
+        backendUrlAutoShown = true // stop the background poll from queuing more auto-shows
+        if let existing = backendUrlWindow {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        popover.performClose(nil)
+        let hosting = NSHostingController(rootView: BackendUrlView(state: state, onDone: { [weak self] in
+            self?.closeBackendUrl()
+        }))
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Connect to your Valenius server"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        backendUrlWindow = window
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.backendUrlWindow = nil }
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func closeBackendUrl() {
+        backendUrlWindow?.close()
+        backendUrlWindow = nil
     }
 }
 

@@ -13,6 +13,12 @@ namespace Valenius.Backend.Controllers;
 [ServiceFilter(typeof(ApiKeyFilter))]
 public class ClientsController(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker wgTunnels, ILicenseEnforcement enforcement, IMfaSessionService mfa, IMfaChallengeService challenge, ISidecarService sidecar, ApiKeyStore apiKeyStore) : ControllerBase
 {
+    /// <summary>LogEvent EventTypes that are client-side repair outcomes routed to ClientAlerts
+    /// (Admin/Alerts) instead of ConnectionLogs. Kept as a set so LogEvent's dispatch and dedupe
+    /// stay generic as new kinds are added.</summary>
+    private static readonly HashSet<string> ClientAlertEventTypes =
+        new(StringComparer.OrdinalIgnoreCase) { "ConfigRepairFailed", "OwnershipReclaimed" };
+
     // Keyless-friendly: a first-run device with no installation key yet may register (it becomes a
     // PENDING client). It receives the installation key only once an admin activates it — see the
     // keyToAdopt logic in BuildStatusResponseAsync. Auth for the keyed fleet is unchanged.
@@ -171,6 +177,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         var forceUpdate    = client.ForceUpdate;
         client.ForceUpdate = false;
 
+        var pendingConfigRepair    = client.PendingConfigRepair;
+        client.PendingConfigRepair = false;
+
         var heartbeatInterval = client.Customer?.HeartbeatIntervalMinutes is >= 1 and <= 60
             ? client.Customer.HeartbeatIntervalMinutes.Value
             : 5;
@@ -295,7 +304,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 SourceId   = p.SourceCustomer!.Id,
                 p.SourceCustomer.SidecarVpnIp,
                 p.SourceCustomer.SidecarVpnSubnet,
-                p.SourceCustomer.SidecarHealthPort
+                p.SourceCustomer.SidecarHealthPort,
+                p.SourceCustomer.SidecarLanCidrs
             })
             .ToListAsync();
         foreach (var fr in foreignGatewayRows)
@@ -333,15 +343,28 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         //      pending (unactivated) keyless device gets nothing, so an unknown caller can never
         //      pull the key just by guessing a ClientKey.
         // Null in the normal case (already on the current key).
-        // Remote LAN CIDR(s) behind the sidecar, for the client's pre-connect LAN-conflict check.
-        // Only meaningful for Valenius-managed servers — External customers have no sidecar to ask.
-        string[]? remoteLanCidrs = null;
-        if (client.Customer?.ServerMode == "Valenius" && !string.IsNullOrEmpty(client.Customer.SidecarLanCidrs))
+        // Per-profile remote LAN CIDR(s), for the client's pre-connect LAN-conflict check. MUST
+        // stay scoped to the profile whose sidecar actually reports it — the native server
+        // profile gets its own customer's SidecarLanCidrs, each foreign profile gets its OWN
+        // source customer's, from the SAME foreignGatewayRows query above (already joined to
+        // SourceCustomer). Applying one customer's LAN blindly to every profile would misattribute
+        // a conflict (e.g. the native customer's LAN wrongly blocking an unrelated foreign
+        // profile's connect, or vice versa) — this bit us in testing, keep it profile-scoped.
+        var lanCidrEntries = new List<LanCidrProfileEntry>();
+        if (serverProfileName != null && client.Customer?.ServerMode == "Valenius" && !string.IsNullOrEmpty(client.Customer.SidecarLanCidrs))
         {
-            remoteLanCidrs = client.Customer.SidecarLanCidrs
+            var cidrs = client.Customer.SidecarLanCidrs
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (remoteLanCidrs.Length == 0) remoteLanCidrs = null;
+            if (cidrs.Length > 0) lanCidrEntries.Add(new LanCidrProfileEntry(serverProfileName, cidrs));
         }
+        foreach (var fr in foreignGatewayRows)
+        {
+            if (string.IsNullOrEmpty(fr.SidecarLanCidrs) || string.IsNullOrEmpty(fr.ProfileName)) continue;
+            var cidrs = fr.SidecarLanCidrs
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (cidrs.Length > 0) lanCidrEntries.Add(new LanCidrProfileEntry(fr.ProfileName!, cidrs));
+        }
+        var remoteLanCidrsByProfile = lanCidrEntries.Count > 0 ? lanCidrEntries.ToArray() : null;
 
         var presentedKey       = Request.Headers.TryGetValue("X-Api-Key", out var pk) ? pk.ToString() : null;
         var presentedIsGraceKey = apiKeyStore.IsAccepted(presentedKey);   // current or valid previous
@@ -379,7 +402,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             logUploadRequested,
             string.IsNullOrEmpty(client.UpdateChannel) ? "stable" : client.UpdateChannel,
             rotatedApiKey,
-            remoteLanCidrs);
+            remoteLanCidrsByProfile,
+            pendingConfigRepair);
     }
 
     [HttpPost("event")]
@@ -394,10 +418,61 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         if (client is null)
             return NotFound();
 
+        // Not a VPN connection event — a client-side repair outcome worth surfacing on Admin/Alerts
+        // rather than the connection history. "ConfigRepairFailed": the client's local self-heal
+        // still couldn't fix the problem. "OwnershipReclaimed": it DID fix it, but only after
+        // forcibly reclaiming ownership of the data directory — informational, since an object
+        // under a folder only SYSTEM should ever write to lost SYSTEM ownership somehow. Deduped:
+        // only raise a new alert if there isn't already an unacknowledged one of the same kind for
+        // this client, so a machine stuck in the broken state doesn't spam a fresh row on every
+        // service restart / repair attempt.
+        if (ClientAlertEventTypes.Contains(request.EventType))
+        {
+            var hasOpenAlert = await db.ClientAlerts.AnyAsync(a =>
+                a.ClientId == client.Id && a.Kind == request.EventType && !a.IsAcknowledged);
+            if (!hasOpenAlert)
+            {
+                db.ClientAlerts.Add(new ClientAlert
+                {
+                    ClientId  = client.Id,
+                    Kind      = request.EventType,
+                    Detail    = request.Detail,
+                    CreatedAt = DateTime.UtcNow,
+                });
+                await db.SaveChangesAsync();
+            }
+            return Ok();
+        }
+
+        // Not a state transition either — the gateway /health probe succeeded for an
+        // already-connected tunnel (see WgTunnelTracker.IsDisplayConnected). Not logged to
+        // ConnectionLogs; it isn't a connect/disconnect, just a confirmation of one already
+        // recorded.
+        if (string.Equals(request.EventType, "Verified", StringComparison.OrdinalIgnoreCase))
+        {
+            wgTunnels.MarkVerified(client.ClientKey);
+            return Ok();
+        }
+
         if (string.Equals(request.EventType, "Connect", StringComparison.OrdinalIgnoreCase)
             && client.WgPublicKey is not null)
         {
-            wgTunnels.MarkConnected(client.ClientKey, client.WgPublicKey);
+            // A gateway-verified connect (Pro sidecar, globally-unique transit network) is
+            // tracked separately from a plain handshake-only one, so the admin list's "connected"
+            // star can require actual verification where that's a meaningful signal, while
+            // clients with no gateway target keep today's simpler "peer registered" behavior —
+            // a handshake alone isn't reliable enough to gate a display indicator on (WireGuard's
+            // own rekey timers mean a genuinely-connected peer can go ~180s without a fresh one).
+            var expectsGatewayVerification = false;
+            if (client.Customer?.ServerMode == "Valenius" && !string.IsNullOrEmpty(client.Customer.SidecarVpnIp))
+            {
+                var otherSubnets = await db.Customers
+                    .Where(c => c.Id != client.Customer.Id && c.SidecarVpnSubnet != null && c.SidecarVpnSubnet != "")
+                    .Select(c => c.SidecarVpnSubnet)
+                    .ToListAsync();
+                expectsGatewayVerification = WireGuardHelper.IsTransitUnique(client.Customer.SidecarVpnSubnet, otherSubnets);
+            }
+            wgTunnels.MarkConnected(client.ClientKey, client.WgPublicKey, expectsGatewayVerification);
 
             // A prior "Kill Tunnel" removed this peer from the sidecar. Now that the client
             // is actively reconnecting, transparently re-add it — a kick, not a ban.
@@ -757,7 +832,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 }
 
 public record RegisterRequest(string ClientKey, string Hostname, string HostSid, string Username, string UserSid, string? Version, bool TrayRunning = false, string[]? Profiles = null, string? Platform = null);
-public record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "");
+public record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "",
+    /// <summary>Free-text detail for non-connection events (e.g. "ConfigRepairFailed"). Null/unused for Connect/Disconnect.</summary>
+    string? Detail = null);
 public record MfaEnrollConfirmRequest(string ClientKey, string Code);
 public record RedeemPairingRequest(string Token, string ClientKey, string? Hostname = null, string? Platform = null);
 public record RegisterDeviceRequest(string ClientKey, string? FcmToken);
@@ -831,16 +908,27 @@ public record StatusResponse(
     /// channel.</summary>
     string? ClientApiKey = null,
     /// <summary>
-    /// Physical LAN CIDR(s) behind the Valenius-managed sidecar (e.g. "192.168.1.0/24"),
-    /// self-reported by the sidecar. Only populated for ServerMode == "Valenius" customers whose
-    /// sidecar has reported it. Used by the client's pre-connect LAN-conflict check to detect the
-    /// remote network even when the profile's AllowedIPs is a full-tunnel default route
-    /// (0.0.0.0/0), where the routed network can't otherwise be inferred from the config alone.
-    /// Null/empty when unknown (External customers, or a sidecar not yet upgraded) — the client
-    /// then simply skips that half of the check.
+    /// Per-profile physical LAN CIDR(s) reachable through that profile's sidecar (e.g.
+    /// "192.168.1.0/24"), self-reported by the sidecar. Entries are scoped to the profile whose
+    /// sidecar actually reports them — the native server profile (this client's own customer) and
+    /// each foreign profile (its OWN source customer, not the native one) each get their own entry.
+    /// Used by the client's pre-connect LAN-conflict check to detect the remote network even when
+    /// a profile's AllowedIPs is a full-tunnel default route (0.0.0.0/0), where the routed network
+    /// can't otherwise be inferred from the config alone. A profile absent from this list (External
+    /// customers, or a sidecar not yet upgraded) simply skips that half of the check for its own
+    /// connect — mirrors the per-profile shape of <see cref="GatewayProfiles"/>. Never apply one
+    /// entry's CIDRs to a different profile: a client with both a native and a foreign sidecar
+    /// profile would misattribute one customer's conflicting LAN to the other's unrelated profile.
     /// </summary>
-    string[]? RemoteLanCidrs = null);
+    LanCidrProfileEntry[]? RemoteLanCidrsByProfile = null,
+    /// <summary>When true, the client immediately runs its local repair checks instead of waiting
+    /// for its next service restart — currently the data-directory ACL self-heal (fixes "access to
+    /// path ... is denied" errors from a corrupted/empty ACL under its ProgramData tree). A generic
+    /// hook other client-side repairs can join later. Windows-only; a no-op on other platforms.
+    /// One-shot, cleared atomically after being sent.</summary>
+    bool PendingConfigRepair = false);
 public record MfaApprovalEntry(int ChallengeId, string RequesterName, string? RequesterIp, int[] Choices, DateTime ExpiresAt);
 public record PendingConfigResponse(string FileName, string Content);
 public record PendingForeignConfigEntry(string FileName, string Content);
 public record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
+public record LanCidrProfileEntry(string ProfileName, string[] Cidrs);

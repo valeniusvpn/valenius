@@ -123,6 +123,8 @@ public class PipeServer : BackgroundService
                     return;
                 }
 
+                _registration.SetLastKnownUsername(callerUsername);
+
                 var command = JsonSerializer.Deserialize(commandJson, ValeniusJsonContext.Default.PipeCommand);
                 if (command is null)
                     return;
@@ -256,7 +258,7 @@ public class PipeServer : BackgroundService
                 // this profile (explicit AllowedIPs, or the backend-reported remote LAN for a
                 // full-tunnel profile against a Valenius-managed sidecar) or the VPN IP it would
                 // be assigned. No override — the user must resolve the conflict before connecting.
-                var lanConflict = _wg.FindLocalLanConflict(configPath, _registration.GetRemoteLanCidrs());
+                var lanConflict = _wg.FindLocalLanConflict(configPath, _registration.GetRemoteLanCidrs(tunnelName));
                 if (lanConflict is not null)
                     return Fail(lanConflict, isLanConflict: true);
 

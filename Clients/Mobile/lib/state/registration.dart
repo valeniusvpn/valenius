@@ -113,10 +113,15 @@ final backendFactoryProvider =
 final gatewayTargetsProvider =
     StateProvider<Map<String, GatewayTarget>>((_) => const {});
 
-/// Physical LAN CIDR(s) behind a Valenius-managed sidecar from the latest heartbeat
-/// (`StatusResponse.remoteLanCidrs`). Used by the pre-connect LAN-conflict check to
-/// detect the remote network for full-tunnel profiles. Empty when unknown.
-final remoteLanCidrsProvider = StateProvider<List<String>>((_) => const []);
+/// Per-profile physical LAN CIDR(s) behind that profile's own sidecar, from the latest
+/// heartbeat (`StatusResponse.RemoteLanCidrsByProfile[]`). Used by the pre-connect
+/// LAN-conflict check to detect the remote network for full-tunnel profiles. Keyed by
+/// profile name — the native server profile and each foreign profile each report their
+/// OWN source customer's LAN, so never apply one profile's entry to another's connect
+/// (a real bug found in testing: a native sidecar's conflicting LAN wrongly blocked an
+/// unrelated foreign profile). Empty/missing entry when unknown for that profile.
+final remoteLanCidrsProvider =
+    StateProvider<Map<String, List<String>>>((_) => const {});
 
 /// TOTP MFA state from the latest heartbeat. `required` means the peer is gated
 /// and needs authorization before it will connect.
@@ -272,7 +277,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   final BackendApi Function(String, String) backendFactory;
   final void Function() onConfigsChanged;
   final void Function(Map<String, GatewayTarget>) onGatewayTargets;
-  final void Function(List<String>) onRemoteLanCidrs;
+  final void Function(Map<String, List<String>>) onRemoteLanCidrs;
   final void Function(MfaState) onMfaState;
 
   /// Called when a heartbeat reports the MFA gate is required again (session
@@ -319,6 +324,23 @@ class RegistrationController extends StateNotifier<RegistrationState> {
 
   /// Secure-storage key for the installation's client API key (see StatusResponse.clientApiKey).
   static const _apiKeyStorageKey = kClientApiKeyStorageKey;
+
+  /// Reports a Connect/Disconnect/Verified event to the backend (mirrors the desktop/Linux/
+  /// macOS clients' LogEventAsync/log_event/logEvent) — drives the admin client list's
+  /// presence/connected indicators. Reuses the same [_api] instance `start()` built (already
+  /// carries any adopted rotated API key) rather than constructing a fresh one. Best-effort:
+  /// a no-op before `start()` has set [_api] (there's no clientKey to report against yet), and
+  /// failures are swallowed — the underlying connect/disconnect/verify already succeeded or
+  /// failed on its own regardless of whether this report lands.
+  Future<void> logEvent(String eventType, String tunnelName) async {
+    final api = _api;
+    if (api == null) return;
+    try {
+      await api.logEvent(eventType, tunnelName);
+    } catch (e) {
+      DiagnosticsLog.instance.add('logEvent($eventType, $tunnelName) failed: $e');
+    }
+  }
 
   Future<void> start() async {
     final identity = await ClientIdentity.ensure(keyStore);
@@ -452,7 +474,10 @@ class RegistrationController extends StateNotifier<RegistrationState> {
               g.profileName:
                   GatewayTarget(ip: g.gatewayIp, healthPort: g.healthPort),
         });
-        onRemoteLanCidrs(resp.remoteLanCidrs);
+        onRemoteLanCidrs({
+          for (final e in resp.remoteLanCidrsByProfile)
+            if (e.profileName.isNotEmpty && e.cidrs.isNotEmpty) e.profileName: e.cidrs,
+        });
         _mfaPending = resp.mfaRequired || resp.mfaEnrollmentOpen;
         onMfaState(MfaState(
           required: resp.mfaRequired,

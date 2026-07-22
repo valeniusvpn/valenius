@@ -5,6 +5,7 @@
 // Keys in a `.conf` are base64 (44 chars); UAPI wants lowercase hex (64 chars). Endpoints
 // are resolved to ip:port by wireguard-go itself, so we pass them through verbatim.
 
+import Darwin
 import Foundation
 
 struct WireGuardConfig {
@@ -111,7 +112,7 @@ struct WireGuardConfig {
             if let psk = peer.presharedKey, !psk.isEmpty {
                 lines.append("preshared_key=\(try base64ToHex(psk))")
             }
-            if let ep = peer.endpoint { lines.append("endpoint=\(ep)") }
+            if let ep = peer.endpoint { lines.append("endpoint=\(resolveEndpointHost(ep))") }
             if let ka = peer.persistentKeepalive { lines.append("persistent_keepalive_interval=\(ka)") }
             lines.append("replace_allowed_ips=true")
             for aip in peer.allowedIps { lines.append("allowed_ip=\(aip)") }
@@ -120,6 +121,45 @@ struct WireGuardConfig {
         lines.append("")
         return lines.joined(separator: "\n")
     }
+}
+
+/// Pre-resolves a peer's `host:port` endpoint to `ip:port` using the system resolver, instead
+/// of leaving hostname resolution to wireguard-go's own Go-runtime DNS client. Real-world
+/// finding: on a network whose resolver is scoped to A-only (`scutil --dns` shows "Request A
+/// records" — no usable AAAA), a hostname that resolves fine via the system resolver (dig,
+/// getaddrinfo — what macOS tools and this function use) can still make wireguard-go's own
+/// resolver return UAPI errno -22 (EINVAL), because it doesn't consult macOS's per-network
+/// resolver configuration and its dual-stack lookup doesn't degrade gracefully against that
+/// DNS server. Resolving here — once, at connect time — sidesteps wireguard-go's resolver
+/// entirely. Passes an endpoint through unchanged if the host is already a literal IP, or if
+/// resolution fails for any reason (so a transient DNS hiccup surfaces as wireguard-go's own
+/// error rather than a silent, different failure here).
+private func resolveEndpointHost(_ endpoint: String) -> String {
+    guard let colonIdx = endpoint.lastIndex(of: ":") else { return endpoint }
+    let host = String(endpoint[..<colonIdx])
+    let portPart = endpoint[endpoint.index(after: colonIdx)...]
+
+    var v4 = in_addr()
+    var v6 = in6_addr()
+    if host.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 { return endpoint }
+    if host.withCString({ inet_pton(AF_INET6, $0, &v6) }) == 1 { return endpoint }
+
+    var hints = addrinfo(
+        ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_DGRAM,
+        ai_protocol: IPPROTO_UDP, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil
+    )
+    var result: UnsafeMutablePointer<addrinfo>?
+    guard getaddrinfo(host, nil, &hints, &result) == 0, let res = result else { return endpoint }
+    defer { freeaddrinfo(result) }
+    guard let addr = res.pointee.ai_addr else { return endpoint }
+
+    var resolved = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+    let ok = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin -> Bool in
+        var sinAddr = sin.pointee.sin_addr
+        return inet_ntop(AF_INET, &sinAddr, &resolved, socklen_t(INET_ADDRSTRLEN)) != nil
+    }
+    guard ok else { return endpoint }
+    return "\(String(cString: resolved)):\(portPart)"
 }
 
 private func base64ToHex(_ b64: String) throws -> String {

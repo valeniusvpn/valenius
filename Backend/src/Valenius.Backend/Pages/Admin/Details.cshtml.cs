@@ -868,16 +868,56 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
             return BadRequest("Customer is not in Valenius server mode.");
 
         var result = await provisioner.ProvisionAsync(client, client.Customer);
+        var messages = new List<string> { result };
+
+        // Also re-provision every foreign profile this client holds, so the top-bar
+        // "Re-provision" button re-registers the whole peer, not just the native one.
+        if (installLicense.IsProActive)
+        {
+            var foreignProfiles = await db.ClientForeignProfiles
+                .Include(p => p.SourceCustomer)
+                .Where(p => p.ClientId == client.Id)
+                .ToListAsync();
+            foreach (var fp in foreignProfiles)
+            {
+                var foreignResult = await provisioner.ProvisionForeignAsync(client, fp.SourceCustomer);
+                messages.Add($"{fp.SourceCustomer.Name}: {foreignResult}");
+                _ = audit.LogAsync(Audit.Client, "Foreign profile provisioned", $"Client: {client.Hostname}",
+                    $"Source customer: {fp.SourceCustomer.Name}");
+            }
+        }
+
         await db.SaveChangesAsync();
         notifier.Notify(client.ClientKey);
 
-        if (result.StartsWith("Provisioned"))
-            TempData["Success"] = result;
-        else if (result.StartsWith("Failed"))
-            TempData["Error"] = result;
+        if (messages.Any(m => m.StartsWith("Failed") || m.StartsWith("Blocked")))
+            TempData["Error"] = string.Join(" | ", messages);
+        else if (messages.All(m => m.StartsWith("Provisioned")))
+            TempData["Success"] = string.Join(" | ", messages);
         else
-            TempData["Warning"] = result;
+            TempData["Warning"] = string.Join(" | ", messages);
 
+        return RedirectToPage(new { id });
+    }
+
+    /// <summary>Remotely triggers the Windows client's local repair checks on its next heartbeat,
+    /// without waiting for a service restart. Currently runs the data-directory ACL self-heal
+    /// (fixes "access to path ... is denied" errors caused by a corrupted/empty ACL under its
+    /// ProgramData tree, e.g. a poisoned temp\*.conf left over from a crashed connect — see
+    /// DataDirSelfHeal in the Windows client) — a generic hook other client-side repairs can join
+    /// later without a new button/flag per fix.</summary>
+    public async Task<IActionResult> OnPostRepairConfigAsync(int id)
+    {
+        if (!User.IsInRole("Admin")) return Forbid();
+        var client = await db.Clients.FindAsync(id);
+        if (client is null) return NotFound();
+
+        client.PendingConfigRepair = true;
+        await db.SaveChangesAsync();
+        notifier.Notify(client.ClientKey);
+        _ = audit.LogAsync(Audit.Client, "Client config repair requested", $"Client: {client.Hostname}");
+
+        TempData["Success"] = "Config repair requested — it will run on the client's next heartbeat.";
         return RedirectToPage(new { id });
     }
 

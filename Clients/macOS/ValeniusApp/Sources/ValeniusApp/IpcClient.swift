@@ -76,6 +76,13 @@ enum IpcClient {
         try expectOk(send(PipeCommand(command: .sendLogs)))
     }
 
+    /// First-run: set the backend server address. Returns the raw response rather than
+    /// throwing on success-with-warning (e.g. "saved, but unreachable yet") — mirrors Windows
+    /// SetBackendUrlAsync's (Saved, Warning) tuple.
+    static func setBackendUrl(dns: String) throws -> PipeResponse {
+        try send(PipeCommand(command: .setBackendUrl, backendDns: dns))
+    }
+
     /// Best-effort: tells the daemon the app is closing so the backend shows offline promptly.
     static func notifyOffline() {
         _ = try? send(PipeCommand(command: .notifyOffline), timeout: 2)

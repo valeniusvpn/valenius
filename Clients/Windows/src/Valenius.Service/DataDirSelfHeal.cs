@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 
 namespace Valenius.Service;
 
@@ -12,16 +14,52 @@ namespace Valenius.Service;
 /// on every heartbeat and silently goes offline. Rather than fail invisibly, detect that at
 /// startup and repair it, falling back to a loud, actionable log if repair is not possible.
 ///
-/// The repair works because the installer sets SYSTEM as the OWNER of the tree, and the owner
-/// retains READ_CONTROL + WRITE_DAC even when the DACL itself denies SYSTEM — so the service
-/// can rewrite the DACL. It re-establishes SYSTEM + Administrators FullControl on the folder
-/// (kept protected, so children never inherit <c>Users:(RX)</c> from <c>C:\ProgramData</c>)
-/// and re-enables inheritance on every child so each picks up that DACL. It never sets a
-/// protected DACL on a child (that is the trap that caused the breakage in the first place).
+/// The DACL-only repair works because the installer sets SYSTEM as the OWNER of the tree, and
+/// the owner retains READ_CONTROL + WRITE_DAC even when the DACL itself denies SYSTEM — so the
+/// service can rewrite the DACL. It re-establishes SYSTEM + Administrators FullControl on the
+/// folder (kept protected, so children never inherit <c>Users:(RX)</c> from
+/// <c>C:\ProgramData</c>) and re-enables inheritance on every child so each picks up that DACL.
+/// It never sets a protected DACL on a child (that is the trap that caused the breakage in the
+/// first place).
+///
+/// That assumption breaks down when an individual FILE's OWNER (not just its DACL) drifts away
+/// from SYSTEM — e.g. an AV product quarantining and restoring a file, a backup/sync agent, or a
+/// leftover from a client version that predates this ACL discipline. SYSTEM then has no implicit
+/// rights on that one file even though it still owns the rest of the tree, and the DACL-only
+/// reset throws on it specifically. <see cref="EnsureAccessible"/>'s optional ownership-takeover
+/// escalation (opt-in per call — see its <c>allowOwnershipTakeover</c> parameter) closes that gap
+/// by forcibly reclaiming ownership via <c>takeown.exe</c> (SYSTEM holds SeTakeOwnershipPrivilege,
+/// so this always succeeds regardless of the current owner/DACL), then re-running the DACL reset.
 /// </summary>
 internal static class DataDirSelfHeal
 {
-    public static void EnsureAccessible(string dataDir, ILogger logger)
+    public enum Result
+    {
+        /// <summary>Nothing needed fixing.</summary>
+        Healthy,
+        /// <summary>Was broken; the DACL-only reset fixed it. Not alert-worthy — this is the
+        /// ordinary, expected repair path.</summary>
+        Repaired,
+        /// <summary>Was broken; the DACL-only reset alone was not enough — fixed only after
+        /// forcibly reclaiming ownership. Worth flagging upstream: an object under this tree lost
+        /// its SYSTEM ownership somehow, which is unusual on a folder only SYSTEM should ever
+        /// write to.</summary>
+        RepairedViaOwnershipTakeover,
+        /// <summary>Still broken after every attempt.</summary>
+        Failed,
+    }
+
+    /// <summary>Runs the ACL self-heal if needed.</summary>
+    /// <param name="allowOwnershipTakeover">
+    /// When false (the automatic startup path), only the DACL-only reset is attempted — safe and
+    /// non-invasive, but can't fix a per-file ownership drift. When true (currently only the
+    /// admin-triggered on-demand "Repair client config" action), a DACL-only failure escalates to
+    /// forcibly reclaiming ownership via takeown.exe before retrying. Scoped strictly to
+    /// <paramref name="dataDir"/>; SYSTEM already has unrestricted authority over the local
+    /// machine, so reclaiming ownership of its own exclusive-use data folder carries no
+    /// meaningful additional risk beyond what SYSTEM can already do.
+    /// </param>
+    public static Result EnsureAccessible(string dataDir, ILogger logger, bool allowOwnershipTakeover = false)
     {
         bool needHeal;
         try
@@ -30,8 +68,13 @@ internal static class DataDirSelfHeal
             // Read OR write denial both count: the service reads registration.json (identity) but
             // also WRITES registration.json / autoconnect.json every heartbeat. A file that is
             // readable-but-not-writable lets the client run yet spams a persist failure each cycle,
-            // so probe write on the state files too — not just read.
-            needHeal = HasInaccessibleFile(dataDir) || HasUnwritableStateFile(dataDir);
+            // so probe write on the state files too — not just read. Also treat any ReadOnly
+            // attribute as needing heal: nothing under this SYSTEM-only tree should ever be
+            // read-only, a read-only file still passes the plain read-access probe above (only
+            // writes are blocked), and AV/security software is known to leave files here read-only
+            // (see StateFileWriter) — left unchecked it would silently defeat this whole self-heal
+            // for any file that isn't one of the two hardcoded state files.
+            needHeal = HasInaccessibleFile(dataDir) || HasUnwritableStateFile(dataDir) || HasReadOnlyFile(dataDir);
         }
         catch (UnauthorizedAccessException)
         {
@@ -40,34 +83,69 @@ internal static class DataDirSelfHeal
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Data-dir accessibility check failed (non-permission); skipping self-heal.");
-            return;
+            return Result.Healthy; // not a permission problem — nothing to report upstream
         }
 
         if (!needHeal)
-            return;
+            return Result.Healthy;
 
         if (!OperatingSystem.IsWindows())
-            return;
+            return Result.Healthy;
 
         logger.LogWarning("Data directory {Dir} is not fully accessible to the SYSTEM service; attempting ACL self-heal.", dataDir);
         try
         {
-            RepairWindows(dataDir, logger);
-            if (HasInaccessibleFile(dataDir) || HasUnwritableStateFile(dataDir))
-                throw new UnauthorizedAccessException("state files still not fully accessible after repair");
+            RepairDaclOnly(dataDir, logger);
+            if (HasInaccessibleFile(dataDir) || HasUnwritableStateFile(dataDir) || HasReadOnlyFile(dataDir))
+                throw new UnauthorizedAccessException("state files still not fully accessible after DACL-only repair");
             logger.LogInformation("Data directory ACL self-heal succeeded for {Dir}.", dataDir);
+            return Result.Repaired;
         }
         catch (Exception ex)
         {
-            // Reachable when SYSTEM is not the tree's owner (e.g. a prior `takeown /a` handed it to
-            // Administrators), so the service can't rewrite the DACL. Log ONCE, actionably.
-            logger.LogError(ex,
-                "ACL self-heal FAILED for {Dir}. Repair from an elevated prompt (takeown seizes ownership " +
-                "first), then restart the Valenius service:  takeown /f \"{Dir}\" /r /a  &&  " +
-                "icacls \"{Dir}\" /reset /T /C  &&  " +
-                "icacls \"{Dir}\" /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C",
-                dataDir, dataDir, dataDir, dataDir);
+            // Reachable when SYSTEM is not the owner of one or more objects in the tree (e.g. AV
+            // quarantine/restore, a backup agent, or a legacy poisoned file), so the DACL-only
+            // reset can't rewrite their DACL.
+            if (!allowOwnershipTakeover)
+            {
+                LogAndRecordFailure(dataDir, logger, ex);
+                return Result.Failed;
+            }
+
+            logger.LogWarning(ex,
+                "DACL-only self-heal failed for {Dir}; escalating to forcibly reclaiming ownership.", dataDir);
+            try
+            {
+                RunTakeown(dataDir, logger);
+                RepairDaclOnly(dataDir, logger);
+                if (HasInaccessibleFile(dataDir) || HasUnwritableStateFile(dataDir) || HasReadOnlyFile(dataDir))
+                    throw new UnauthorizedAccessException("state files still not fully accessible after ownership takeover");
+                logger.LogWarning(
+                    "Data directory ACL self-heal for {Dir} required forcibly reclaiming ownership — now repaired.",
+                    dataDir);
+                return Result.RepairedViaOwnershipTakeover;
+            }
+            catch (Exception ex2)
+            {
+                LogAndRecordFailure(dataDir, logger, ex2);
+                return Result.Failed;
+            }
         }
+    }
+
+    /// <summary>Human-readable detail (repair command included) from the most recent failed repair
+    /// attempt — set only when <see cref="EnsureAccessible"/> returns <see cref="Result.Failed"/>.
+    /// Read by the caller to report the failure upstream (Admin/Alerts) without re-deriving the
+    /// message.</summary>
+    public static string? FailureDetail { get; private set; }
+
+    private static void LogAndRecordFailure(string dataDir, ILogger logger, Exception ex)
+    {
+        FailureDetail = $"ACL self-heal failed for {dataDir}: {ex.Message}. Repair from an elevated " +
+            "prompt (takeown seizes ownership first), then restart the Valenius service: " +
+            $"takeown /f \"{dataDir}\" /r /d y && icacls \"{dataDir}\" /reset /T /C && " +
+            $"icacls \"{dataDir}\" /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C";
+        logger.LogError(ex, "ACL self-heal FAILED for {Dir}. {RepairCommand}", dataDir, FailureDetail);
     }
 
     /// <summary>True if any file under <paramref name="dataDir"/> exists but denies read access.</summary>
@@ -86,6 +164,28 @@ internal static class DataDirSelfHeal
             catch
             {
                 // Locked / transient / gone — not a permission problem.
+            }
+        }
+        return false;
+    }
+
+    /// <summary>True if any file under <paramref name="dataDir"/> carries a ReadOnly attribute.
+    /// Nothing under this SYSTEM-only tree should ever be read-only — a read-only file still
+    /// passes <see cref="HasInaccessibleFile"/>'s plain read-access probe (only writes are
+    /// blocked), so without this check the self-heal would never even notice a file stuck this
+    /// way unless it happened to be one of the two hardcoded state files.</summary>
+    private static bool HasReadOnlyFile(string dataDir)
+    {
+        foreach (var f in EnumerateFilesSafe(dataDir))
+        {
+            try
+            {
+                if (File.GetAttributes(f).HasFlag(FileAttributes.ReadOnly))
+                    return true;
+            }
+            catch
+            {
+                // Gone / transient — not what we're checking for here.
             }
         }
         return false;
@@ -120,7 +220,7 @@ internal static class DataDirSelfHeal
     }
 
     [SupportedOSPlatform("windows")]
-    private static void RepairWindows(string dataDir, ILogger logger)
+    private static void RepairDaclOnly(string dataDir, ILogger logger)
     {
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
@@ -138,7 +238,9 @@ internal static class DataDirSelfHeal
 
         // 2) Children (top-down): re-enable inheritance so each replaces its broken/empty per-file
         //    DACL with the folder's inherited SYSTEM+Administrators. Top-down order means a parent
-        //    directory is fixed before its contents, so files inherit the corrected DACL.
+        //    directory is fixed before its contents, so files inherit the corrected DACL. This
+        //    step relies on SYSTEM already owning each child (see RunTakeown below for when it
+        //    doesn't) — it never calls SetOwner itself.
         int healed = 0, failed = 0;
         foreach (var path in EnumerateTopDown(dataDir))
         {
@@ -152,6 +254,14 @@ internal static class DataDirSelfHeal
                 }
                 else
                 {
+                    // Clear ReadOnly first — nothing under this tree should ever carry it, and
+                    // AV/security software is known to leave files here read-only (see
+                    // StateFileWriter), which File.Open/File.Delete reject with the identical
+                    // "Access is denied" exception as a genuine ACL denial.
+                    var attr = File.GetAttributes(path);
+                    if (attr.HasFlag(FileAttributes.ReadOnly))
+                        File.SetAttributes(path, attr & ~FileAttributes.ReadOnly);
+
                     var s = new FileInfo(path).GetAccessControl();
                     s.SetAccessRuleProtection(false, false);
                     new FileInfo(path).SetAccessControl(s);
@@ -165,6 +275,60 @@ internal static class DataDirSelfHeal
             }
         }
         logger.LogInformation("ACL self-heal: {Healed} item(s) re-inherited, {Failed} failed.", healed, failed);
+    }
+
+    /// <summary>
+    /// Forcibly reclaims ownership of every object under <paramref name="dataDir"/> for SYSTEM
+    /// (the identity this service always runs as), via <c>takeown.exe /r</c>. SYSTEM holds
+    /// SeTakeOwnershipPrivilege, which lets it become the owner of any object regardless of the
+    /// object's current owner or DACL — the same mechanism an admin uses manually from an
+    /// elevated prompt (see the command in <see cref="LogAndRecordFailure"/>), just run
+    /// in-process instead of requiring console access. Best-effort: individual files can still
+    /// fail (e.g. held open by another process); the caller re-checks accessibility afterward
+    /// rather than trusting the exit code alone. No `/a` switch — omitting it assigns ownership to
+    /// the current identity (SYSTEM, since that's who's running this process), matching the SYSTEM
+    /// SID the installer itself uses (`icacls /setowner *S-1-5-18`).
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void RunTakeown(string dataDir, ILogger logger)
+    {
+        var psi = new ProcessStartInfo("takeown.exe")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+            CreateNoWindow         = true,
+        };
+        psi.ArgumentList.Add("/f");
+        psi.ArgumentList.Add(dataDir);
+        psi.ArgumentList.Add("/r");
+        psi.ArgumentList.Add("/d");
+        psi.ArgumentList.Add("y");
+
+        using var proc = new Process { StartInfo = psi };
+        var stderr = new StringBuilder();
+        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
+
+        if (!proc.Start())
+        {
+            logger.LogWarning("Could not start takeown.exe for {Dir}.", dataDir);
+            return;
+        }
+        proc.BeginErrorReadLine();
+        // Stdout isn't needed; discard it via the same async pattern to avoid pipe-buffer deadlock.
+        proc.StandardOutput.ReadToEndAsync();
+
+        if (!proc.WaitForExit(60_000))
+        {
+            logger.LogWarning("takeown.exe timed out for {Dir}; killing it.", dataDir);
+            try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+            return;
+        }
+
+        if (proc.ExitCode != 0)
+            logger.LogWarning("takeown.exe exited {Code} for {Dir}: {Stderr}", proc.ExitCode, dataDir, stderr.ToString().Trim());
+        else
+            logger.LogInformation("takeown.exe reclaimed ownership for {Dir}.", dataDir);
     }
 
     /// <summary>All files under root, tolerating access errors on individual subtrees.</summary>

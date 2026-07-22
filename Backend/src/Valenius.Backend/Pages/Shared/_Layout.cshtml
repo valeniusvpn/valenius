@@ -1,6 +1,13 @@
 @using Valenius.Backend.Licensing
+@using Valenius.Backend.Services
 @inject ILicenseContext _License
 @inject IInstallationLicenseMonitor _InstallLicense
+@inject ISidecarService _Sidecar
+@{
+    // Same signal Setup.cshtml.cs / Customers/Details.cshtml.cs use for "is this the Pro build":
+    // OSS registers the no-op NullSidecarService, Pro replaces it with the real implementation.
+    var _isProEdition = _Sidecar is not NullSidecarService;
+}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -368,11 +375,14 @@
                     <i class="bi bi-people"></i> Users
                 </a>
 
-                <hr class="sidebar-divider" />
-                <div class="sidebar-section-label">Server</div>
-                <a href="/Admin/Server/Dashboard" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Dashboard") == true ? "active" : "")">
-                    <i class="bi bi-speedometer2"></i> Dashboard
-                </a>
+                @if (_isProEdition)
+                {
+                    <hr class="sidebar-divider" />
+                    <div class="sidebar-section-label">Server</div>
+                    <a href="/Admin/Server/Dashboard" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Dashboard") == true ? "active" : "")">
+                        <i class="bi bi-speedometer2"></i> Dashboard
+                    </a>
+                }
 
                 <hr class="sidebar-divider" />
                 <div class="sidebar-section-label">System</div>

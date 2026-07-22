@@ -2,7 +2,8 @@
 @using Valenius.Backend.Data
 @inject ApplicationDbContext AlertBadgeDb
 @{
-    var count = await AlertBadgeDb.SidecarAlerts.CountAsync(a => !a.IsAcknowledged);
+    var count = await AlertBadgeDb.SidecarAlerts.CountAsync(a => !a.IsAcknowledged)
+              + await AlertBadgeDb.ClientAlerts.CountAsync(a => !a.IsAcknowledged);
     if (count > 0)
     {
         <span class="badge bg-danger rounded-pill ms-1">@count</span>

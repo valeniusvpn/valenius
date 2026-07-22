@@ -504,6 +504,29 @@ public static class OssStartup
         // detect a pre-connect LAN conflict even for full-tunnel (0.0.0.0/0) profiles.
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "SidecarLanCidrs" VARCHAR(500) NULL""");
+        // One-shot admin "Repair client config" flag — remotely triggers the Windows client's
+        // local repair checks (currently the data-directory ACL self-heal) without waiting for a
+        // service restart. Generic name/column so future client-side repairs can join this same hook.
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingConfigRepair" BOOLEAN NOT NULL DEFAULT FALSE""");
+        // Client-reported problems it couldn't self-resolve (e.g. the ACL self-heal ran and
+        // failed) — surfaced on Admin/Alerts. "Kind" is generic so future failure kinds reuse
+        // this same table instead of a new one each time.
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "ClientAlerts" (
+                "Id"             SERIAL PRIMARY KEY,
+                "ClientId"       INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                "Kind"           VARCHAR(50) NOT NULL,
+                "Detail"         TEXT NULL,
+                "CreatedAt"      TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                "IsAcknowledged" BOOLEAN NOT NULL DEFAULT FALSE,
+                "AcknowledgedAt" TIMESTAMP NULL,
+                "AcknowledgedBy" VARCHAR(255) NULL
+            )
+            """);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_ClientAlerts_ClientId_Kind_IsAcknowledged" ON "ClientAlerts" ("ClientId", "Kind", "IsAcknowledged")""");
 
         // Seed ServerSettings row (Id = 1).
         if (!db.ServerSettings.Any())

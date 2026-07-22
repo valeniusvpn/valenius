@@ -129,6 +129,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Set the backend server address (first-run setup dialog). Returns nil on success — any
+    /// non-fatal advisory (e.g. "saved, but unreachable yet") is posted as a notification
+    /// rather than blocking the dialog — or an error message for the dialog to show inline so
+    /// the user can retry. Mirrors Windows BackendUrlForm / TrayApplicationContext.PromptBackendUrlAsync.
+    func setBackendUrl(dns: String) async -> String? {
+        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            ipcQueue.async { [weak self] in
+                do {
+                    let resp = try IpcClient.setBackendUrl(dns: dns)
+                    guard resp.success else {
+                        cont.resume(returning: resp.error ?? "Could not save the server address.")
+                        return
+                    }
+                    if let warning = resp.error, !warning.isEmpty {
+                        Notifications.post(title: "Valenius", body: warning)
+                    }
+                    Task { @MainActor in self?.refresh() }
+                    cont.resume(returning: nil)
+                } catch {
+                    cont.resume(returning: "\(error)")
+                }
+            }
+        }
+    }
+
     /// Confirm MFA enrollment with a TOTP code. Returns nil on success, else an error message
     /// for the enrollment dialog to show.
     func mfaEnrollConfirm(code: String) async -> String? {

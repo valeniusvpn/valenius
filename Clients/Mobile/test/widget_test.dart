@@ -71,7 +71,7 @@ class _FakeApi implements BackendApi {
         mfaApproveNumber: null,
         pendingApprovals: const [],
         logUploadRequested: false,
-        remoteLanCidrs: const [],
+        remoteLanCidrsByProfile: const [],
       );
 
   @override
@@ -97,6 +97,9 @@ class _FakeApi implements BackendApi {
 
   @override
   Future<void> reportOffline() async {}
+
+  @override
+  Future<void> logEvent(String eventType, String tunnelName) async {}
 
   @override
   Future<BackendCheckResult> checkBackend() async =>

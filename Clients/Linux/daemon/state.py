@@ -67,10 +67,11 @@ class DaemonState:
         self._server_profile_name: Optional[str] = None
         self._server_vpn_ip: Optional[str] = None
         self._server_health_port: int = 8443
-        # Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported via /info and
-        # relayed by the backend. Refreshed on every heartbeat/poll. Used by the pre-connect
-        # LAN-conflict check to detect the remote network for full-tunnel profiles.
-        self._remote_lan_cidrs: list[str] = []
+        # Per-profile physical LAN CIDR(s) behind that profile's own sidecar, self-reported
+        # via /info and relayed by the backend. Refreshed on every heartbeat/poll. Used by
+        # the pre-connect LAN-conflict check to detect the remote network for full-tunnel
+        # profiles. Keyed by profile name — see set_remote_lan_cidrs.
+        self._remote_lan_cidrs_by_profile: dict[str, list[str]] = {}
         self._heartbeat_interval = 5
         self._tray_last_seen: Optional[datetime] = None
         # MFA state — written by heartbeat_once, read by build_tunnel_status
@@ -268,13 +269,31 @@ class DaemonState:
             self._server_vpn_ip = vpn_ip or None
             self._server_health_port = health_port
 
-    def set_remote_lan_cidrs(self, cidrs: Optional[list[str]]) -> None:
-        with self._lock:
-            self._remote_lan_cidrs = list(cidrs) if cidrs else []
+    def set_remote_lan_cidrs(self, entries: Optional[list[dict]]) -> None:
+        """entries: [{'ProfileName': ..., 'Cidrs': [...]}] from RemoteLanCidrsByProfile.
 
-    def get_remote_lan_cidrs(self) -> list[str]:
+        MUST stay keyed by profile name — the native server profile and each foreign
+        profile each report their OWN source customer's LAN CIDRs. Applying one profile's
+        entry to a different profile's connect would misattribute a conflict (a real bug
+        found in testing where a native sidecar's conflicting LAN wrongly blocked an
+        unrelated foreign profile).
+        """
         with self._lock:
-            return list(self._remote_lan_cidrs)
+            by_profile: dict[str, list[str]] = {}
+            for entry in entries or []:
+                name = entry.get('ProfileName') or entry.get('profileName')
+                cidrs = entry.get('Cidrs') or entry.get('cidrs') or []
+                if name and cidrs:
+                    by_profile[name] = list(cidrs)
+            self._remote_lan_cidrs_by_profile = by_profile
+
+    def get_remote_lan_cidrs(self, profile_name: Optional[str]) -> list[str]:
+        """The remote LAN CIDR(s) reported for profile_name's own sidecar, or [] when none
+        are known for that specific profile."""
+        with self._lock:
+            if not profile_name:
+                return []
+            return list(self._remote_lan_cidrs_by_profile.get(profile_name, []))
 
     def get_gateway_probe(self, profile: Optional[str]) -> Optional[tuple[str, int]]:
         """Gateway /health target (ip, port) for the server profile, or None.

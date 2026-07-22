@@ -23,6 +23,10 @@ public enum CommandType: Int, Codable, Sendable {
     /// Sent by the app's "Send logs" action — the daemon collects its (Valenius-only,
     /// redacted) diagnostic logs and uploads them to the backend.
     case sendLogs = 12
+    /// Sent by the app's first-run setup dialog to set the backend server address. The DNS
+    /// name is carried in `PipeCommand.backendDns`; the daemon prepends https:// and persists
+    /// it. Mirrors Windows CommandType.SetBackendUrl / Mobile's SetupScreen.
+    case setBackendUrl = 13
 }
 
 public struct PipeCommand: Codable, Sendable {
@@ -32,19 +36,23 @@ public struct PipeCommand: Codable, Sendable {
     public var autoConnectEnabled: Bool?
     /// TOTP code for `CommandType.mfaEnrollConfirm`.
     public var mfaCode: String?
+    /// DNS host for `CommandType.setBackendUrl` (without scheme; the daemon prepends https://).
+    public var backendDns: String?
 
     public init(
         command: CommandType,
         configContent: String? = nil,
         profileName: String? = nil,
         autoConnectEnabled: Bool? = nil,
-        mfaCode: String? = nil
+        mfaCode: String? = nil,
+        backendDns: String? = nil
     ) {
         self.command = command
         self.configContent = configContent
         self.profileName = profileName
         self.autoConnectEnabled = autoConnectEnabled
         self.mfaCode = mfaCode
+        self.backendDns = backendDns
     }
 
     enum CodingKeys: String, CodingKey {
@@ -53,6 +61,7 @@ public struct PipeCommand: Codable, Sendable {
         case profileName = "ProfileName"
         case autoConnectEnabled = "AutoConnectEnabled"
         case mfaCode = "MfaCode"
+        case backendDns = "BackendDns"
     }
 }
 
@@ -165,6 +174,11 @@ public struct TunnelStatus: Codable, Sendable {
     /// Daemon-derived (the app can't read the root-owned appsettings.json).
     public var backendUrl: String?
     public var backendReachable: Bool?
+    /// True when no backend server address is configured yet (fresh install/dev-run with an
+    /// empty appsettings.json BackendUrl and no persisted backend.dat override) — the app
+    /// prompts for the server address instead of showing the normal popover. Mirrors Windows
+    /// TunnelStatus.BackendUnconfigured / Mobile's SetupScreen gate.
+    public var backendUnconfigured: Bool = false
 
     public init() {}
 
@@ -189,6 +203,7 @@ public struct TunnelStatus: Codable, Sendable {
         case mfaApproveNumber = "MfaApproveNumber"
         case backendUrl = "BackendUrl"
         case backendReachable = "BackendReachable"
+        case backendUnconfigured = "BackendUnconfigured"
     }
 }
 

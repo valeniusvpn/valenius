@@ -71,7 +71,7 @@ public class IndexModel(ApplicationDbContext db, ClientPresenceTracker presence,
             Active:    scoped.Count(c => c.IsActive),
             Inactive:  0,
             Online:    scoped.Count(c => presence.IsOnline(c.ClientKey)),
-            Connected: scoped.Count(c => tunnels.IsConnected(c.ClientKey))
+            Connected: scoped.Count(c => tunnels.IsDisplayConnected(c.ClientKey))
         );
 
         var filtered = (Filter switch
@@ -79,7 +79,7 @@ public class IndexModel(ApplicationDbContext db, ClientPresenceTracker presence,
             "pending"   => scoped.Where(c => !c.IsActive),
             "active"    => scoped.Where(c => c.IsActive),
             "online"    => scoped.Where(c => presence.IsOnline(c.ClientKey)),
-            "connected" => scoped.Where(c => tunnels.IsConnected(c.ClientKey)),
+            "connected" => scoped.Where(c => tunnels.IsDisplayConnected(c.ClientKey)),
             _           => scoped.AsEnumerable()
         }).ToList();
 
@@ -102,7 +102,7 @@ public class IndexModel(ApplicationDbContext db, ClientPresenceTracker presence,
             .Select(g => new CustomerGroup(
                 g.Key ?? "Unassigned",
                 g.First().CustomerId,
-                g.Select(c => new ClientRow(c, lastUsernames.GetValueOrDefault(c.Id), presence.IsOnline(c.ClientKey), tunnels.IsConnected(c.ClientKey))).ToList()))
+                g.Select(c => new ClientRow(c, lastUsernames.GetValueOrDefault(c.Id), presence.IsOnline(c.ClientKey), tunnels.IsDisplayConnected(c.ClientKey))).ToList()))
             .ToList();
     }
 
@@ -125,14 +125,14 @@ public class IndexModel(ApplicationDbContext db, ClientPresenceTracker presence,
             pending   = scoped.Count(c => !c.IsActive),
             active    = scoped.Count(c => c.IsActive),
             online    = scoped.Count(c => presence.IsOnline(c.ClientKey)),
-            connected = scoped.Count(c => tunnels.IsConnected(c.ClientKey)),
+            connected = scoped.Count(c => tunnels.IsDisplayConnected(c.ClientKey)),
         };
 
         var clients = scoped.Select(c => new
         {
             id        = c.Id,
             online    = presence.IsOnline(c.ClientKey),
-            connected = tunnels.IsConnected(c.ClientKey),
+            connected = tunnels.IsDisplayConnected(c.ClientKey),
             active    = c.IsActive,
         });
 

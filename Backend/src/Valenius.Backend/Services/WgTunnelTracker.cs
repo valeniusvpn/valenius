@@ -18,7 +18,10 @@ public sealed class WgTunnelTracker
     // is not undone by the reconciler seeing a stale-but-still-recent WG handshake.
     private static readonly TimeSpan DisconnectSuppressDuration = TimeSpan.FromSeconds(300);
 
-    private record Entry(DateTime ConnectedAt, string? WgPublicKey);
+    private record Entry(DateTime ConnectedAt, string? WgPublicKey, bool ExpectsGatewayVerification)
+    {
+        public bool Verified { get; set; }
+    }
 
     private readonly ConcurrentDictionary<string, Entry> _entries =
         new(StringComparer.OrdinalIgnoreCase);
@@ -28,11 +31,21 @@ public sealed class WgTunnelTracker
     private readonly ConcurrentDictionary<string, DateTime> _recentlyDisconnected =
         new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Records a Connect event from the client API.</summary>
-    public void MarkConnected(string clientKey, string? wgPublicKey)
+    /// <summary>Records a Connect event from the client API. <paramref name="expectsGatewayVerification"/>
+    /// is true for a Pro sidecar profile with a globally-unique transit network (the client will
+    /// attempt the gateway /health probe, not just a handshake) — see <see cref="IsDisplayConnected"/>.</summary>
+    public void MarkConnected(string clientKey, string? wgPublicKey, bool expectsGatewayVerification = false)
     {
         _recentlyDisconnected.TryRemove(clientKey, out _);
-        _entries[clientKey] = new Entry(DateTime.UtcNow, wgPublicKey);
+        _entries[clientKey] = new Entry(DateTime.UtcNow, wgPublicKey, expectsGatewayVerification);
+    }
+
+    /// <summary>Records a Verified event from the client API (gateway /health probe succeeded).
+    /// No-op if the client isn't currently tracked as connected (e.g. a race with a Disconnect).</summary>
+    public void MarkVerified(string clientKey)
+    {
+        if (_entries.TryGetValue(clientKey, out var entry))
+            entry.Verified = true;
     }
 
     /// <summary>Records a Disconnect event from the client API.</summary>
@@ -45,8 +58,25 @@ public sealed class WgTunnelTracker
     /// <summary>Number of clients currently tracked as connected.</summary>
     public int ActiveCount => _entries.Count;
 
-    /// <summary>Returns true if the given client is currently tracked as connected.</summary>
+    /// <summary>Returns true if the given client is currently tracked as connected. This is the
+    /// raw peer-registered signal — used for functional gates (Kill Tunnel/Disconnect button
+    /// visibility, MFA policy changes, traffic accounting) where "the peer is registered, whether
+    /// or not it's been verified yet" is the correct question. For an admin-facing "is this VPN
+    /// actually working" indicator, use <see cref="IsDisplayConnected"/> instead.</summary>
     public bool IsConnected(string clientKey) => _entries.ContainsKey(clientKey);
+
+    /// <summary>
+    /// Stricter "connected" signal for admin-facing display (e.g. the client list's connected
+    /// star): for a client expected to gateway-verify (Pro sidecar, unique transit network),
+    /// requires the gateway /health probe to have actually succeeded, not just the WireGuard
+    /// interface being up — a plain handshake isn't reliable enough to promise the tunnel truly
+    /// works. For every other client (no gateway target available — OSS, External, or a
+    /// non-unique transit network) there's no better signal to require, so this falls back to the
+    /// same raw "connected" check as <see cref="IsConnected"/>.
+    /// </summary>
+    public bool IsDisplayConnected(string clientKey) =>
+        _entries.TryGetValue(clientKey, out var entry)
+        && (!entry.ExpectsGatewayVerification || entry.Verified);
 
     /// <summary>
     /// Synchronises tracker state with a WireGuard snapshot (called by the background reconciler).
@@ -86,7 +116,11 @@ public sealed class WgTunnelTracker
             if (_recentlyDisconnected.TryGetValue(clientKey, out var disconnectedAt) &&
                 now - disconnectedAt < DisconnectSuppressDuration) continue;
 
-            _entries[clientKey] = new Entry(now - grace - TimeSpan.FromSeconds(1), pubKey);
+            // Reconciler-recovered entry (missed Connect event, e.g. a backend restart mid-session)
+            // — no Verified event will ever arrive to confirm it, so default to the non-strict
+            // display behavior (ExpectsGatewayVerification: false) rather than leaving the star
+            // permanently off for a connection that's actually fine.
+            _entries[clientKey] = new Entry(now - grace - TimeSpan.FromSeconds(1), pubKey, ExpectsGatewayVerification: false);
         }
 
         // Remove entries that are past the grace window and no longer in WireGuard

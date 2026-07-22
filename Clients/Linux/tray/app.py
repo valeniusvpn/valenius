@@ -848,6 +848,8 @@ class TrayApp:
         try:
             ipc.connect(profile)
             self._poll()
+        except ipc.LanConflictError as e:
+            self._show_lan_conflict(str(e))
         except ipc.IpcError as e:
             self._show_error(str(e))
 
@@ -1039,6 +1041,22 @@ class TrayApp:
             buttons=Gtk.ButtonsType.OK,
             text=message,
         )
+        dlg.run()
+        dlg.destroy()
+
+    def _show_lan_conflict(self, message: str):
+        """Blocking modal for a pre-connect LAN-conflict refusal — this machine's own local
+        LAN overlaps a network reachable through the VPN (or the VPN IP it would be assigned).
+        Deliberately distinct from _show_error (WARNING icon, its own heading/title) so this
+        refusal — which the ordinary "connect failed" toast could bury among transient network
+        errors — isn't missed. Mirrors Windows' LanConflictForm."""
+        dlg = Gtk.MessageDialog(
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK,
+            text="This VPN was not connected",
+        )
+        dlg.set_title("Network conflict — can't connect")
+        dlg.format_secondary_text(message)
         dlg.run()
         dlg.destroy()
 

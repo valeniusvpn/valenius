@@ -16,6 +16,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<LicenseAuditLog>    LicenseAuditLogs    => Set<LicenseAuditLog>();
     public DbSet<SidecarCertificate> SidecarCertificates => Set<SidecarCertificate>();
     public DbSet<SidecarAlert>      SidecarAlerts     => Set<SidecarAlert>();
+    public DbSet<ClientAlert>       ClientAlerts      => Set<ClientAlert>();
     public DbSet<Appliance>         Appliances        => Set<Appliance>();
     public DbSet<ApplianceUpdateLog> ApplianceUpdateLogs => Set<ApplianceUpdateLog>();
     public DbSet<ApplianceRelease>  ApplianceReleases => Set<ApplianceRelease>();

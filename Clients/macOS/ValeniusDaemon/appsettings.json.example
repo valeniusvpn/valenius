@@ -1,6 +1,6 @@
 {
   "Valenius": {
-    "BackendUrl": "https://valenius.stranto.com",
+    "BackendUrl": "",
     "ApiKey": "YOUR_API_KEY_HERE"
   }
 }

@@ -30,7 +30,19 @@ enum UapiClient {
     static func applyConfig(iface: String, setRequest: String) throws {
         let response = try exchange(iface: iface, request: setRequest)
         let errno = parseErrno(response)
-        if errno != 0 { throw UapiError.operationFailed(errno) }
+        if errno != 0 {
+            // Temporary diagnostic: dump the exact request wireguard-go rejected, with key
+            // material redacted (private_key/public_key/preshared_key values only, never
+            // logged in full) so the precise line-by-line format is visible.
+            let redacted = setRequest.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+                for prefix in ["private_key=", "public_key=", "preshared_key="] {
+                    if line.hasPrefix(prefix) { return "\(prefix)<redacted len=\(line.count - prefix.count)>" }
+                }
+                return String(line)
+            }.joined(separator: "\\n")
+            log("UAPI set rejected (errno \(errno)) on \(iface). Request: \(redacted) | Full response: \(response.replacingOccurrences(of: "\n", with: "\\n"))")
+            throw UapiError.operationFailed(errno)
+        }
     }
 
     /// Most recent handshake age helpers read this. Returns the raw `get=1` response text.

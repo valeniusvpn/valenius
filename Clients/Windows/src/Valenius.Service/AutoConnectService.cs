@@ -91,7 +91,13 @@ public class AutoConnectService : BackgroundService
             await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
 
             // Run an initial check in case the machine is already outside its trusted network.
-            await RunCheckSafeAsync(stoppingToken);
+            // Retries briefly if the first attempt doesn't result in a connection — this is the
+            // path that reconnects the tunnel after a service restart (a normal boot, or the
+            // restart the auto-updater's installer triggers), since WireGuard tunnel services are
+            // deliberately left on Manual start (see WireGuardController.ConnectAsync) and never
+            // come back on their own. See RunStartupCheckAsync for why a single attempt isn't
+            // enough.
+            await RunStartupCheckAsync(stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -136,6 +142,55 @@ public class AutoConnectService : BackgroundService
             // Fallback timer fired — proceed with a routine check.
             _logger.LogDebug("AutoConnect: fallback timer — running check.");
         }
+    }
+
+    // Retry window for the startup check only. A network stack that hasn't fully settled yet
+    // (DHCP lease, default route, DNS) right after a boot or an update-triggered service restart
+    // can make a single attempt fail transiently (e.g. the Phase 1 health probe times out) —
+    // without a retry here, the only remaining trigger is a genuine NetworkAddressChanged event
+    // (which won't fire if the network hasn't actually changed) or the 5-minute fallback timer,
+    // so "auto-connect enabled" could silently sit disconnected for minutes, or indefinitely,
+    // after every update. A failed attempt never sets _lastActionUtc, so ActionCooldown does not
+    // block these retries.
+    private static readonly TimeSpan StartupRetryInterval = TimeSpan.FromSeconds(10);
+    private const int StartupRetryAttempts = 6; // ~1 minute total, then fall into the normal loop.
+
+    private async Task RunStartupCheckAsync(CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= StartupRetryAttempts; attempt++)
+        {
+            await RunCheckSafeAsync(ct);
+
+            if (!IsAutoConnectPending())
+                return;
+
+            if (attempt < StartupRetryAttempts)
+            {
+                _logger.LogDebug("AutoConnect: startup check attempt {Attempt} did not connect — retrying.", attempt);
+                await Task.Delay(StartupRetryInterval, ct);
+            }
+        }
+    }
+
+    /// <summary>
+    /// True if AutoConnectAsync still has something to do: auto-connect enabled, trusted networks
+    /// configured, current network not trusted, and the target tunnel not yet connected. Mirrors
+    /// CheckAsync's own connect condition (minus the action cooldown, which a failed attempt never
+    /// sets) — used only to decide whether the startup retry loop should keep going.
+    /// </summary>
+    private bool IsAutoConnectPending()
+    {
+        if (!_autoConnect.IsEnabled()) return false;
+
+        var networks = _autoConnect.GetTrustedNetworks();
+        if (networks.Length == 0) return false;
+        if (NetworkDetector.IsInTrustedNetwork(networks)) return false;
+
+        var targetPath = FindConfigPath();
+        var targetName = targetPath is null
+            ? null
+            : (ConfigManager.GetTunnelNameFromPath(targetPath) ?? Path.GetFileNameWithoutExtension(targetPath));
+        return targetName is null || !_state.IsConnected(targetName);
     }
 
     private async Task RunCheckSafeAsync(CancellationToken ct)
@@ -316,8 +371,12 @@ public class AutoConnectService : BackgroundService
 
         _lastActionUtc = DateTime.UtcNow;
 
-        _state.SetConnected(tunnelName, "AutoConnect");
-        _ = _registrationSvc.LogEventAsync("Connect", "AutoConnect", tunnelName, wanIp, ct);
+        // Prefer the actual logged-in Windows user (see RegistrationManager.GetLastKnownUsername)
+        // over the "AutoConnect" trigger label — the label isn't useful on the admin client list's
+        // "Last user" column, and the real username is fresh since the tray polls every 5s.
+        var connectedBy = _registration.GetLastKnownUsername() ?? "AutoConnect";
+        _state.SetConnected(tunnelName, connectedBy);
+        _ = _registrationSvc.LogEventAsync("Connect", connectedBy, tunnelName, wanIp, ct);
 
         _ = Task.Run(() => _registrationSvc.RunPhase2Async(tunnelName, ct), ct);
     }

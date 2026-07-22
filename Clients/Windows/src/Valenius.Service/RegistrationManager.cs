@@ -17,6 +17,18 @@ public class RegistrationManager
     public string? GetServerProfileName() => _serverProfileName;
     public void SetServerProfileName(string? name) => _serverProfileName = name;
 
+    // Last real interactive Windows username seen on any pipe call (PipeServer refreshes this on
+    // every command, including the tray's 5s Status poll, so it's rarely more than a few seconds
+    // stale). Used so admin/system-triggered connect events (PendingConnect, AutoConnect, etc.) log
+    // who was actually using the machine instead of the internal trigger-source label — that label
+    // alone was showing up as "Last user" on the admin client list, which isn't useful there.
+    private volatile string? _lastKnownUsername;
+    public string? GetLastKnownUsername() => _lastKnownUsername;
+    public void SetLastKnownUsername(string? username)
+    {
+        if (!string.IsNullOrEmpty(username)) _lastKnownUsername = username;
+    }
+
     // Health probe URLs for connectivity verification (spec §3).
     // ServerVpnIp is kept in memory only and never written to disk — it is
     // internal network topology that should not be persisted locally.
@@ -27,12 +39,28 @@ public class RegistrationManager
     public void SetServerHealthUrl(string? url) => _serverHealthUrl = url;
     public void SetServerVpnIp(string? ip)      => _serverVpnIp     = ip;
 
-    // Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported via /info and
-    // relayed by the backend. In-memory only, refreshed on every heartbeat. Used by the
-    // pre-connect LAN-conflict check to detect the remote network for full-tunnel profiles.
-    private volatile string[] _remoteLanCidrs = [];
-    public string[] GetRemoteLanCidrs() => _remoteLanCidrs;
-    public void SetRemoteLanCidrs(string[]? cidrs) => _remoteLanCidrs = cidrs ?? [];
+    // Per-profile physical LAN CIDR(s) behind that profile's own sidecar, self-reported via
+    // /info and relayed by the backend. In-memory only, refreshed on every heartbeat. Used by
+    // the pre-connect LAN-conflict check to detect the remote network for full-tunnel profiles.
+    // MUST stay keyed by profile name — the native server profile and each foreign profile each
+    // report their OWN source customer's LAN; applying one profile's CIDRs to a different
+    // profile's connect would misattribute a conflict (a real bug found in testing).
+    private volatile Dictionary<string, string[]> _remoteLanCidrsByProfile =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public void SetRemoteLanCidrs(IEnumerable<(string ProfileName, string[] Cidrs)>? entries)
+    {
+        var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, cidrs) in entries ?? [])
+            if (!string.IsNullOrEmpty(name) && cidrs.Length > 0)
+                map[name] = cidrs;
+        _remoteLanCidrsByProfile = map;
+    }
+
+    /// <summary>The remote LAN CIDR(s) reported for <paramref name="profileName"/>'s own sidecar,
+    /// or an empty array when none are known for that specific profile.</summary>
+    public string[] GetRemoteLanCidrs(string profileName) =>
+        _remoteLanCidrsByProfile.TryGetValue(profileName, out var cidrs) ? cidrs : [];
 
     private volatile bool _skipConnectivityCheck;
     public bool GetSkipConnectivityCheck()       => _skipConnectivityCheck;

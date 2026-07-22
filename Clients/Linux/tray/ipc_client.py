@@ -22,6 +22,13 @@ class IpcError(Exception):
     pass
 
 
+class LanConflictError(IpcError):
+    """Raised when a Connect is refused because this machine's own local LAN
+    overlaps a network reachable through the VPN (or the VPN-assigned IP itself).
+    Mirrors Windows' PipeResponse.IsLanConflict -> LanConflictForm split."""
+    pass
+
+
 def _send(cmd: PipeCommand, timeout: int = TIMEOUT) -> PipeResponse:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -50,6 +57,8 @@ def get_status() -> TunnelStatus:
 def connect(profile_name: Optional[str] = None) -> None:
     resp = _send(PipeCommand(Command=CommandType.Connect, ProfileName=profile_name))
     if not resp.Success:
+        if resp.IsLanConflict:
+            raise LanConflictError(resp.Error or "Connect failed.")
         raise IpcError(resp.Error or "Connect failed.")
 
 

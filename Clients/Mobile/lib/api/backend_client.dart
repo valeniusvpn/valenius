@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
 
 import 'models.dart';
 
@@ -38,6 +39,12 @@ abstract interface class BackendApi {
 
   /// POST /api/clients/offline — mark this client offline (on background/exit).
   Future<void> reportOffline();
+
+  /// POST /api/clients/event — same wire event the desktop/Linux/macOS clients send on
+  /// Connect/Disconnect/gateway-Verified. Drives the admin client list's presence/connected
+  /// indicators (WgTunnelTracker) — without this, the app was invisible to that tracking
+  /// entirely. Best-effort; failures are swallowed by the caller, matching the other clients.
+  Future<void> logEvent(String eventType, String tunnelName);
 
   /// GET /api/version — side-effect-free reachability probe for the "Backend check"
   /// menu item (the same public endpoint the Windows tray's About check uses).
@@ -100,6 +107,13 @@ class BackendClient implements BackendApi {
     required bool trayRunning,
     String? hostname,
   }) async {
+    // The app version shown in the admin panel ("Client ver") — every other client sends this
+    // on every register call (Windows/Linux/macOS all populate RegisterRequest.Version), but the
+    // mobile client never did, so Client.ClientVersion stayed permanently null/blank for every
+    // mobile device regardless of what was actually installed. PackageInfo reads the installed
+    // APK/IPA's own version, so this always reflects what's really running, same as the About
+    // dialog (about_dialog.dart) — not a build-time constant that could go stale.
+    final appVersion = (await PackageInfo.fromPlatform()).version;
     final res = await _http.post(
       Uri.parse('$baseUrl/api/clients/register'),
       headers: _jsonHeaders,
@@ -114,6 +128,7 @@ class BackendClient implements BackendApi {
         'userSid': '',
         'trayRunning': trayRunning,
         'platform': _clientPlatform,
+        'version': appVersion,
       }),
     ).timeout(_timeout);
     if (res.statusCode != 200) {
@@ -212,6 +227,22 @@ class BackendClient implements BackendApi {
       Uri.parse('$baseUrl/api/clients/offline'),
       headers: _jsonHeaders,
       body: jsonEncode({'clientKey': clientKey}),
+    ).timeout(_timeout);
+  }
+
+  @override
+  Future<void> logEvent(String eventType, String tunnelName) async {
+    await _http.post(
+      Uri.parse('$baseUrl/api/clients/event'),
+      headers: _jsonHeaders,
+      body: jsonEncode({
+        'clientKey': clientKey,
+        'eventType': eventType,
+        'username': '',
+        'tunnelName': tunnelName,
+        'lanIp': '',
+        'wanIp': '',
+      }),
     ).timeout(_timeout);
   }
 

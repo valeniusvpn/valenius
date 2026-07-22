@@ -108,6 +108,26 @@ public static class WireGuardHelper
     }
 
     /// <summary>
+    /// Builds the AllowedIPs value for a FOREIGN sidecar profile. Must never fall back to the
+    /// source customer's own AllowedIPs/full-tunnel default — that's the native default for that
+    /// customer's OWN users, and a foreign profile is borrowed access to someone else's network,
+    /// not the client's own primary VPN. A full-tunnel foreign profile would route ALL of the
+    /// client's traffic through a network it doesn't own just to reach one customer's resources.
+    /// Scoped to exactly what's needed to reach this sidecar: its own transit subnet (which also
+    /// covers the gateway /health probe target — no separate gateway-/32 injection needed) plus
+    /// its physical LAN CIDR(s) (<see cref="Customer.SidecarLanCidrs"/>, self-reported via /info),
+    /// if known.
+    /// </summary>
+    public static string ForeignAllowedIPs(string? transitSubnetCidr, string? sidecarLanCidrs)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(transitSubnetCidr)) parts.Add(transitSubnetCidr);
+        if (!string.IsNullOrEmpty(sidecarLanCidrs))
+            parts.AddRange(sidecarLanCidrs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        return parts.Count > 0 ? string.Join(", ", parts.Distinct()) : (transitSubnetCidr ?? "");
+    }
+
+    /// <summary>
     /// Ensures the VPN gateway IP is reachable through the tunnel for split-tunnel configs.
     /// When AllowedIPs does NOT cover all IPv4 traffic (i.e. does not contain 0.0.0.0/0),
     /// prepends "gatewayIp/32" so the Phase-2 connectivity probe can reach the server

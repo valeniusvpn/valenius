@@ -55,14 +55,22 @@ internal record ClientStatusResponse(
     /// authenticated with the old key). The service persists it and uses it for subsequent
     /// requests. Null in the normal case.</summary>
     string? ClientApiKey = null,
-    /// <summary>Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported by the
-    /// sidecar. Used by the pre-connect LAN-conflict check to detect the remote network even
-    /// for full-tunnel (0.0.0.0/0) profiles. Null/empty when unknown.</summary>
-    string[]? RemoteLanCidrs = null);
+    /// <summary>Per-profile physical LAN CIDR(s) behind that profile's sidecar, self-reported by the
+    /// sidecar. Scoped to the profile whose sidecar reports them — the native server profile (this
+    /// client's own customer) and each foreign profile (its own source customer) each get their
+    /// own entry. Used by the pre-connect LAN-conflict check to detect the remote network even for
+    /// full-tunnel (0.0.0.0/0) profiles. Mirrors the per-profile shape of GatewayProfiles — never
+    /// apply one profile's entry to a different profile's connect.</summary>
+    LanCidrProfileEntry[]? RemoteLanCidrsByProfile = null,
+    /// <summary>When true, run the local repair checks immediately instead of waiting for the next
+    /// service restart — currently the data-directory ACL self-heal. A generic hook other
+    /// client-side repairs can join later. One-shot — cleared server-side after being sent.</summary>
+    bool PendingConfigRepair = false);
 
 internal record PendingForeignConfigEntry(string FileName, string Content);
 internal record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
-internal record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "");
+internal record LanCidrProfileEntry(string ProfileName, string[] Cidrs);
+internal record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "", string? Detail = null);
 internal record PendingConfigResponse(string FileName, string Content);
 internal record MfaEnrollConfirmRequest(string ClientKey, string Code);
 
@@ -77,4 +85,5 @@ internal record MfaEnrollConfirmRequest(string ClientKey, string Code);
 [JsonSerializable(typeof(TrustedNetworkEntry[]))]
 [JsonSerializable(typeof(PendingForeignConfigEntry[]))]
 [JsonSerializable(typeof(GatewayProfileEntry[]))]
+[JsonSerializable(typeof(LanCidrProfileEntry[]))]
 internal partial class ServiceJsonContext : JsonSerializerContext { }

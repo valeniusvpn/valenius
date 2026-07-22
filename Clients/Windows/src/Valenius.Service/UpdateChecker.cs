@@ -16,6 +16,11 @@ public class UpdateChecker : BackgroundService
     private readonly SemaphoreSlim _downloadLock = new(1, 1);
     private volatile VersionCheckResult? _lastResult;
 
+    /// <summary>Old-installer paths we've already warned about failing to delete — logged once per
+    /// path (not every hourly cycle) so a persistently stuck file doesn't spam the Event Log
+    /// forever. Cleared when a path is successfully deleted, so a future recurrence warns again.</summary>
+    private readonly HashSet<string> _warnedStuckInstallers = new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly string UpdatesDir =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "Valenius", "updates");
@@ -138,8 +143,7 @@ public class UpdateChecker : BackgroundService
             foreach (var old in Directory.EnumerateFiles(UpdatesDir, "*.exe")
                 .Where(f => !string.Equals(f, installerPath, StringComparison.OrdinalIgnoreCase)))
             {
-                try   { File.Delete(old); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Could not delete old installer {Path}", old); }
+                TryDeleteOldInstaller(old);
             }
 
             // Disconnect all active WireGuard tunnels before the installer runs.
@@ -176,6 +180,68 @@ public class UpdateChecker : BackgroundService
         {
             _downloadLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Sweeps every leftover installer .exe under updates\ and retries deleting each — unlike the
+    /// cleanup inside <see cref="CheckAndApplyUpdateAsync"/>, this runs on demand regardless of
+    /// whether a newer version is currently available, so a file a permission fix just unblocked
+    /// (e.g. via "Repair client config") gets a fresh delete attempt immediately instead of
+    /// waiting for the next real update to happen to trigger cleanup as a side effect.
+    /// </summary>
+    public void CleanupStaleInstallers()
+    {
+        foreach (var old in Directory.EnumerateFiles(UpdatesDir, "*.exe"))
+            TryDeleteOldInstaller(old);
+    }
+
+    /// <summary>
+    /// Best-effort delete of a leftover installer .exe. On failure: first clears a ReadOnly
+    /// attribute if set (the same File.Delete "Access is denied" message covers both a genuine
+    /// ACL denial and a read-only-attributed file — AV products, e.g. Bitdefender per
+    /// StateFileWriter's doc comment, are known to leave files under this tree read-only), then
+    /// falls back to the safe (non-invasive, DACL-only — never the ownership-takeover escalation,
+    /// which stays opt-in via the admin "Repair client config" action) self-heal and retries.
+    /// Still-stuck files are warned about only once (not every hourly cycle) via
+    /// <see cref="_warnedStuckInstallers"/> — they'll be caught for real by an admin running
+    /// "Repair client config", or the next automatic startup self-heal.
+    /// </summary>
+    private void TryDeleteOldInstaller(string path)
+    {
+        try
+        {
+            ClearReadOnlyIfSet(path);
+            File.Delete(path);
+            _warnedStuckInstallers.Remove(path);
+            return;
+        }
+        catch (Exception ex)
+        {
+            DataDirSelfHeal.EnsureAccessible(DataDirHealthService.DataDir, _logger);
+            try
+            {
+                ClearReadOnlyIfSet(path);
+                File.Delete(path);
+                _warnedStuckInstallers.Remove(path);
+                _logger.LogInformation("Deleted old installer {Path} after a self-heal retry.", path);
+            }
+            catch (Exception ex2)
+            {
+                if (_warnedStuckInstallers.Add(path))
+                    _logger.LogWarning(ex2, "Could not delete old installer {Path} (first exception: {FirstError}).", path, ex.Message);
+            }
+        }
+    }
+
+    /// <summary>Clears FileAttributes.ReadOnly if set. Same helper as CleanupOldLaunchScripts uses
+    /// for run-update*.cmd — File.Delete/File.Open throw the identical "Access is denied"
+    /// UnauthorizedAccessException for a read-only-attributed file as for a genuine ACL denial, and
+    /// AV products are known to leave files under this tree read-only (see StateFileWriter).</summary>
+    private static void ClearReadOnlyIfSet(string path)
+    {
+        var attr = File.GetAttributes(path);
+        if (attr.HasFlag(FileAttributes.ReadOnly))
+            File.SetAttributes(path, attr & ~FileAttributes.ReadOnly);
     }
 
     private const string UpdateTaskName = "ValeniusAutoUpdate";
@@ -235,9 +301,7 @@ public class UpdateChecker : BackgroundService
             {
                 try
                 {
-                    var attr = File.GetAttributes(old);
-                    if (attr.HasFlag(FileAttributes.ReadOnly))
-                        File.SetAttributes(old, attr & ~FileAttributes.ReadOnly);
+                    ClearReadOnlyIfSet(old);
                     File.Delete(old);
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Could not remove old launch script {Path}", old); }

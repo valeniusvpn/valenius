@@ -217,7 +217,9 @@ public class ClientRegistrationService : BackgroundService
         _registration.SetServerProfileName(result.ServerProfileName);
         _registration.SetServerHealthUrl(result.ServerHealthUrl);
         _registration.SetServerVpnIp(result.ServerVpnIp);
-        _registration.SetRemoteLanCidrs(result.RemoteLanCidrs);
+        _registration.SetRemoteLanCidrs(
+            (result.RemoteLanCidrsByProfile ?? [])
+            .Select(e => (e.ProfileName, e.Cidrs)));
         _registration.SetSkipConnectivityCheck(result.SkipConnectivityCheck);
         _registration.SetGatewayProfiles(
             (result.GatewayProfiles ?? [])
@@ -319,6 +321,34 @@ public class ClientRegistrationService : BackgroundService
             _logger.LogInformation("Log upload requested by admin — collecting Valenius logs.");
             _ = Task.Run(() => TriggerLogUploadAsync("Admin", ct), ct);
         }
+
+        if (result.PendingConfigRepair)
+        {
+            _logger.LogInformation("Client config repair requested by admin — running data-dir ACL self-heal.");
+            _ = Task.Run(async () =>
+            {
+                // allowOwnershipTakeover:true only here — an admin explicitly asked for this repair,
+                // so if a plain DACL reset isn't enough (e.g. a file's OWNER, not just its DACL,
+                // drifted away from SYSTEM) escalate to forcibly reclaiming ownership via takeown.exe.
+                var outcome = DataDirSelfHeal.EnsureAccessible(DataDirHealthService.DataDir, _logger, allowOwnershipTakeover: true);
+                switch (outcome)
+                {
+                    case DataDirSelfHeal.Result.Failed:
+                        await ReportConfigRepairFailedAsync(DataDirSelfHeal.FailureDetail ?? "ACL self-heal failed.", ct);
+                        break;
+                    case DataDirSelfHeal.Result.RepairedViaOwnershipTakeover:
+                        await ReportOwnershipReclaimedAsync(ct);
+                        break;
+                }
+
+                // A permission/attribute fix alone doesn't retry any delete that already failed —
+                // UpdateChecker's own cleanup only runs as a side effect of an actual update check
+                // finding a newer version. Sweep leftover installer .exes now so a fix here is
+                // immediately visible instead of waiting for the next real update to happen to
+                // trigger cleanup.
+                _updater.CleanupStaleInstallers();
+            }, ct);
+        }
     }
 
     /// <summary>
@@ -398,8 +428,14 @@ public class ClientRegistrationService : BackgroundService
                 return;
             }
 
-            _state.SetConnected(tunnelName, "PendingConnect");
-            _ = LogEventAsync("Connect", "PendingConnect", tunnelName, wanIp, ct);
+            // Prefer the actual logged-in Windows user (cached from the last pipe call — the tray's
+            // 5s Status poll keeps this fresh) over the "PendingConnect" trigger label: the label
+            // is meaningless on the admin client list's "Last user" column, whereas the real
+            // username is exactly what an admin wants to see there. Falls back to the label only
+            // when no interactive user has ever been observed (e.g. before the tray first connects).
+            var connectedBy = _registration.GetLastKnownUsername() ?? "PendingConnect";
+            _state.SetConnected(tunnelName, connectedBy);
+            _ = LogEventAsync("Connect", connectedBy, tunnelName, wanIp, ct);
 
             _ = Task.Run(() => RunPhase2Async(tunnelName, ct), ct);
         }
@@ -507,6 +543,13 @@ public class ClientRegistrationService : BackgroundService
                 {
                     _state.SetVerified(tunnelName, viaGateway: true);
                     _logger.LogInformation("Gateway connectivity verified for '{Tunnel}'.", tunnelName);
+                    // Only the gateway-verified path reports upstream — this is what lets the
+                    // admin client list's "connected" star require actual verification for
+                    // gateway-eligible (Pro sidecar) clients. The handshake-only path below is
+                    // deliberately NOT reported: WireGuard's own rekey timers mean handshake
+                    // freshness isn't a reliable enough signal, so those clients keep the backend's
+                    // simpler "peer registered as connected" behavior instead.
+                    _ = LogEventAsync("Verified", "", tunnelName, null, ct);
                     return;
                 }
                 _logger.LogInformation(
@@ -548,6 +591,63 @@ public class ClientRegistrationService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to log {EventType} event to backend.", eventType);
+        }
+    }
+
+    /// <summary>Reports a client-side repair failure to the backend so it's surfaced on
+    /// Admin/Alerts — used when a local self-heal (currently: the data-directory ACL repair) runs
+    /// and still can't fully fix the problem, which can indicate the machine's local state was
+    /// tampered with rather than an ordinary permission glitch. Best-effort: a network failure here
+    /// is logged and swallowed, same as <see cref="LogEventAsync"/> — the underlying problem is
+    /// already logged locally by the caller regardless of whether this report lands.</summary>
+    public async Task ReportConfigRepairFailedAsync(string detail, CancellationToken ct = default)
+    {
+        try
+        {
+            var backendUrl = _backendUrl.Current;
+            if (string.IsNullOrEmpty(backendUrl)) return;
+
+            var http     = _httpFactory.CreateClient("Registration");
+            var clientId = await _registration.GetOrCreateClientIdAsync();
+            var request  = new LogEventRequest(clientId.ToString(), "ConfigRepairFailed", "", "", "", "", detail);
+            await http.PostAsJsonAsync(
+                $"{backendUrl}/api/clients/event",
+                request,
+                ServiceJsonContext.Default.LogEventRequest,
+                ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to report config-repair failure to backend.");
+        }
+    }
+
+    /// <summary>Reports to the backend that a config repair only succeeded after forcibly
+    /// reclaiming ownership of the data directory (see DataDirSelfHeal.Result.RepairedViaOwnershipTakeover)
+    /// — the repair itself worked and the user is unaffected, but an object under a folder only
+    /// SYSTEM should ever write to had lost SYSTEM ownership, which is unusual enough to be worth
+    /// an admin's attention (AV/backup-tool interference, a stale legacy issue, or tampering).
+    /// Best-effort, same as <see cref="ReportConfigRepairFailedAsync"/>.</summary>
+    public async Task ReportOwnershipReclaimedAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var backendUrl = _backendUrl.Current;
+            if (string.IsNullOrEmpty(backendUrl)) return;
+
+            var http     = _httpFactory.CreateClient("Registration");
+            var clientId = await _registration.GetOrCreateClientIdAsync();
+            var request  = new LogEventRequest(clientId.ToString(), "OwnershipReclaimed", "", "", "", "",
+                $"Data-directory ownership was forcibly reclaimed by SYSTEM to complete a config repair ({DataDirHealthService.DataDir}).");
+            await http.PostAsJsonAsync(
+                $"{backendUrl}/api/clients/event",
+                request,
+                ServiceJsonContext.Default.LogEventRequest,
+                ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to report ownership-reclaimed event to backend.");
         }
     }
 

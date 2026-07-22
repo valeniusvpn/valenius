@@ -87,6 +87,87 @@ else
     </details>
 }
 
+<!-- ── Client repair reports ────────────────────────────────────────────── -->
+@{
+    var needsAttention = Model.UnacknowledgedClientAlerts.Where(a => !a.IsInformational).ToList();
+    var informational  = Model.UnacknowledgedClientAlerts.Where(a =>  a.IsInformational).ToList();
+}
+@if (needsAttention.Count > 0)
+{
+    <div class="alert alert-warning py-2 mb-3" style="max-width:760px;">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        <strong>@needsAttention.Count client(s) could not self-repair.</strong>
+        A client ran its local repair checks and could not fully fix the problem itself — this can
+        mean the machine's local state was tampered with (not just an ordinary permission glitch).
+        Review each one below.
+    </div>
+}
+@if (informational.Count > 0)
+{
+    <div class="alert alert-info py-2 mb-3" style="max-width:760px;">
+        <i class="bi bi-info-circle me-1"></i>
+        <strong>@informational.Count client(s) needed a forced ownership repair.</strong>
+        The repair succeeded automatically and the user was unaffected — shown here because an
+        object under a folder only SYSTEM should ever write to had lost SYSTEM ownership, which is
+        unusual and worth knowing about if it recurs.
+    </div>
+}
+
+@foreach (var alert in Model.UnacknowledgedClientAlerts)
+{
+    var danger = !alert.IsInformational;
+    <div class="card @(danger ? "border-warning" : "border-info") mb-3" style="max-width:760px;">
+        <div class="card-header @(danger ? "bg-warning" : "bg-info") bg-opacity-10 d-flex align-items-center justify-content-between">
+            <span>
+                <i class="bi @(danger ? "bi-exclamation-diamond text-warning" : "bi-info-circle text-info") me-2"></i>
+                <a asp-page="/Admin/Details" asp-route-id="@alert.ClientId">@alert.ClientName</a>
+                — @alert.Label
+            </span>
+            <form method="post" asp-page-handler="AcknowledgeClientAlert" asp-route-id="@alert.Id">
+                <button type="submit" class="btn @(danger ? "btn-outline-warning" : "btn-outline-info") btn-sm">
+                    <i class="bi bi-check2 me-1"></i>Acknowledge
+                </button>
+            </form>
+        </div>
+        <div class="card-body">
+            <dl class="row mb-0 small">
+                <dt class="col-sm-3">Time</dt>
+                <dd class="col-sm-9">@alert.CreatedAt.ToVienna().ToString("dd.MM.yyyy HH:mm") (Vienna)</dd>
+                @if (!string.IsNullOrEmpty(alert.Detail))
+                {
+                    <dt class="col-sm-3">Detail</dt>
+                    <dd class="col-sm-9"><code class="small">@alert.Detail</code></dd>
+                }
+            </dl>
+        </div>
+    </div>
+}
+
+@if (Model.AcknowledgedClientAlerts.Count > 0)
+{
+    <details class="mb-4" style="max-width:760px;">
+        <summary class="text-muted small mb-2" style="cursor:pointer;">
+            Show @Model.AcknowledgedClientAlerts.Count acknowledged client alert(s)
+        </summary>
+        <div class="table-responsive mt-2">
+            <table class="table table-sm table-hover mb-0">
+                <thead><tr><th>Client</th><th>Kind</th><th>Time</th><th>Detail</th></tr></thead>
+                <tbody>
+                @foreach (var a in Model.AcknowledgedClientAlerts)
+                {
+                    <tr class="text-muted">
+                        <td><a asp-page="/Admin/Details" asp-route-id="@a.ClientId">@a.ClientName</a></td>
+                        <td class="small">@a.Label</td>
+                        <td class="text-nowrap small">@a.CreatedAt.ToVienna().ToString("dd.MM.yyyy HH:mm")</td>
+                        <td><code class="small">@a.Detail</code></td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    </details>
+}
+
 <!-- ── CA certificate download ──────────────────────────────────────────── -->
 <div class="card mb-3" style="max-width:760px;">
     <div class="card-header">

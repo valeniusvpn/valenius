@@ -43,7 +43,7 @@ class StatusResponse {
     required this.mfaApproveNumber,
     required this.pendingApprovals,
     required this.logUploadRequested,
-    required this.remoteLanCidrs,
+    required this.remoteLanCidrsByProfile,
     this.clientApiKey,
   });
 
@@ -78,7 +78,10 @@ class StatusResponse {
           .map((e) => PendingApproval.fromJson(e as Map<String, dynamic>))
           .toList(),
       logUploadRequested: m.boolean('logUploadRequested'),
-      remoteLanCidrs: m.list('remoteLanCidrs').map((e) => e as String).toList(),
+      remoteLanCidrsByProfile: m
+          .list('remoteLanCidrsByProfile')
+          .map((e) => LanCidrProfile.fromJson(e as Map<String, dynamic>))
+          .toList(),
       clientApiKey: m.string('clientApiKey'),
     );
   }
@@ -109,11 +112,14 @@ class StatusResponse {
   /// When true the client uploads its (app-only, redacted) logs to the backend.
   final bool logUploadRequested;
 
-  /// Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported by the sidecar.
-  /// Used by the pre-connect LAN-conflict check to detect the remote network even for
-  /// full-tunnel (0.0.0.0/0) profiles. Empty when unknown (External customers, or a sidecar
-  /// not yet upgraded).
-  final List<String> remoteLanCidrs;
+  /// Per-profile physical LAN CIDR(s) behind that profile's own sidecar, self-reported by
+  /// the sidecar. Scoped to the profile whose sidecar reports them — the native server
+  /// profile and each foreign profile each get their own entry. Used by the pre-connect
+  /// LAN-conflict check to detect the remote network even for full-tunnel (0.0.0.0/0)
+  /// profiles. Empty when unknown (External customers, or a sidecar not yet upgraded).
+  /// Mirrors [gatewayProfiles]'s per-profile shape — never apply one profile's entry to a
+  /// different profile's connect.
+  final List<LanCidrProfile> remoteLanCidrsByProfile;
 
   /// New client API key sent during a backend key rotation (only while this device is
   /// still on the previous key). The app persists it to secure storage and uses it for
@@ -170,6 +176,26 @@ class GatewayProfile {
   final String profileName;
   final String gatewayIp;
   final int healthPort;
+}
+
+/// Per-profile remote LAN CIDR(s) (`LanCidrProfileEntry`) — the profile's own sidecar's
+/// physical LAN, self-reported via /info. Mirrors [GatewayProfile]'s per-profile shape.
+class LanCidrProfile {
+  LanCidrProfile({
+    required this.profileName,
+    required this.cidrs,
+  });
+
+  factory LanCidrProfile.fromJson(Map<String, dynamic> json) {
+    final m = CiMap(json);
+    return LanCidrProfile(
+      profileName: m.string('profileName') ?? '',
+      cidrs: m.list('cidrs').map((e) => e as String).toList(),
+    );
+  }
+
+  final String profileName;
+  final List<String> cidrs;
 }
 
 /// A staged config delivered inline (`PendingConfigResponse` /

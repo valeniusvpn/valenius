@@ -8,6 +8,10 @@
 #   --sign-installer "Developer ID Installer: NAME (TEAMID)" sign the product pkg
 #   --notary-profile <name>   notarytool keychain profile (implies notarize + staple)
 #   --skip-notarize           build signed but don't notarize (fast local RC iteration)
+#   --quick-config-url <url>  bake a default backend URL into the app, applied by triple-clicking
+#                             the logo in the first-run setup dialog. Mirrors the mobile client's
+#                             --dart-define=VALENIUS_QUICK_CONFIG_URL. Omit for OSS/dev builds —
+#                             never bake the managed-cloud host into a publishable build script.
 #
 # With no signing options it produces an UNSIGNED pkg for local dev testing (installer CLI as
 # root installs it fine; Gatekeeper would block a double-click). Real fleet releases MUST be
@@ -24,13 +28,14 @@ VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then echo "usage: $0 <version> [options]" >&2; exit 1; fi
 shift
 
-SIGN_APP=""; SIGN_INSTALLER=""; NOTARY_PROFILE=""; SKIP_NOTARIZE=0
+SIGN_APP=""; SIGN_INSTALLER=""; NOTARY_PROFILE=""; SKIP_NOTARIZE=0; QUICK_CONFIG_URL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sign-app) SIGN_APP="$2"; shift 2 ;;
         --sign-installer) SIGN_INSTALLER="$2"; shift 2 ;;
         --notary-profile) NOTARY_PROFILE="$2"; shift 2 ;;
         --skip-notarize) SKIP_NOTARIZE=1; shift ;;
+        --quick-config-url) QUICK_CONFIG_URL="$2"; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -53,12 +58,21 @@ SUPPORT="Library/Application Support/Valenius"
 # place and restore on exit so the working tree stays clean.
 DAEMON_MAIN="$root/ValeniusDaemon/Sources/ValeniusDaemon/BackendClient.swift"
 APP_DELEGATE="$root/ValeniusApp/Sources/ValeniusApp/AppDelegate.swift"
+QUICK_CONFIG="$root/ValeniusApp/Sources/ValeniusApp/QuickConfig.swift"
 cp "$DAEMON_MAIN" "$build/BackendClient.swift.bak"
 cp "$APP_DELEGATE" "$build/AppDelegate.swift.bak"
-restore() { cp "$build/BackendClient.swift.bak" "$DAEMON_MAIN"; cp "$build/AppDelegate.swift.bak" "$APP_DELEGATE"; }
+cp "$QUICK_CONFIG" "$build/QuickConfig.swift.bak"
+restore() {
+    cp "$build/BackendClient.swift.bak" "$DAEMON_MAIN"
+    cp "$build/AppDelegate.swift.bak" "$APP_DELEGATE"
+    cp "$build/QuickConfig.swift.bak" "$QUICK_CONFIG"
+}
 trap 'restore; rm -rf "$build"' EXIT
 /usr/bin/sed -i '' -E "s/let daemonVersion = \"[^\"]*\"/let daemonVersion = \"$VERSION\"/" "$DAEMON_MAIN"
 /usr/bin/sed -i '' -E "s/let appVersion = \"[^\"]*\"/let appVersion = \"$VERSION\"/" "$APP_DELEGATE"
+if [[ -n "$QUICK_CONFIG_URL" ]]; then
+    /usr/bin/sed -i '' -E "s#let quickConfigUrl = \"[^\"]*\"#let quickConfigUrl = \"$QUICK_CONFIG_URL\"#" "$QUICK_CONFIG"
+fi
 
 # ── 2. Universal release builds ─────────────────────────────────────────────────────────────
 echo "Building daemon (universal)…"

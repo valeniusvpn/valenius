@@ -29,10 +29,13 @@ actor DaemonState {
     private var serverProfileName: String?
     private var serverVpnIp: String?
     private var serverHealthPort: Int = 8443
-    /// Physical LAN CIDR(s) behind a Valenius-managed sidecar, self-reported via /info and
-    /// relayed by the backend. Refreshed on every heartbeat/poll. Used by the pre-connect
-    /// LAN-conflict check to detect the remote network for full-tunnel profiles.
-    private var remoteLanCidrs: [String] = []
+    /// Per-profile physical LAN CIDR(s) behind that profile's own sidecar, self-reported via
+    /// /info and relayed by the backend. Refreshed on every heartbeat/poll. Used by the
+    /// pre-connect LAN-conflict check to detect the remote network for full-tunnel profiles.
+    /// Keyed by profile name — the native server profile and each foreign profile each
+    /// report their OWN source customer's LAN; applying one profile's CIDRs to a different
+    /// profile's connect would misattribute a conflict (a real bug found in testing).
+    private var remoteLanCidrsByProfile: [String: [String]] = [:]
     private var skipConnectivityCheck = false
     private var heartbeatIntervalMinutes: Int = 5
     private var appLastSeen: Date?
@@ -200,8 +203,19 @@ actor DaemonState {
         serverHealthPort = healthPort
     }
 
-    func setRemoteLanCidrs(_ cidrs: [String]) { remoteLanCidrs = cidrs }
-    func getRemoteLanCidrs() -> [String] { remoteLanCidrs }
+    /// `entries`: (profileName, cidrs) pairs from RemoteLanCidrsByProfile.
+    func setRemoteLanCidrs(_ entries: [(profileName: String, cidrs: [String])]) {
+        var map: [String: [String]] = [:]
+        for (name, cidrs) in entries where !name.isEmpty && !cidrs.isEmpty { map[name] = cidrs }
+        remoteLanCidrsByProfile = map
+    }
+
+    /// The remote LAN CIDR(s) reported for `profileName`'s own sidecar, or empty when none
+    /// are known for that specific profile.
+    func getRemoteLanCidrs(profile profileName: String?) -> [String] {
+        guard let profileName else { return [] }
+        return remoteLanCidrsByProfile[profileName] ?? []
+    }
 
     func setSkipConnectivityCheck(_ v: Bool) { skipConnectivityCheck = v }
     func getSkipConnectivityCheck() -> Bool { skipConnectivityCheck }

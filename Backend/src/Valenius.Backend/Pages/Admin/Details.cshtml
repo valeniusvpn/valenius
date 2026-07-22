@@ -193,6 +193,15 @@
                             <i class="bi bi-arrow-repeat me-1"></i>Re-provision
                         </button>
                     }
+
+                    @if (Model.Client.Platform is null or "Windows")
+                    {
+                        <button type="button" class="btn btn-outline-secondary btn-sm"
+                                data-bs-toggle="modal" data-bs-target="#modalRepairConfig"
+                                title="Fixes local client issues — e.g. an &quot;access to path ... is denied&quot; error from a corrupted permission under the client's ProgramData folder">
+                            <i class="bi bi-wrench-adjustable me-1"></i>Repair client config
+                        </button>
+                    }
                 </div>
             }
         </div>
@@ -1414,6 +1423,37 @@
 
 <!-- ── Modals ──────────────────────────────────────────────────────────── -->
 
+@if (_isAdmin && Model.Client.Platform is null or "Windows")
+{
+    <form id="formRepairConfig" method="post" asp-page-handler="RepairConfig" style="display:none;">
+        <input type="hidden" name="id" value="@Model.Client.Id" />
+    </form>
+}
+
+<div class="modal fade" id="modalRepairConfig" tabindex="-1" aria-labelledby="modalRepairConfigLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalRepairConfigLabel">
+                    <i class="bi bi-wrench-adjustable me-2 text-primary"></i>Repair client config
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Ask <strong>@Model.Client.EffectiveName</strong> to run its local repair checks (currently: re-check and fix the file permissions under its <code>C:\ProgramData\Valenius</code> folder) on its next heartbeat.</p>
+                <p class="small text-muted mb-0"><i class="bi bi-info-circle me-1"></i>Use this when the client logs an "access to path ... is denied" error (e.g. under <code>temp\</code>). It first tries a normal permission reset; if a file's <em>ownership</em> (not just its permissions) has drifted away from SYSTEM, it escalates to forcibly reclaiming ownership — no service restart or console access needed on the machine either way.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary btn-sm"
+                        onclick="document.getElementById('formRepairConfig').submit()">
+                    <i class="bi bi-wrench-adjustable me-1"></i>Repair client config
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="modalReprovision" tabindex="-1" aria-labelledby="modalReprovisionLabel" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -1424,7 +1464,7 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <p class="mb-2">Re-register <strong>@Model.Client.EffectiveName</strong> on the WireGuard® server and push a fresh configuration to the client.</p>
+                <p class="mb-2">Re-register <strong>@Model.Client.EffectiveName</strong> on the WireGuard® server and push a fresh configuration to the client — including every foreign (cross-customer) profile it holds.</p>
                 <p class="small text-muted mb-0"><i class="bi bi-info-circle me-1"></i>Existing keys and VPN IP address are preserved.</p>
             </div>
             <div class="modal-footer">

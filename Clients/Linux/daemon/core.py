@@ -163,7 +163,7 @@ class DaemonCore:
 
         # Local-LAN conflict check — mirrors Windows WireGuardController.FindLocalLanConflict /
         # macOS findLocalLanConflict. No override: the user must resolve the conflict first.
-        lan_conflict = configs_mod.find_local_lan_conflict(config_path, self.state.get_remote_lan_cidrs())
+        lan_conflict = configs_mod.find_local_lan_conflict(config_path, self.state.get_remote_lan_cidrs(tunnel_name))
         if lan_conflict:
             return _fail(lan_conflict, is_lan_conflict=True)
 
@@ -201,6 +201,17 @@ class DaemonCore:
             deadline = datetime.utcnow().timestamp() + _REVERIFY_BUDGET_S
             if await self._probe_gateway_until(ip, port, deadline):
                 self.state.set_verified(tunnel_name, via_gateway=True)
+                # Mirrors Windows' RunPhase2Async reporting a "Verified" event upstream —
+                # required so the admin client list's "connected" star (which now demands
+                # actual gateway verification for sidecar clients, not just Connect) ever
+                # lights up for Linux. Deliberately only the gateway-verified branch reports;
+                # a handshake-only pass below does NOT, matching Windows (handshake freshness
+                # isn't a reliable enough signal to gate a display indicator on).
+                asyncio.create_task(
+                    self.backend.log_event(
+                        self.state.get_client_id(), 'Verified', '', tunnel_name,
+                    )
+                )
                 return
         for _ in range(5):
             if not self.state.is_connected(tunnel_name):
@@ -388,9 +399,9 @@ class DaemonCore:
         server_health_url = resp.get('ServerHealthUrl', resp.get('serverHealthUrl'))
         self.state.set_server_gateway(server_vpn_ip, _health_port_from_url(server_health_url))
 
-        # Remote LAN CIDR(s) behind a Valenius-managed sidecar, for the pre-connect
-        # LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
-        self.state.set_remote_lan_cidrs(resp.get('RemoteLanCidrs', resp.get('remoteLanCidrs')))
+        # Per-profile remote LAN CIDR(s) behind each profile's own sidecar, for the
+        # pre-connect LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
+        self.state.set_remote_lan_cidrs(resp.get('RemoteLanCidrsByProfile', resp.get('remoteLanCidrsByProfile')))
 
         # MFA state — pass through to tray via build_tunnel_status.
         mfa_expires_raw = resp.get('MfaSessionExpiresAt', resp.get('mfaSessionExpiresAt'))

@@ -1,7 +1,7 @@
 name: valenius_mobile
 description: Valenius mobile VPN client (Android-first, iOS-ready).
 publish_to: "none"
-version: 1.11.16+4
+version: 1.11.17+5
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

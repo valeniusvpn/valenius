@@ -1,19 +1,27 @@
 namespace Valenius.Service;
 
 /// <summary>
-/// Writes the service's small JSON state files (registration.json, autoconnect.json),
-/// retrying briefly on transient <see cref="UnauthorizedAccessException"/> /
-/// <see cref="IOException"/>.
+/// Writes the service's small JSON state files (registration.json, autoconnect.json) and other
+/// SYSTEM-owned files under the data directory (e.g. the plaintext temp .conf staged for
+/// wireguard.exe), retrying briefly on transient <see cref="UnauthorizedAccessException"/> /
+/// <see cref="IOException"/> and clearing a ReadOnly attribute if the target already exists.
 ///
-/// These transient failures occur when a real-time AV scanner (e.g. Bitdefender) opens the
-/// file to scan it immediately after a write, so the service's next write momentarily
-/// collides with the scanner's handle and is denied. The ACL is correct and the data does
-/// persist on the successful attempts; this just smooths over the scan race so it does not
-/// surface as a spurious "could not persist registration state" error every few minutes.
+/// Two distinct causes produce the identical "Access to the path ... is denied"
+/// UnauthorizedAccessException here, and both are handled:
+/// 1. Transient: a real-time AV scanner (e.g. Bitdefender) opens the file to scan it immediately
+///    after a write, so the service's next write momentarily collides with the scanner's handle.
+///    The retry-with-backoff loop below covers this — the scanner releases its handle within a
+///    few ms, so a short wait and retry succeeds without any special-casing.
+/// 2. Persistent: the same AV/security software (or another process) leaves the file marked
+///    ReadOnly — File.Open/File.Delete throw the exact same exception/message for a read-only
+///    file as for a genuine ACL denial, and a read-only attribute does NOT clear itself on retry,
+///    so without explicitly clearing it every attempt would fail identically. Cleared once before
+///    the loop starts.
 ///
 /// This is NOT permission/ACL handling — permissions live on C:\ProgramData\Valenius (set
-/// once by install-service.ps1) and are inherited. If the error is genuinely persistent
-/// (e.g. a real deny), the final attempt still throws so the real problem is not masked.
+/// once by install-service.ps1) and are inherited; see DataDirSelfHeal for that. If the error is
+/// genuinely persistent beyond both of the above (e.g. a real ACL/ownership deny), the final
+/// attempt still throws so the real problem is not masked.
 /// </summary>
 internal static class StateFileWriter
 {
@@ -32,6 +40,7 @@ internal static class StateFileWriter
         {
             try
             {
+                ClearReadOnlyIfSet(path);
                 write();
                 return;
             }
@@ -43,5 +52,13 @@ internal static class StateFileWriter
                 Thread.Sleep(50 * attempt);
             }
         }
+    }
+
+    private static void ClearReadOnlyIfSet(string path)
+    {
+        if (!File.Exists(path)) return;
+        var attr = File.GetAttributes(path);
+        if (attr.HasFlag(FileAttributes.ReadOnly))
+            File.SetAttributes(path, attr & ~FileAttributes.ReadOnly);
     }
 }

@@ -96,7 +96,8 @@ actor DaemonCore {
 
     func buildTunnelStatus(username: String) async -> TunnelStatus {
         var status = await state.buildStatusSnapshot(username: username)
-        status.backendUrl = backend.baseUrl
+        status.backendUrl = await backend.baseUrl
+        status.backendUnconfigured = !(await backend.isConfigured)
         let serverProfile = await state.getServerProfileName()
         status.availableProfiles = await configs.orderProfiles(configs.profiles(for: username), serverProfileName: serverProfile)
         status.deletableProfiles = await configs.deletableProfiles(for: username)
@@ -106,6 +107,17 @@ actor DaemonCore {
     }
 
     // MARK: Commands
+
+    /// First-run: the user (app setup dialog) provides the backend DNS; the daemon prepends
+    /// https://, persists it, and kicks off registration immediately instead of waiting for the
+    /// next heartbeat cycle. Mirrors Windows ClientRegistrationService.SetBackendUrlAsync.
+    func cmdSetBackendUrl(dns: String?) async -> PipeResponse {
+        guard await backend.setBaseUrl(dns) != nil else {
+            return .fail("Enter a valid server address, for example vpn.example.com")
+        }
+        Task { await heartbeatOnce() }
+        return .ok()
+    }
 
     func cmdRegister(username: String) async -> RegistrationResult {
         let (ok, _) = await liveRegister(username: username)
@@ -182,7 +194,10 @@ actor DaemonCore {
 
         // Local-LAN conflict check — mirrors Windows FindLocalLanConflict / Linux
         // find_local_lan_conflict. No override: the user must resolve the conflict first.
-        let remoteLanCidrs = await state.getRemoteLanCidrs()
+        // MUST scope remoteLanCidrs to this specific tunnelName — applying another
+        // profile's (e.g. the native server's) reported LAN here would misattribute a
+        // conflict to an unrelated foreign profile (a real bug found in testing).
+        let remoteLanCidrs = await state.getRemoteLanCidrs(profile: tunnelName)
         if let lanConflict = await configs.findLocalLanConflict(newProfileUser: username, newProfile: tunnelName, remoteLanCidrs: remoteLanCidrs) {
             return .fail(lanConflict, isLanConflict: true)
         }
@@ -296,6 +311,14 @@ actor DaemonCore {
             let deadline = Date().addingTimeInterval(verifyBudgetSeconds)
             if await Verifier.probeGatewayUntil(ip: gateway.ip, port: gateway.port, deadline: deadline) {
                 await state.setVerified(tunnel: tunnel, viaGateway: true)
+                // Mirrors Linux/Windows reporting a "Verified" event upstream — required so the
+                // admin client list's "connected" star (which now demands actual gateway
+                // verification for sidecar clients, not just Connect) ever lights up for macOS.
+                // Deliberately only this gateway-verified branch reports; the handshake fallback
+                // below does not (handshake freshness isn't a reliable enough signal to gate a
+                // display indicator on).
+                let clientId = await state.clientId
+                Task { await backend.logEvent(clientId: clientId, eventType: "Verified", username: "", tunnelName: tunnel) }
                 return
             }
         }
@@ -418,6 +441,7 @@ actor DaemonCore {
     // MARK: Heartbeat
 
     func heartbeatOnce(username: String = "") async {
+        guard await backend.isConfigured else { return }
         let clientId = await state.clientId
         let hostname = ProcessInfo.processInfo.hostName
         let trayRunning = await state.isAppRunning()
@@ -466,10 +490,18 @@ actor DaemonCore {
         let serverHealthUrl = j.string("ServerHealthUrl")
         await state.setServerGateway(vpnIp: serverVpnIp, healthPort: healthPort(from: serverHealthUrl))
 
-        // Remote LAN CIDR(s) behind a Valenius-managed sidecar, for the pre-connect
-        // LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
-        let remoteLanCidrs = (j.array("RemoteLanCidrs") ?? []).compactMap { $0 as? String }
-        await state.setRemoteLanCidrs(remoteLanCidrs)
+        // Per-profile remote LAN CIDR(s) behind each profile's own sidecar, for the
+        // pre-connect LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case). Stays
+        // scoped per profile — see DaemonState.setRemoteLanCidrs for why.
+        let lanCidrEntries: [(profileName: String, cidrs: [String])] =
+            (j.array("RemoteLanCidrsByProfile") ?? []).compactMap { raw in
+                guard let dict = raw as? [String: Any] else { return nil }
+                let e = JsonObject(dict)
+                guard let name = e.string("ProfileName"), !name.isEmpty else { return nil }
+                let cidrs = (e.array("Cidrs") ?? []).compactMap { $0 as? String }
+                return cidrs.isEmpty ? nil : (name, cidrs)
+            }
+        await state.setRemoteLanCidrs(lanCidrEntries)
 
         // MFA state — passed through to the app via buildTunnelStatus; enroll/unlock UI is M5.
         await state.setMfaState(
@@ -585,6 +617,10 @@ actor DaemonCore {
     func heartbeatLoop() async {
         try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
         while !Task.isCancelled {
+            guard await backend.isConfigured else {
+                try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
+                continue
+            }
             await heartbeatOnce()
             let minutes = await state.getHeartbeatInterval()
             try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
@@ -598,6 +634,10 @@ actor DaemonCore {
     func pollLoop() async {
         try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
         while !Task.isCancelled {
+            guard await backend.isConfigured else {
+                try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
+                continue
+            }
             let clientId = await state.clientId
             let trayRunning = await state.isAppRunning()
             if let resp = await backend.poll(clientId: clientId, trayRunning: trayRunning) {
@@ -670,12 +710,16 @@ actor DaemonCore {
         case .sendLogs:
             Task { await uploadLogs(trigger: "User") }
             return .ok()
+
+        case .setBackendUrl:
+            return await cmdSetBackendUrl(dns: cmd.backendDns)
         }
     }
 
     // MARK: Private helpers
 
     private func liveRegister(username: String = "") async -> (Bool?, String?) {
+        guard await backend.isConfigured else { return (nil, "No backend server configured yet.") }
         let clientId = await state.clientId
         let hostname = ProcessInfo.processInfo.hostName
         let trayRunning = await state.isAppRunning()
