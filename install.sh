@@ -3,8 +3,9 @@
 #
 # Builds the backend image, generates strong random secrets, writes an .env +
 # docker-compose.yml into ./valenius, starts the stack, and prints the login
-# details on success. Mirrors documentation/docs/self-hosting/community.md —
-# keep the two in sync if you change this script.
+# details on success. See update.sh (repo root) for upgrading an existing
+# install. Mirrors documentation/docs/self-hosting/community.md — keep the two
+# in sync if you change this script.
 #
 # Usage:
 #   ./install.sh                # interactive
@@ -54,6 +55,11 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2; exit 1; }
 if git rev-parse --git-dir >/dev/null 2>&1; then
   git config core.fileMode false
 fi
+
+# Belt-and-suspenders for update.sh: make sure it's executable even if the git checkout
+# didn't preserve the bit (e.g. some tarball/CI checkouts strip it). core.fileMode above
+# means this never shows up as a tracked change either way.
+[ -f "$SCRIPT_DIR/update.sh" ] && chmod +x "$SCRIPT_DIR/update.sh"
 
 command -v docker >/dev/null 2>&1 || die "Docker is not installed or not on PATH. Install Docker Engine first."
 docker compose version >/dev/null 2>&1 || die "The 'docker compose' plugin is not available. Install/update Docker."
@@ -204,4 +210,5 @@ Next steps:
 
 To stop:    (cd $DEPLOY_DIR && docker compose down)
 To restart: (cd $DEPLOY_DIR && docker compose up -d)
+To update:  ./update.sh   (pulls the latest source, rebuilds, and restarts for you)
 EOF
