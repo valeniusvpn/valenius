@@ -1,7 +1,11 @@
-# Build context must be the REPO ROOT (mirrors Backend/Dockerfile reaching
-# Shared/Valenius.Shared/) so this can COPY the Linux daemon's core modules directly --
-# see Clients/HomeAssistant/CLAUDE.md for why this add-on reuses them unmodified instead
-# of forking a second copy.
+# Build context is THIS add-on's own folder (Clients/HomeAssistant/valenius-vpn/), not
+# the repo root -- confirmed the hard way: a manual `docker build -f ... .` from the repo
+# root built fine, but Home Assistant Supervisor's real build (context scoped to this
+# folder) failed every `COPY Clients/Linux/...` with "not found", since Docker's COPY can
+# never reach outside its build context. The Linux daemon modules this add-on reuses are
+# therefore vendored into vendor/ by scripts/sync-ha-addon.ps1 (run from the repo root,
+# NOT shipped in this add-on -- it's repo-private tooling) rather than copied directly
+# from Clients/Linux/ -- see Clients/HomeAssistant/CLAUDE.md for the full story.
 #
 # python:3.12-slim (Debian/glibc), not an Alpine base: the `cryptography` package (used
 # for the AES-256-GCM config-at-rest encryption, reused verbatim from the Linux client)
@@ -17,25 +21,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir cryptography paho-mqtt
 
-# Reused verbatim from the Linux client -- see Clients/HomeAssistant/CLAUDE.md.
-COPY Clients/Linux/daemon/core.py            /app/daemon/core.py
-COPY Clients/Linux/daemon/backend.py         /app/daemon/backend.py
-COPY Clients/Linux/daemon/config_manager.py  /app/daemon/config_manager.py
-COPY Clients/Linux/daemon/wg_manager.py      /app/daemon/wg_manager.py
-COPY Clients/Linux/daemon/state.py           /app/daemon/state.py
-COPY Clients/Linux/daemon/registration.py    /app/daemon/registration.py
-COPY Clients/Linux/daemon/auto_connect.py    /app/daemon/auto_connect.py
-COPY Clients/Linux/daemon/updater.py         /app/daemon/updater.py
+# Vendored copy of the Linux client's daemon modules -- see the note above.
 # core.py's cmd_connect/cmd_disconnect lazily import _ok()/_fail() (PipeResponse
-# builders) from here -- not the IpcServer class itself (never instantiated), but the
-# module must still be importable. Confirmed by an actual container run: omitting this
-# raised ModuleNotFoundError the first time cmd_connect() ran, not at image build time.
-COPY Clients/Linux/daemon/ipc_server.py      /app/daemon/ipc_server.py
-COPY Clients/Linux/daemon/__init__.py        /app/daemon/__init__.py
-COPY Clients/Linux/shared/                   /app/shared/
+# builders) from ipc_server.py -- not the IpcServer class itself (never instantiated),
+# but the module must still be importable; confirmed by an actual container run.
+COPY vendor/daemon/ /app/daemon/
+COPY vendor/shared/ /app/shared/
 
 # New, add-on-only code.
-COPY Clients/HomeAssistant/valenius-vpn/rootfs/app/ /app/
+COPY rootfs/app/ /app/
 
 WORKDIR /app
 ENTRYPOINT ["python3", "-u", "/app/run.py"]
