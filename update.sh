@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Updates a Valenius Community edition install created by install.sh: pulls the latest
-# source, rebuilds the backend image, and restarts the stack -- in the right order,
-# from the right directory, every time. Mirrors documentation/docs/self-hosting/community.md
-# ("Upgrading") -- keep the two in sync if you change this script.
+# Updates a Valenius install created by install.sh, whichever edition it's running:
+# pulls the latest source, then either rebuilds the Community image locally or pulls
+# the latest published Pro image, and restarts the stack -- in the right order, from
+# the right directory, every time. Edition is auto-detected from the ${IMAGE_TAG}
+# marker proupgrade.sh writes into valenius/docker-compose.yml when it converts a
+# stack to Pro. Mirrors documentation/docs/self-hosting/community.md ("Upgrading") and
+# documentation/docs/self-hosting/pro.md ("Upgrading from Community") -- keep these in
+# sync if you change this script.
 #
 # Usage:
 #   ./update.sh
@@ -24,12 +28,15 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2; exit 1; }
 [ -f "Backend/Dockerfile" ] || die "Run this from the repo root (Backend/Dockerfile not found here)."
 [ -f "$DEPLOY_DIR/docker-compose.yml" ] || die "No $DEPLOY_DIR/docker-compose.yml found here -- run ./install.sh first to set up the stack."
 
-# proupgrade.sh switches the backend service's image to ${IMAGE_TAG} (the pre-built
-# Pro image) -- rebuilding and pushing the OSS image below would be a silent no-op
-# against a Pro stack (it'd report success without ever updating the running
-# container), so refuse early instead of leaving that trap for the next admin.
+# proupgrade.sh switches the backend service's image line to ${IMAGE_TAG} (the
+# pre-built Pro image) when it converts a stack to Pro -- detect that so we rebuild
+# the OSS image locally on a Community stack, or pull the published image on a Pro
+# one, instead of silently doing the wrong thing (rebuilding OSS would be a no-op
+# against a Pro stack: it'd report success without ever updating the running
+# container).
+IS_PRO=0
 if grep -q '\${IMAGE_TAG}' "$DEPLOY_DIR/docker-compose.yml"; then
-  die "This stack is running Pro (upgraded via proupgrade.sh) -- update.sh only rebuilds the Community image and would not actually update it. Run './proupgrade.sh' again instead (it pulls the latest published Pro image and lets you refresh the license), or manually: (cd $DEPLOY_DIR && docker compose pull backend && docker compose up -d)."
+  IS_PRO=1
 fi
 
 command -v docker >/dev/null 2>&1 || die "Docker is not installed or not on PATH."
@@ -46,10 +53,15 @@ git config core.fileMode false
 log "Pulling the latest source..."
 git pull --ff-only || die "git pull failed -- you likely have local changes. Run 'git status' to see what changed, then 'git stash' (to keep them) or 'git checkout -- <file>' (to discard them) before retrying."
 
-# ── Rebuild the backend image ────────────────────────────────────────────
+# ── Update the backend image ─────────────────────────────────────────────
 
-log "Rebuilding $IMAGE_TAG from Backend/Dockerfile (this can take a few minutes)..."
-docker build -f Backend/Dockerfile -t "$IMAGE_TAG" .
+if [ "$IS_PRO" = "1" ]; then
+  log "Pro stack detected -- pulling the latest published Pro image..."
+  ( cd "$DEPLOY_DIR" && docker compose pull backend ) || die "Pull failed -- check internet access on this host."
+else
+  log "Rebuilding $IMAGE_TAG from Backend/Dockerfile (this can take a few minutes)..."
+  docker build -f Backend/Dockerfile -t "$IMAGE_TAG" .
+fi
 
 # ── Restart the stack ─────────────────────────────────────────────────────
 
@@ -72,4 +84,8 @@ if [ "$READY" != "1" ]; then
   exit 1
 fi
 
-log "Update complete -- the backend is running the newly built image."
+if [ "$IS_PRO" = "1" ]; then
+  log "Update complete -- the backend is running the newly pulled Pro image."
+else
+  log "Update complete -- the backend is running the newly built image."
+fi

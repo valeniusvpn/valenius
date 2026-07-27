@@ -23,6 +23,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<MfaSession>             MfaSessions           => Set<MfaSession>();
     public DbSet<ClientForeignProfile>   ClientForeignProfiles => Set<ClientForeignProfile>();
     public DbSet<ClientConfigArchive>    ClientConfigArchives  => Set<ClientConfigArchive>();
+    public DbSet<ClientPendingDelete>    ClientPendingDeletes  => Set<ClientPendingDelete>();
     public DbSet<ClientLogBundle>        ClientLogBundles      => Set<ClientLogBundle>();
     public DbSet<ClientRelease>          ClientReleases        => Set<ClientRelease>();
     public DbSet<PairingToken>           PairingTokens         => Set<PairingToken>();
@@ -114,6 +115,15 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             .OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<ClientConfigArchive>()
             .HasIndex(a => new { a.ClientId, a.ProfileName })
+            .IsUnique();
+
+        modelBuilder.Entity<ClientPendingDelete>()
+            .HasOne(d => d.Client)
+            .WithMany()
+            .HasForeignKey(d => d.ClientId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<ClientPendingDelete>()
+            .HasIndex(d => new { d.ClientId, d.ProfileName })
             .IsUnique();
 
         modelBuilder.Entity<ClientLogBundle>()

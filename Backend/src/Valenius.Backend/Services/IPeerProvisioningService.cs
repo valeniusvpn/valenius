@@ -30,4 +30,16 @@ public interface IPeerProvisioningService
     /// Use after a sidecar reinstall or whenever the server peer list drifts.
     /// </summary>
     Task<string> ResyncAsync(Customer customer, ApplicationDbContext db);
+
+    /// <summary>
+    /// Sweeps every profile name ever delivered to <paramref name="client"/>
+    /// (<c>ClientConfigArchive</c>) against its current authoritative set — its native
+    /// profile, if still provisioned, plus its current foreign profiles — and queues an
+    /// on-device delete for anything archived that no longer belongs. Recovers a profile
+    /// orphaned by a deletion request that got clobbered by another one racing it (see
+    /// <c>ClientPendingDelete</c>). Called from the "Re-provision" actions so a stale
+    /// profile gets swept the next time an admin re-syncs this client instead of staying
+    /// stuck forever.
+    /// </summary>
+    Task ReconcileStaleProfilesAsync(Client client);
 }

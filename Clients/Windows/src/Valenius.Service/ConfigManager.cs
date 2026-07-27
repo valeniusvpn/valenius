@@ -25,6 +25,18 @@ public class ConfigManager
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "Valenius", "temp");
 
+    /// <summary>
+    /// Machine-level store (not per-OS-user) for the Windows device tunnel: a durable copy of the
+    /// customer's own native sidecar profile that <see cref="AutoConnectService"/> can connect at
+    /// boot even when no OS user has ever logged into this machine (so no per-user directory under
+    /// <see cref="BaseDir"/> exists yet). Populated by
+    /// <see cref="ClientRegistrationService.ProcessStatusResponseAsync"/>, independent of any pipe
+    /// connection or claim flow.
+    /// </summary>
+    private static readonly string DeviceDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "Valenius", "device");
+
     private const string EncExt  = ".conf.enc";
     private const string PlainExt = ".conf";
 
@@ -32,6 +44,7 @@ public class ConfigManager
     {
         Directory.CreateDirectory(BaseDir);
         Directory.CreateDirectory(StagedDir);
+        Directory.CreateDirectory(DeviceDir);
         InitTempDir();
         MigratePlainConfigs();
     }
@@ -312,6 +325,103 @@ public class ConfigManager
                 MarkAsManaged(username, profileName);
             }
             catch { /* leave staged file for next attempt */ }
+        }
+    }
+
+    // ── Cross-OS-user profile sync (backend-authoritative) ──────────────────────
+
+    /// <summary>
+    /// Reconciles <paramref name="username"/>'s local profile folder against the backend's
+    /// authoritative set for this machine (every <c>ClientConfigArchive</c> row for this Client —
+    /// see <see cref="ClientRegistrationService.ResyncProfilesAsync"/>): saves anything missing or
+    /// changed and marks it managed, then removes any locally-managed profile no longer present
+    /// backend-side. Never touches a non-managed (private, "just for me") profile in either
+    /// direction — only entries this same reconciliation (or an admin push) previously marked
+    /// managed are ever added or pruned. Only ever touches <paramref name="username"/>'s own
+    /// directory. Callers must skip calling this when the backend round-trip itself failed, so a
+    /// transient outage never destructively prunes what's already on disk.
+    /// </summary>
+    public void SyncManagedProfiles(string username, IReadOnlyList<(string ProfileName, string Content)> authoritative)
+    {
+        var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, content) in authoritative)
+        {
+            if (ProfileNameHelper.IsValid(name))
+                byName[name] = content;
+        }
+
+        foreach (var (name, content) in byName)
+        {
+            var existingPath = GetConfigPath(username, name);
+            if (existingPath is not null && TryReadContent(existingPath) == content) continue;
+            SaveConfig(username, name, content);
+            MarkAsManaged(username, name);
+        }
+
+        var managed = LoadManaged(username);
+        var stale = managed.Where(n => !byName.ContainsKey(n)).ToList();
+        if (stale.Count == 0) return;
+
+        foreach (var name in stale)
+        {
+            foreach (var ext in new[] { PlainExt, EncExt })
+            {
+                var path = Path.Combine(GetUserDir(username), name + ext);
+                try { if (File.Exists(path)) File.Delete(path); } catch { /* best-effort, retried next sync */ }
+            }
+            managed.Remove(name);
+        }
+        SaveManaged(username, managed);
+    }
+
+    // ── Device tunnel (machine-level, not per-OS-user) ───────────────────────────
+
+    /// <summary>Encrypts and saves <paramref name="content"/> to the machine-level device-tunnel
+    /// store (not tied to any OS user), skipping the write if the stored copy is already
+    /// identical. Same DPAPI-LocalMachine encryption as <see cref="SaveConfig"/>, so
+    /// <see cref="PrepareConfigPath"/> decrypts it identically at connect time with no
+    /// special-casing needed.</summary>
+    public void SaveDeviceTunnelConfig(string profileName, string content)
+    {
+        var path = Path.Combine(DeviceDir, profileName + EncExt);
+        if (File.Exists(path) && TryReadContent(path) == content) return;
+
+        var plainBytes = System.Text.Encoding.UTF8.GetBytes(content);
+        var encBytes   = ProtectedData.Protect(plainBytes, null, DataProtectionScope.LocalMachine);
+        File.WriteAllBytes(path, encBytes);
+    }
+
+    /// <summary>Returns the stored device-tunnel config path for <paramref name="profileName"/>, or
+    /// null if none has been saved yet.</summary>
+    public string? GetDeviceTunnelConfigPath(string profileName)
+    {
+        var path = Path.Combine(DeviceDir, profileName + EncExt);
+        return File.Exists(path) ? path : null;
+    }
+
+    /// <summary>Marks an already-saved profile as managed for <paramref name="username"/> — used
+    /// when a manual upload is explicitly shared to all users on the PC (see
+    /// <see cref="ClientRegistrationService.ArchiveProfileAsync"/>), so it participates in future
+    /// <see cref="SyncManagedProfiles"/> reconciliation the same way an admin-pushed profile does.
+    /// Only call this after the backend archive call actually succeeded — marking it managed
+    /// before that would let the next sync delete the uploader's own only copy.</summary>
+    public void MarkManaged(string username, string profileName) => MarkAsManaged(username, profileName);
+
+    private static string? TryReadContent(string storedPath)
+    {
+        try
+        {
+            if (storedPath.EndsWith(EncExt, StringComparison.OrdinalIgnoreCase))
+            {
+                var encBytes   = File.ReadAllBytes(storedPath);
+                var plainBytes = ProtectedData.Unprotect(encBytes, null, DataProtectionScope.LocalMachine);
+                return System.Text.Encoding.UTF8.GetString(plainBytes);
+            }
+            return File.ReadAllText(storedPath);
+        }
+        catch
+        {
+            return null;
         }
     }
 

@@ -28,6 +28,7 @@ internal sealed class TrayPopupForm : Form
         public string  Text      = "";
         public bool    Connected;
         public bool    Verified;
+        public bool    VerificationFailed;
         public string? ProfileName;
         public bool    Enabled   = true;
         public bool    Checked;
@@ -75,6 +76,7 @@ internal sealed class TrayPopupForm : Form
     private static readonly Color CLockAmber     = Color.FromArgb(210, 160,  55);
     private static readonly Color CVerifiedPill  = Color.FromArgb(0,   200, 108);
     private static readonly Color CVerifiedText  = Color.White;
+    private const string TagConfirmationFailed = "Confirmation failed";
 
     // ── Fonts (pixel-sized, rebuilt on scale change) ──────────────────────────
 
@@ -316,14 +318,16 @@ internal sealed class TrayPopupForm : Form
                     string.Equals(t.Name, p, StringComparison.OrdinalIgnoreCase));
                 var isActive   = connectedInfo is not null;
                 var isVerified = connectedInfo?.IsVerified ?? false;
+                var verificationFailed = connectedInfo?.VerificationFailed ?? false;
                 var canDelete  = status.DeletableProfiles.Contains(p, StringComparer.OrdinalIgnoreCase);
                 var pCopy      = p;
                 _rows.Add(new Row
                 {
-                    Kind        = RowKind.Profile,
-                    Text        = p,
-                    Connected   = isActive && !mfaLocked,
-                    Verified    = isVerified && !mfaLocked,
+                    Kind               = RowKind.Profile,
+                    Text               = p,
+                    Connected          = isActive && !mfaLocked,
+                    Verified           = isVerified && !mfaLocked,
+                    VerificationFailed = verificationFailed && !isVerified && !mfaLocked,
                     ProfileName = p,
                     MfaLocked   = mfaLocked,
                     Enabled     = !mfaLocked,
@@ -520,14 +524,16 @@ internal sealed class TrayPopupForm : Form
         else
         {
             int dotY = r.Bounds.Top + (r.Bounds.Height - dotD) / 2;
-            var dotColor = r.Connected ? CDotOn : CDotOff;
+            var dotColor = r.VerificationFailed ? CLockAmber : (r.Connected ? CDotOn : CDotOff);
             using var db = new SolidBrush(dotColor);
             g.FillEllipse(db, new Rectangle(_padLeft, dotY, dotD, dotD));
             textX = _padLeft + dotD + Sc(10);
         }
 
-        // reserve space on the right for the verified pill / connected tag
-        int tagReserve = r.Verified ? Sc(78) : (r.Connected ? Sc(72) : 0);
+        // reserve space on the right for the verified pill / connected / confirmation-failed tag
+        int tagReserve = r.Verified ? Sc(78)
+                       : r.VerificationFailed ? TextRenderer.MeasureText(TagConfirmationFailed, _fTag).Width + Sc(16)
+                       : (r.Connected ? Sc(72) : 0);
 
         // name
         var nameColor = r.Enabled ? CProfileText : CDimText;
@@ -554,6 +560,15 @@ internal sealed class TrayPopupForm : Form
             using var tb  = new SolidBrush(CVerifiedText);
             using var tsf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             g.DrawString(label, _fTag, tb, pill, tsf);
+        }
+        else if (r.VerificationFailed)
+        {
+            // amber "Confirmation failed" tag — not an error state, verification keeps
+            // retrying in the background and this clears on a later success.
+            using var tb  = new SolidBrush(CLockAmber);
+            using var tsf = new StringFormat { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Far };
+            g.DrawString(TagConfirmationFailed, _fTag, tb,
+                new RectangleF(textX, r.Bounds.Top, _w - textX - _padLeft, r.Bounds.Height), tsf);
         }
         else if (r.Connected)
         {

@@ -66,6 +66,13 @@ public class RegistrationManager
     public bool GetSkipConnectivityCheck()       => _skipConnectivityCheck;
     public void SetSkipConnectivityCheck(bool v) => _skipConnectivityCheck = v;
 
+    /// <summary>Whether to connect <see cref="GetServerProfileName"/> automatically at boot, before
+    /// any user logs on. Refreshed on every heartbeat like the other fields here — see
+    /// AutoConnectService's "DeviceTunnel" target.</summary>
+    private volatile bool _deviceTunnelEnabled;
+    public bool GetDeviceTunnelEnabled()       => _deviceTunnelEnabled;
+    public void SetDeviceTunnelEnabled(bool v) => _deviceTunnelEnabled = v;
+
     // Per-profile gateway-probe targets (sidecar VPNs whose transit network is globally unique),
     // refreshed on every heartbeat. A profile present here uses the HTTP /health gateway check;
     // a profile absent here (plain uploads, OSS) uses the handshake check only.

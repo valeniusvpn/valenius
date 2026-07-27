@@ -14,8 +14,7 @@ public class ClientRegistrationService : BackgroundService
     private readonly AutoConnectManager _autoConnect;
     private readonly WireGuardController _wg;
     private readonly TunnelStateManager _state;
-    private readonly ConnectivityVerifier _verifier;
-    private readonly HandshakeVerifier _handshakeVerifier;
+    private readonly TunnelVerifier _tunnelVerifier;
     private readonly UpdateChecker _updater;
     private readonly ApiKeyProvider _apiKeys;
     private readonly BackendUrlProvider _backendUrl;
@@ -31,25 +30,23 @@ public class ClientRegistrationService : BackgroundService
         AutoConnectManager autoConnect,
         WireGuardController wg,
         TunnelStateManager state,
-        ConnectivityVerifier verifier,
-        HandshakeVerifier handshakeVerifier,
+        TunnelVerifier tunnelVerifier,
         UpdateChecker updater,
         ApiKeyProvider apiKeys,
         BackendUrlProvider backendUrl,
         ILogger<ClientRegistrationService> logger)
     {
-        _httpFactory       = httpFactory;
-        _registration      = registration;
-        _configs           = configs;
-        _autoConnect       = autoConnect;
-        _wg                = wg;
-        _state             = state;
-        _verifier          = verifier;
-        _handshakeVerifier = handshakeVerifier;
-        _updater           = updater;
-        _apiKeys           = apiKeys;
-        _backendUrl        = backendUrl;
-        _logger            = logger;
+        _httpFactory     = httpFactory;
+        _registration    = registration;
+        _configs         = configs;
+        _autoConnect     = autoConnect;
+        _wg              = wg;
+        _state           = state;
+        _tunnelVerifier  = tunnelVerifier;
+        _updater         = updater;
+        _apiKeys         = apiKeys;
+        _backendUrl      = backendUrl;
+        _logger          = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -189,6 +186,121 @@ public class ClientRegistrationService : BackgroundService
     }
 
     /// <summary>
+    /// Pulls the backend's authoritative profile set for this Client (machine) and reconciles it
+    /// into <paramref name="username"/>'s local folder via <see cref="ConfigManager.SyncManagedProfiles"/>.
+    /// Called from <see cref="PipeServer"/>'s <c>SyncStatus</c> handling on every tray start and
+    /// popup-open, so a new/empty OS user account on an already-provisioned machine gets its
+    /// profiles without any local file copying and without waiting for the next heartbeat cycle.
+    /// Deliberately does nothing on any failure (offline, timeout, non-2xx) rather than falling
+    /// back to a cached/local list — an unreachable backend must never hand a user someone else's
+    /// stale profile, and must never destructively prune what's already on disk for a user who
+    /// already has profiles.
+    /// </summary>
+    public async Task<bool> ResyncProfilesAsync(string username, CancellationToken ct)
+    {
+        try
+        {
+            var backendUrl = _backendUrl.Current;
+            if (string.IsNullOrEmpty(backendUrl)) return false;
+
+            var http     = _httpFactory.CreateClient("Registration");
+            var clientId = await _registration.GetOrCreateClientIdAsync();
+
+            var response = await http.GetAsync(
+                $"{backendUrl}/api/clients/profiles?clientKey={clientId}", ct);
+            if (!response.IsSuccessStatusCode) return false;
+
+            var entries = await response.Content.ReadFromJsonAsync(
+                ServiceJsonContext.Default.PendingForeignConfigEntryArray, ct);
+            if (entries is null) return false;
+
+            _configs.SyncManagedProfiles(username,
+                entries.Select(e => (e.FileName, e.Content)).ToArray());
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Profile resync failed; local profiles left unchanged.");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Ensures the machine-level device-tunnel copy (<see cref="ConfigManager.SaveDeviceTunnelConfig"/>)
+    /// of <paramref name="profileName"/> (the customer's own native sidecar profile) is current, by
+    /// pulling the same authoritative list <see cref="ResyncProfilesAsync"/> uses and picking out the
+    /// matching entry. Called unconditionally from every heartbeat/poll response when the device
+    /// tunnel is enabled, regardless of whether any OS user is logged in — this is what lets
+    /// <see cref="AutoConnectService"/> connect it at boot on a machine that has never been locally
+    /// logged into. Does nothing on any failure; the machine copy simply stays whatever it last was.
+    /// </summary>
+    private async Task EnsureDeviceTunnelConfigAsync(string profileName, string backendUrl, Guid clientId, CancellationToken ct)
+    {
+        try
+        {
+            var http     = _httpFactory.CreateClient("Registration");
+            var response = await http.GetAsync($"{backendUrl}/api/clients/profiles?clientKey={clientId}", ct);
+            if (!response.IsSuccessStatusCode) return;
+
+            var entries = await response.Content.ReadFromJsonAsync(
+                ServiceJsonContext.Default.PendingForeignConfigEntryArray, ct);
+            var match = entries?.FirstOrDefault(e =>
+                string.Equals(e.FileName, profileName, StringComparison.OrdinalIgnoreCase));
+            if (match is not null)
+                _configs.SaveDeviceTunnelConfig(profileName, match.Content);
+        }
+        catch (OperationCanceledException)
+        {
+            // best-effort
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Device tunnel config sync failed; machine copy left unchanged.");
+        }
+    }
+
+    /// <summary>
+    /// Archives a manually-uploaded profile's content to the backend so it becomes part of this
+    /// Client's authoritative set and can be pulled by <see cref="ResyncProfilesAsync"/> onto every
+    /// other OS user account on the machine. Called only when the uploading user opts in to
+    /// "available to all users on this PC" — <see cref="PipeServer"/> marks the profile managed for
+    /// the uploader only if this returns true, so a failed/offline archive attempt leaves it as a
+    /// normal private profile rather than one a later resync could prune.
+    /// </summary>
+    public async Task<bool> ArchiveProfileAsync(string profileName, string content, CancellationToken ct)
+    {
+        try
+        {
+            var backendUrl = _backendUrl.Current;
+            if (string.IsNullOrEmpty(backendUrl)) return false;
+
+            var http     = _httpFactory.CreateClient("Registration");
+            var clientId = await _registration.GetOrCreateClientIdAsync();
+
+            var request  = new ArchiveProfileRequest(clientId.ToString(), profileName, content);
+            var response = await http.PostAsJsonAsync(
+                $"{backendUrl}/api/clients/profiles/archive",
+                request,
+                ServiceJsonContext.Default.ArchiveProfileRequest,
+                ct);
+            return response.IsSuccessStatusCode;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to share profile '{Profile}' with other users.", profileName);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Shared response handler called by both the heartbeat loop and the long-poll loop.
     /// Persists registration state, syncs auto-connect config, and acts on any pending flags.
     /// </summary>
@@ -224,6 +336,13 @@ public class ClientRegistrationService : BackgroundService
         _registration.SetGatewayProfiles(
             (result.GatewayProfiles ?? [])
             .Select(g => (g.ProfileName, g.GatewayIp, g.HealthPort)));
+        _registration.SetDeviceTunnelEnabled(result.DeviceTunnelEnabled);
+        if (result.DeviceTunnelEnabled && !string.IsNullOrEmpty(result.ServerProfileName))
+        {
+            // Runs unconditionally regardless of any OS user login, so the machine-level device-tunnel
+            // config is fresh before AutoConnectService's boot-time check needs it (see ConfigManager.SaveDeviceTunnelConfig).
+            await EnsureDeviceTunnelConfigAsync(result.ServerProfileName, backendUrl, clientId, ct);
+        }
         _registration.SetMfaState(
             result.MfaRequired,
             result.MfaAuthorizeUrl,
@@ -532,41 +651,22 @@ public class ClientRegistrationService : BackgroundService
     /// to the local WireGuard handshake on failure or when the probe is skipped; any other
     /// profile uses the handshake check directly. Used by AutoConnect and PendingConnect.
     /// </summary>
-    internal async Task RunPhase2Async(string tunnelName, CancellationToken ct)
+    internal Task RunPhase2Async(string tunnelName, CancellationToken ct)
     {
-        try
+        // Only the gateway-verified path reports upstream — this is what lets the admin client
+        // list's "connected" star require actual verification for gateway-eligible (Pro sidecar)
+        // clients. The handshake-only path is deliberately NOT reported: WireGuard's own rekey
+        // timers mean handshake freshness isn't a reliable enough signal, so those clients keep
+        // the backend's simpler "peer registered as connected" behavior instead.
+        void ReportIfViaGateway(bool viaGateway)
         {
-            var probe = _registration.GetGatewayProbe(tunnelName);
-            if (probe is { } gw && !_registration.GetSkipConnectivityCheck())
-            {
-                if (await _verifier.VerifyAsync(gw.Ip, gw.Port, ct))
-                {
-                    _state.SetVerified(tunnelName, viaGateway: true);
-                    _logger.LogInformation("Gateway connectivity verified for '{Tunnel}'.", tunnelName);
-                    // Only the gateway-verified path reports upstream — this is what lets the
-                    // admin client list's "connected" star require actual verification for
-                    // gateway-eligible (Pro sidecar) clients. The handshake-only path below is
-                    // deliberately NOT reported: WireGuard's own rekey timers mean handshake
-                    // freshness isn't a reliable enough signal, so those clients keep the backend's
-                    // simpler "peer registered as connected" behavior instead.
-                    _ = LogEventAsync("Verified", "", tunnelName, null, ct);
-                    return;
-                }
-                _logger.LogInformation(
-                    "Gateway probe did not succeed for '{Tunnel}' — falling back to handshake check.", tunnelName);
-            }
+            if (viaGateway) _ = LogEventAsync("Verified", "", tunnelName, null, ct);
+        }
 
-            if (await _handshakeVerifier.VerifyAsync(tunnelName, ct))
-            {
-                _state.SetVerified(tunnelName);
-                _logger.LogInformation("Handshake verified for '{Tunnel}'.", tunnelName);
-            }
-        }
-        catch (OperationCanceledException) { /* service stopping */ }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Post-connect verification threw for '{Tunnel}'.", tunnelName);
-        }
+        var probe = _registration.GetGatewayProbe(tunnelName);
+        return probe is { } gw && !_registration.GetSkipConnectivityCheck()
+            ? _tunnelVerifier.RunGatewayVerifyAsync(tunnelName, gw.Ip, gw.Port, ct, ReportIfViaGateway)
+            : _tunnelVerifier.RunHandshakeVerifyAsync(tunnelName, ct);
     }
 
     public async Task LogEventAsync(string eventType, string username, string tunnelName,

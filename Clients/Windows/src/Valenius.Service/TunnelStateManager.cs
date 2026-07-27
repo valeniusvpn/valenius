@@ -14,7 +14,7 @@ public class TunnelStateManager
     private readonly Dictionary<string, Entry> _active =
         new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record Entry(string User, DateTime Since, bool Verified, bool VerifiedViaGateway = false);
+    private sealed record Entry(string User, DateTime Since, bool Verified, bool VerifiedViaGateway = false, bool VerificationFailed = false);
 
     public void SetConnected(string tunnelName, string user)
     {
@@ -36,7 +36,22 @@ public class TunnelStateManager
         lock (_lock)
         {
             if (_active.TryGetValue(tunnelName, out var e))
-                _active[tunnelName] = e with { Verified = true, VerifiedViaGateway = viaGateway };
+                _active[tunnelName] = e with { Verified = true, VerifiedViaGateway = viaGateway, VerificationFailed = false };
+        }
+    }
+
+    /// <summary>
+    /// Marks that the initial fast verification window elapsed with no success. Not terminal —
+    /// verification keeps retrying at a slower cadence afterward (see <c>PipeServer.RunVerificationLoopAsync</c>),
+    /// and a later success still clears this via <see cref="SetVerified"/>. No-op if the tunnel
+    /// disconnected in the meantime.
+    /// </summary>
+    public void MarkVerificationFailed(string tunnelName)
+    {
+        lock (_lock)
+        {
+            if (_active.TryGetValue(tunnelName, out var e))
+                _active[tunnelName] = e with { VerificationFailed = true };
         }
     }
 
@@ -59,7 +74,7 @@ public class TunnelStateManager
         lock (_lock)
         {
             if (_active.TryGetValue(tunnelName, out var e))
-                _active[tunnelName] = e with { Verified = false };
+                _active[tunnelName] = e with { Verified = false, VerificationFailed = false };
         }
     }
 
@@ -97,10 +112,11 @@ public class TunnelStateManager
             return _active
                 .Select(kv => new ConnectedTunnelInfo
                 {
-                    Name          = kv.Key,
-                    IsVerified    = kv.Value.Verified,
-                    ConnectedUser = kv.Value.User,
-                    ConnectedSince= kv.Value.Since
+                    Name               = kv.Key,
+                    IsVerified         = kv.Value.Verified,
+                    VerificationFailed = kv.Value.VerificationFailed,
+                    ConnectedUser      = kv.Value.User,
+                    ConnectedSince     = kv.Value.Since
                 })
                 .ToArray();
         }

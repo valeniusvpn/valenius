@@ -2,7 +2,10 @@ namespace Valenius.TrayApp;
 
 static class Program
 {
-    private const string MutexName = "Global\\Valenius.TrayApp";
+    // Local\ (not Global\) so each Terminal Services session gets its own singleton --
+    // Fast User Switching leaves the previous user's session alive (merely disconnected),
+    // and a Global\ mutex would still be held, silently blocking the next user's tray.
+    private const string MutexName = "Local\\Valenius.TrayApp";
 
     [STAThread]
     static void Main()

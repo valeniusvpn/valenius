@@ -14,8 +14,14 @@ namespace Valenius.Service;
 /// fallback handles edge cases where the OS event is not raised (e.g. DHCP renewal
 /// that keeps the same address, or a laptop waking from sleep).
 ///
-/// Only fires when auto-connect is enabled (AdminEnabled via heartbeat AND not
-/// disabled by the user's tray toggle).
+/// Applies independently to up to two targets (see <see cref="AutoConnectTarget"/> /
+/// <see cref="GetTargets"/>): the generic admin-configured profile (AdminEnabled via
+/// heartbeat AND not disabled by the user's tray toggle), and — new — the Windows device
+/// tunnel: the customer's own native sidecar profile, connected automatically before any
+/// user logs on (per-Customer/Client backend flag, no user-facing toggle). Both share the
+/// same trusted-network detection and startup-retry loop; a machine with nobody ever
+/// logged in still gets the device tunnel via the machine-level config store (see
+/// <see cref="ConfigManager.SaveDeviceTunnelConfig"/>).
 /// </summary>
 public class AutoConnectService : BackgroundService
 {
@@ -48,7 +54,23 @@ public class AutoConnectService : BackgroundService
     private readonly HandshakeVerifier _handshakeVerifier;
     private readonly ILogger<AutoConnectService> _logger;
 
-    private DateTime _lastActionUtc = DateTime.MinValue;
+    /// <summary>An independently-evaluated auto-connect policy: an admin-picked profile
+    /// (<c>Label = "AutoConnect"</c>) or the Windows device tunnel (<c>Label = "DeviceTunnel"</c>)
+    /// -- the customer's own native sidecar profile, connected automatically at boot before any
+    /// user logs on. Both share the same trusted-network detection, Phase-1 health pre-check, and
+    /// <see cref="ReverifyActiveTunnelsAsync"/> below; only the target profile, enablement, and
+    /// connect-log attribution differ.</summary>
+    private readonly record struct AutoConnectTarget(string Label, string? ProfileName, string ConnectedByFallback);
+
+    private readonly Dictionary<string, DateTime> _lastActionByTarget = new(StringComparer.Ordinal);
+
+    private IEnumerable<AutoConnectTarget> GetTargets()
+    {
+        if (_autoConnect.IsEnabled())
+            yield return new AutoConnectTarget("AutoConnect", _autoConnect.GetProfileName(), "AutoConnect");
+        if (_registration.GetDeviceTunnelEnabled())
+            yield return new AutoConnectTarget("DeviceTunnel", _registration.GetServerProfileName(), "DeviceTunnel");
+    }
 
     public AutoConnectService(
         AutoConnectManager autoConnect,
@@ -150,8 +172,8 @@ public class AutoConnectService : BackgroundService
     // without a retry here, the only remaining trigger is a genuine NetworkAddressChanged event
     // (which won't fire if the network hasn't actually changed) or the 5-minute fallback timer,
     // so "auto-connect enabled" could silently sit disconnected for minutes, or indefinitely,
-    // after every update. A failed attempt never sets _lastActionUtc, so ActionCooldown does not
-    // block these retries.
+    // after every update. A failed attempt never sets _lastActionByTarget, so ActionCooldown does
+    // not block these retries.
     private static readonly TimeSpan StartupRetryInterval = TimeSpan.FromSeconds(10);
     private const int StartupRetryAttempts = 6; // ~1 minute total, then fall into the normal loop.
 
@@ -180,17 +202,20 @@ public class AutoConnectService : BackgroundService
     /// </summary>
     private bool IsAutoConnectPending()
     {
-        if (!_autoConnect.IsEnabled()) return false;
-
         var networks = _autoConnect.GetTrustedNetworks();
         if (networks.Length == 0) return false;
         if (NetworkDetector.IsInTrustedNetwork(networks)) return false;
 
-        var targetPath = FindConfigPath();
-        var targetName = targetPath is null
-            ? null
-            : (ConfigManager.GetTunnelNameFromPath(targetPath) ?? Path.GetFileNameWithoutExtension(targetPath));
-        return targetName is null || !_state.IsConnected(targetName);
+        foreach (var target in GetTargets())
+        {
+            var targetPath = FindConfigPath(target);
+            var targetName = targetPath is null
+                ? null
+                : (ConfigManager.GetTunnelNameFromPath(targetPath) ?? Path.GetFileNameWithoutExtension(targetPath));
+            if (targetName is null || !_state.IsConnected(targetName))
+                return true;
+        }
+        return false;
     }
 
     private async Task RunCheckSafeAsync(CancellationToken ct)
@@ -280,28 +305,31 @@ public class AutoConnectService : BackgroundService
 
     private async Task CheckAsync(CancellationToken ct)
     {
-        if (!_autoConnect.IsEnabled()) return;
-
         var networks = _autoConnect.GetTrustedNetworks();
         if (networks.Length == 0) return;
 
-        // Cooldown: don't act again too quickly after the last auto-action.
-        if (DateTime.UtcNow - _lastActionUtc < ActionCooldown) return;
-
         var inTrusted = NetworkDetector.IsInTrustedNetwork(networks);
 
-        // Auto-connect acts only on the server/auto-connect profile — never on foreign
-        // tunnels the user connected by hand. Decide on that specific tunnel's state.
-        var targetPath = FindConfigPath();
-        var targetName = targetPath is null
-            ? null
-            : (ConfigManager.GetTunnelNameFromPath(targetPath) ?? Path.GetFileNameWithoutExtension(targetPath));
-        var targetConnected = targetName is not null && _state.IsConnected(targetName);
+        foreach (var target in GetTargets())
+        {
+            // Cooldown: don't act again too quickly after this target's last auto-action. Tracked
+            // per target so one policy's action never blocks the other's in the same check.
+            var lastAction = _lastActionByTarget.GetValueOrDefault(target.Label, DateTime.MinValue);
+            if (DateTime.UtcNow - lastAction < ActionCooldown) continue;
 
-        if (!targetConnected && !inTrusted)
-            await AutoConnectAsync(ct);
-        else if (targetConnected && inTrusted)
-            await AutoDisconnectAsync(targetName!, ct);
+            // Auto-connect acts only on this target's own profile — never on foreign tunnels the
+            // user connected by hand, and never on the other target's profile.
+            var targetPath = FindConfigPath(target);
+            var targetName = targetPath is null
+                ? null
+                : (ConfigManager.GetTunnelNameFromPath(targetPath) ?? Path.GetFileNameWithoutExtension(targetPath));
+            var targetConnected = targetName is not null && _state.IsConnected(targetName);
+
+            if (!targetConnected && !inTrusted)
+                await AutoConnectAsync(target, ct);
+            else if (targetConnected && inTrusted)
+                await AutoDisconnectAsync(target, targetName!, ct);
+        }
     }
 
     // ── Auto-connect ──────────────────────────────────────────────────────────
@@ -316,11 +344,11 @@ public class AutoConnectService : BackgroundService
         })
     { Timeout = TimeSpan.FromSeconds(5) };
 
-    private async Task AutoConnectAsync(CancellationToken ct)
+    private async Task AutoConnectAsync(AutoConnectTarget target, CancellationToken ct)
     {
         if (!await _registration.IsAllowedToConnectAsync())
         {
-            _logger.LogInformation("AutoConnect: skipped — client not authorized.");
+            _logger.LogInformation("AutoConnect[{Target}]: skipped — client not authorized.", target.Label);
             return;
         }
 
@@ -337,44 +365,44 @@ public class AutoConnectService : BackgroundService
                 var resp = await _healthCheckHttp.GetAsync(serverHealthUrl, cts.Token);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    _logger.LogDebug("AutoConnect: Phase 1 check {Url} returned {Status} — skipping.", serverHealthUrl, (int)resp.StatusCode);
+                    _logger.LogDebug("AutoConnect[{Target}]: Phase 1 check {Url} returned {Status} — skipping.", target.Label, serverHealthUrl, (int)resp.StatusCode);
                     return;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogDebug("AutoConnect: Phase 1 check failed ({Msg}) — skipping.", ex.Message);
+                _logger.LogDebug("AutoConnect[{Target}]: Phase 1 check failed ({Msg}) — skipping.", target.Label, ex.Message);
                 return;
             }
         }
 
-        var configPath = FindConfigPath();
+        var configPath = FindConfigPath(target);
         if (configPath is null)
         {
-            _logger.LogWarning("AutoConnect: no config found (profile: {Profile}).",
-                _autoConnect.GetProfileName() ?? "<first available>");
+            _logger.LogWarning("AutoConnect[{Target}]: no config found (profile: {Profile}).",
+                target.Label, target.ProfileName ?? "<first available>");
             return;
         }
 
         var tunnelName = ConfigManager.GetTunnelNameFromPath(configPath)
                       ?? Path.GetFileNameWithoutExtension(configPath);
-        _logger.LogInformation("AutoConnect: connecting tunnel '{Tunnel}'.", tunnelName);
+        _logger.LogInformation("AutoConnect[{Target}]: connecting tunnel '{Tunnel}'.", target.Label, tunnelName);
 
         var wanIp = await _registrationSvc.GetWanIpAsync(ct);
         var (success, output) = await _wg.ConnectAsync(configPath);
 
         if (!success)
         {
-            _logger.LogWarning("AutoConnect: wireguard connect failed: {Output}", output);
+            _logger.LogWarning("AutoConnect[{Target}]: wireguard connect failed: {Output}", target.Label, output);
             return;
         }
 
-        _lastActionUtc = DateTime.UtcNow;
+        _lastActionByTarget[target.Label] = DateTime.UtcNow;
 
         // Prefer the actual logged-in Windows user (see RegistrationManager.GetLastKnownUsername)
-        // over the "AutoConnect" trigger label — the label isn't useful on the admin client list's
-        // "Last user" column, and the real username is fresh since the tray polls every 5s.
-        var connectedBy = _registration.GetLastKnownUsername() ?? "AutoConnect";
+        // over the target's trigger-label fallback — the label isn't useful on the admin client
+        // list's "Last user" column, and the real username is fresh since the tray polls every 5s.
+        var connectedBy = _registration.GetLastKnownUsername() ?? target.ConnectedByFallback;
         _state.SetConnected(tunnelName, connectedBy);
         _ = _registrationSvc.LogEventAsync("Connect", connectedBy, tunnelName, wanIp, ct);
 
@@ -383,10 +411,10 @@ public class AutoConnectService : BackgroundService
 
     // ── Auto-disconnect ───────────────────────────────────────────────────────
 
-    private async Task AutoDisconnectAsync(string tunnelName, CancellationToken ct)
+    private async Task AutoDisconnectAsync(AutoConnectTarget target, string tunnelName, CancellationToken ct)
     {
         _logger.LogInformation(
-            "AutoConnect: back in trusted network — disconnecting tunnel '{Tunnel}'.", tunnelName);
+            "AutoConnect[{Target}]: back in trusted network — disconnecting tunnel '{Tunnel}'.", target.Label, tunnelName);
 
         var connectedUser = _state.GetAllConnected()
             .FirstOrDefault(t => string.Equals(t.Name, tunnelName, StringComparison.OrdinalIgnoreCase))
@@ -396,20 +424,28 @@ public class AutoConnectService : BackgroundService
 
         if (!success)
         {
-            _logger.LogWarning("AutoConnect: wireguard disconnect failed: {Output}", output);
+            _logger.LogWarning("AutoConnect[{Target}]: wireguard disconnect failed: {Output}", target.Label, output);
             return;
         }
 
         _state.SetDisconnected(tunnelName);
-        _lastActionUtc = DateTime.UtcNow;
-        _ = _registrationSvc.LogEventAsync("Disconnect", connectedUser ?? "AutoConnect", tunnelName, ct: ct);
+        _lastActionByTarget[target.Label] = DateTime.UtcNow;
+        _ = _registrationSvc.LogEventAsync("Disconnect", connectedUser ?? target.ConnectedByFallback, tunnelName, ct: ct);
     }
 
     // ── Config path resolution ────────────────────────────────────────────────
 
-    private string? FindConfigPath()
+    private string? FindConfigPath(AutoConnectTarget target)
     {
-        var profileName = _autoConnect.GetProfileName();
-        return _configs.GetAnyConfigPath(profileName);
+        // A per-OS-user copy may already exist from a prior login / cross-user profile sync —
+        // prefer it over the machine-level store when present. The DeviceTunnel target additionally
+        // falls back to the machine-level store (ConfigManager.SaveDeviceTunnelConfig) so it still
+        // works on a machine nobody has ever locally logged into; the generic AutoConnect target
+        // has no such fallback (it was never meant to work before any login).
+        var path = _configs.GetAnyConfigPath(target.ProfileName);
+        if (path is not null) return path;
+        if (target.Label == "DeviceTunnel" && target.ProfileName is not null)
+            return _configs.GetDeviceTunnelConfigPath(target.ProfileName);
+        return null;
     }
 }

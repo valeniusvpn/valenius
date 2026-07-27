@@ -334,6 +334,10 @@ public static class OssStartup
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "MfaSessionLifetimeHours" INT NOT NULL DEFAULT 12""");
         await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceTunnelEnabled" BOOLEAN NULL""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DeviceTunnelDefaultEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
+        await db.Database.ExecuteSqlRawAsync(
             """
             CREATE TABLE IF NOT EXISTS "MfaSessions" (
                 "Id"            SERIAL PRIMARY KEY,
@@ -527,6 +531,31 @@ public static class OssStartup
             """);
         await db.Database.ExecuteSqlRawAsync(
             """CREATE INDEX IF NOT EXISTS "IX_ClientAlerts_ClientId_Kind_IsAcknowledged" ON "ClientAlerts" ("ClientId", "Kind", "IsAcknowledged")""");
+
+        // Queue of profile-name deletions pending delivery to a client. Replaces the old single
+        // "Clients.PendingDeleteProfileName" scalar, which three independent triggers (foreign
+        // deprovision, native deprovision, admin "Delete profile") could race and silently clobber
+        // — see ClientPendingDelete. The old column is left in place (unused) rather than dropped.
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "ClientPendingDeletes" (
+                "Id"          SERIAL PRIMARY KEY,
+                "ClientId"    INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                "ProfileName" VARCHAR(50) NOT NULL,
+                "CreatedAt"   TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+            )
+            """);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientPendingDeletes_ClientId_ProfileName" ON "ClientPendingDeletes" ("ClientId", "ProfileName")""");
+        // Fold any in-flight scalar delete (set before the queue table above existed) into the new
+        // queue so it isn't silently dropped by this deploy. Cheap and idempotent — once folded,
+        // the scalar is null and this is a no-op on every later startup.
+        foreach (var legacy in await db.Clients.Where(c => c.PendingDeleteProfileName != null).ToListAsync())
+        {
+            await ClientPendingDeleteQueue.QueueAsync(db, legacy.Id, legacy.PendingDeleteProfileName);
+            legacy.PendingDeleteProfileName = null;
+        }
+        await db.SaveChangesAsync();
 
         // Seed ServerSettings row (Id = 1).
         if (!db.ServerSettings.Any())

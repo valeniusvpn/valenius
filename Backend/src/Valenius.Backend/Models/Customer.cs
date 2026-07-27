@@ -146,6 +146,17 @@ public class Customer
     /// <summary>Default session lifetime / absolute cap (hours) for gated peers.</summary>
     public int MfaSessionLifetimeHours { get; set; } = 12;
 
+    // ── Device tunnel (Windows, Pro) ────────────────────────────────────────────
+
+    /// <summary>
+    /// Tenant default for whether the Windows client connects this customer's own native
+    /// sidecar profile automatically at boot, before any user logs on (only while off a
+    /// trusted network — see <see cref="TrustedNetwork"/>). Overridable per client via
+    /// <see cref="Client.DeviceTunnelEnabled"/>. Has no effect when ServerMode != "Valenius"
+    /// (there is no native profile to connect). Defaults to false — opt-in.
+    /// </summary>
+    public bool DeviceTunnelDefaultEnabled { get; set; } = false;
+
     // ── Cross-customer sidecar sharing (Pro) ─────────────────────────────────
 
     /// <summary>When true, admins may provision other customers' clients onto this customer's sidecar.</summary>

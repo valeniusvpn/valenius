@@ -27,20 +27,21 @@ theme:
     - content.code.copy
     - search.suggest
     - search.highlight
-  # Teal instead of the technical docs' indigo — the help site is deliberately
-  # branded to look distinct from documentation.valenius.com.
+  # Valenius brand blue (same #0F4E66 / #1DABDA used in the admin panel,
+  # see Backend/.../Pages/Shared/_Layout.cshtml) via a custom Material palette
+  # — the built-in named schemes don't include this exact color.
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: teal
-      accent: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: teal
-      accent: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode

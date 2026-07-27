@@ -20,4 +20,6 @@ public sealed class NullPeerProvisioningService : IPeerProvisioningService
 
     public Task<string> ResyncAsync(Customer customer, ApplicationDbContext db)
         => Task.FromResult("Skipped: peer provisioning requires the Pro edition.");
+
+    public Task ReconcileStaleProfilesAsync(Client client) => Task.CompletedTask;
 }

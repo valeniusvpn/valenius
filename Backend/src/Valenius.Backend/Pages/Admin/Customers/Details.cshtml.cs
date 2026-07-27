@@ -177,6 +177,17 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         return RedirectToPage(new { id });
     }
 
+    /// <summary>Tenant default for the Windows device tunnel — see
+    /// <see cref="Models.Customer.DeviceTunnelDefaultEnabled"/> / <see cref="Models.Client.DeviceTunnelEnabled"/>.</summary>
+    public async Task<IActionResult> OnPostSaveDeviceTunnelDefaultAsync(int id, bool deviceTunnelDefaultEnabled)
+    {
+        var customer = await db.Customers.FindAsync(id);
+        if (customer is null) return NotFound();
+        customer.DeviceTunnelDefaultEnabled = deviceTunnelDefaultEnabled;
+        await db.SaveChangesAsync();
+        return RedirectToPage(new { id });
+    }
+
     public async Task<IActionResult> OnPostAddNetworkAsync(int id, string subnet, string? primaryDns)
     {
         if (string.IsNullOrWhiteSpace(subnet))

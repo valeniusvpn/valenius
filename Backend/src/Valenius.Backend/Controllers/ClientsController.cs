@@ -111,12 +111,19 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             client.LastSeenAt = now;
         }
 
-        // Auto-clear PendingDeleteProfileName once the client confirms the profile is gone.
-        if (client.PendingDeleteProfileName is not null
-            && request.Profiles is not null
-            && !request.Profiles.Contains(client.PendingDeleteProfileName, StringComparer.OrdinalIgnoreCase))
+        // Drain confirmed deletes from the queue: any queued name the client's own reported
+        // profile list no longer contains has landed, so stop re-sending it. Every confirmed
+        // entry clears in one pass (not just the oldest) — see ClientPendingDelete.
+        if (request.Profiles is not null)
         {
-            client.PendingDeleteProfileName = null;
+            var queued = await db.ClientPendingDeletes
+                .Where(d => d.ClientId == client.Id)
+                .ToListAsync();
+            foreach (var d in queued)
+            {
+                if (!request.Profiles.Contains(d.ProfileName, StringComparer.OrdinalIgnoreCase))
+                    db.ClientPendingDeletes.Remove(d);
+            }
         }
 
         try
@@ -180,6 +187,16 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         var pendingConfigRepair    = client.PendingConfigRepair;
         client.PendingConfigRepair = false;
 
+        // Deliver the oldest queued delete (see ClientPendingDelete) — not one-shot; only the
+        // Register POST above drains confirmed entries (it's the only request that carries the
+        // client's own Profiles list), so this keeps re-sending on every response — including
+        // LongPoll responses — until a later Register call confirms it's gone.
+        var pendingDeleteProfileName = await db.ClientPendingDeletes
+            .Where(d => d.ClientId == client.Id)
+            .OrderBy(d => d.CreatedAt)
+            .Select(d => d.ProfileName)
+            .FirstOrDefaultAsync();
+
         var heartbeatInterval = client.Customer?.HeartbeatIntervalMinutes is >= 1 and <= 60
             ? client.Customer.HeartbeatIntervalMinutes.Value
             : 5;
@@ -187,6 +204,14 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         var serverProfileName = client.Customer?.ServerMode == "Valenius"
             ? WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name)
             : null;
+
+        // Device tunnel (Windows): per-client override, else the customer default. Only ever
+        // true when there's actually a native profile to connect (serverProfileName != null) —
+        // an enabled-but-non-Valenius customer simply never sends a true flag, no separate
+        // error path needed on the client.
+        var deviceTunnelEnabled =
+            (client.DeviceTunnelEnabled ?? client.Customer?.DeviceTunnelDefaultEnabled ?? false)
+            && serverProfileName is not null;
 
         // Build health probe URLs for the Windows client connectivity verifier.
         // ServerHealthUrl  → pre-connect public reachability check (Phase 1, auto-connect only)
@@ -273,7 +298,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         foreach (var p in pendingForeignRows)
         {
             inlineConfigs.Add(new PendingForeignConfigEntry(p.PendingConfigFileName!, p.PendingConfigContent ?? ""));
-            await ArchiveDeliveredConfigAsync(client.Id, p.PendingConfigFileName, p.PendingConfigContent);
+            await ClientConfigArchiveStore.UpsertAsync(db, client.Id, p.PendingConfigFileName, p.PendingConfigContent);
             p.PendingConfigFileName = null;
             p.PendingConfigContent  = null;
         }
@@ -380,7 +405,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             client.AutoConnectEnabled,
             client.AutoConnectProfileName,
             networks,
-            client.PendingDeleteProfileName,
+            pendingDeleteProfileName,
             pendingConnect,
             heartbeatInterval,
             serverProfileName,
@@ -403,7 +428,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             string.IsNullOrEmpty(client.UpdateChannel) ? "stable" : client.UpdateChannel,
             rotatedApiKey,
             remoteLanCidrsByProfile,
-            pendingConfigRepair);
+            pendingConfigRepair,
+            deviceTunnelEnabled);
     }
 
     [HttpPost("event")]
@@ -794,7 +820,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             return NoContent();
 
         var result = new PendingConfigResponse(client.PendingConfigFileName, client.PendingConfigContent!);
-        await ArchiveDeliveredConfigAsync(client.Id, client.PendingConfigFileName, client.PendingConfigContent);
+        await ClientConfigArchiveStore.UpsertAsync(db, client.Id, client.PendingConfigFileName, client.PendingConfigContent);
         client.PendingConfigFileName = null;
         client.PendingConfigContent  = null;
         await db.SaveChangesAsync();
@@ -803,31 +829,52 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
     }
 
     /// <summary>
-    /// Upserts the retained copy of a config being delivered to a client (keyed by
-    /// client + profile name). Does not save — the caller's SaveChangesAsync persists it.
-    /// See <see cref="Models.ClientConfigArchive"/>; consumed by the reinstall-reassign resend.
+    /// Returns every profile this Client (i.e. this Windows machine, not a specific OS user
+    /// account) is known to have — the retained <see cref="Models.ClientConfigArchive"/> rows —
+    /// so a client can reconcile an individual OS user's local profile folder against the
+    /// machine's authoritative set. See root CLAUDE.md "Cross-OS-user profile sync (Windows)".
     /// </summary>
-    private async Task ArchiveDeliveredConfigAsync(int clientId, string? profileName, string? content)
+    [HttpGet("profiles")]
+    public async Task<IActionResult> GetProfiles([FromQuery] string clientKey)
     {
-        if (string.IsNullOrWhiteSpace(profileName)) return;
-        var name = profileName.Trim();
-        var existing = await db.ClientConfigArchives
-            .FirstOrDefaultAsync(a => a.ClientId == clientId && a.ProfileName == name);
-        if (existing is null)
-        {
-            db.ClientConfigArchives.Add(new Models.ClientConfigArchive
-            {
-                ClientId    = clientId,
-                ProfileName = name,
-                Content     = content ?? "",
-                UpdatedAt   = DateTime.UtcNow,
-            });
-        }
-        else
-        {
-            existing.Content   = content ?? "";
-            existing.UpdatedAt = DateTime.UtcNow;
-        }
+        if (string.IsNullOrWhiteSpace(clientKey))
+            return BadRequest("clientKey is required.");
+
+        var client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == clientKey && !c.IsDeleted);
+        if (client is null)
+            return NotFound();
+
+        var entries = await db.ClientConfigArchives
+            .Where(a => a.ClientId == client.Id)
+            .Select(a => new PendingForeignConfigEntry(a.ProfileName, a.Content))
+            .ToArrayAsync();
+
+        return Ok(entries);
+    }
+
+    /// <summary>
+    /// Archives a manually-uploaded config's content so it becomes part of this Client's
+    /// authoritative profile set and can be pulled by <see cref="GetProfiles"/> onto every other
+    /// OS user account on the same machine — used only when the uploading user explicitly opts
+    /// in to "available to all users on this PC" (the default upload stays local-only and never
+    /// calls this). See root CLAUDE.md "Cross-OS-user profile sync (Windows)".
+    /// </summary>
+    [HttpPost("profiles/archive")]
+    public async Task<IActionResult> ArchiveProfile([FromBody] ArchiveProfileRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ClientKey))
+            return BadRequest("clientKey is required.");
+        if (!Valenius.Shared.ProfileNameHelper.IsValid(request.ProfileName))
+            return BadRequest("Invalid profile name.");
+
+        var client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey && !c.IsDeleted);
+        if (client is null)
+            return NotFound();
+
+        await ClientConfigArchiveStore.UpsertAsync(db, client.Id, request.ProfileName, request.Content);
+        await db.SaveChangesAsync();
+
+        return Ok();
     }
 }
 
@@ -926,9 +973,16 @@ public record StatusResponse(
     /// path ... is denied" errors from a corrupted/empty ACL under its ProgramData tree). A generic
     /// hook other client-side repairs can join later. Windows-only; a no-op on other platforms.
     /// One-shot, cleared atomically after being sent.</summary>
-    bool PendingConfigRepair = false);
+    bool PendingConfigRepair = false,
+    /// <summary>Windows only: when true, the client connects this customer's own native sidecar
+    /// profile automatically at boot, before any user logs on, using the same away-from-trusted-network
+    /// policy as the generic auto-connect feature. Effective value already resolved server-side
+    /// (per-client override, else the customer default) and already gated on a native profile
+    /// actually existing (ServerProfileName != null) — see BuildStatusResponseAsync.</summary>
+    bool DeviceTunnelEnabled = false);
 public record MfaApprovalEntry(int ChallengeId, string RequesterName, string? RequesterIp, int[] Choices, DateTime ExpiresAt);
 public record PendingConfigResponse(string FileName, string Content);
 public record PendingForeignConfigEntry(string FileName, string Content);
 public record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
 public record LanCidrProfileEntry(string ProfileName, string[] Cidrs);
+public record ArchiveProfileRequest(string ClientKey, string ProfileName, string Content);

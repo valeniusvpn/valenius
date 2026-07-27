@@ -1,0 +1,36 @@
+name: "Valenius VPN"
+version: "1.0.0"
+slug: "valenius_vpn"
+description: "Keeps a Valenius WireGuard VPN connected at all times"
+url: "https://github.com/valeniusvpn/valenius/tree/main/Clients/HomeAssistant/valenius-vpn"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: services
+boot: auto
+init: false
+host_network: true
+privileged:
+  - NET_ADMIN
+  - NET_RAW
+services:
+  - "mqtt:want"
+options:
+  backend_url: ""
+  api_key: ""
+  display_name: ""
+  profile_name: ""
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+schema:
+  backend_url: "str"
+  api_key: "password"
+  display_name: "str?"
+  profile_name: "str?"
+  mqtt_host: "str?"
+  mqtt_port: "port?"
+  mqtt_username: "str?"
+  mqtt_password: "password?"

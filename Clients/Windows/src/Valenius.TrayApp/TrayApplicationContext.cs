@@ -88,7 +88,11 @@ public class TrayApplicationContext : ApplicationContext
 
         _pollTimer.Start();
 
-        _ = RefreshStatusAsync();
+        // Live backend round-trip (not the cheap cached Status) on every tray start, so a
+        // freshly-launched tray -- even for an OS user account with zero local profiles -- gets
+        // this machine's up-to-date profile list immediately instead of waiting for the next
+        // heartbeat cycle. See ConfigManager.SyncManagedProfiles / ClientRegistrationService.ResyncProfilesAsync.
+        _ = SyncStatusAsync();
     }
 
     [DynamicDependency(DynamicallyAccessedMemberTypes.NonPublicMethods, typeof(NotifyIcon))]
@@ -120,6 +124,16 @@ public class TrayApplicationContext : ApplicationContext
             _popup.ShowServiceUnavailable(cursor);
 
         // Live refresh in background; popup updates when it returns
+        await SyncStatusAsync();
+    }
+
+    // ── Status refresh ────────────────────────────────────────────────────────
+
+    /// <summary>Live backend round-trip (CommandType.SyncStatus): registers, checks for updates,
+    /// and resyncs this OS user's profiles against the machine's backend-authoritative set. Used
+    /// on tray startup and whenever the popup opens. See constructor and <see cref="ShowPopupAsync"/>.</summary>
+    private async Task SyncStatusAsync()
+    {
         try
         {
             var response = await _pipe.SendAsync(new PipeCommand { Command = CommandType.SyncStatus });
@@ -134,8 +148,6 @@ public class TrayApplicationContext : ApplicationContext
             SetServiceUnavailable();
         }
     }
-
-    // ── Status refresh ────────────────────────────────────────────────────────
 
     private async Task RefreshStatusAsync()
     {
@@ -423,8 +435,9 @@ public class TrayApplicationContext : ApplicationContext
                 return;
 
             var defaultName = Valenius.Shared.ProfileNameHelper.Sanitize(dialog.FileName);
-            var profileName = PromptProfileName(defaultName);
-            if (profileName is null) return;
+            var prompted = PromptProfileName(defaultName);
+            if (prompted is null) return;
+            var (profileName, shareAllUsers) = prompted.Value;
 
             if (!Valenius.Shared.ProfileNameHelper.IsValid(profileName))
             {
@@ -439,13 +452,16 @@ public class TrayApplicationContext : ApplicationContext
                 var content  = await File.ReadAllTextAsync(dialog.FileName);
                 var response = await _pipe.SendAsync(new PipeCommand
                 {
-                    Command       = CommandType.UploadConfig,
-                    ConfigContent = content,
-                    ProfileName   = profileName
+                    Command           = CommandType.UploadConfig,
+                    ConfigContent     = content,
+                    ProfileName       = profileName,
+                    ShareWithAllUsers = shareAllUsers
                 });
 
                 if (!response.Success)
                     ShowBalloon("Upload failed", response.Error ?? "Unknown error", ToolTipIcon.Error);
+                else if (response.ShareFailed)
+                    ShowBalloon("Valenius", response.Error ?? $"Profile '{profileName}' saved.", ToolTipIcon.Warning);
                 else
                     ShowBalloon("Valenius", $"Profile '{profileName}' saved.", ToolTipIcon.Info);
             }
@@ -581,12 +597,13 @@ public class TrayApplicationContext : ApplicationContext
 
     // ── Profile name prompt ───────────────────────────────────────────────────
 
-    private static string? PromptProfileName(string defaultName)
+    private static (string Name, bool ShareAllUsers)? PromptProfileName(string defaultName)
     {
-        var label     = new Label   { Text = "Enter a name for this VPN profile:", AutoSize = true, Margin = new Padding(0, 0, 0, 4) };
-        var textBox   = new TextBox { Text = defaultName, MinimumSize = new Size(300, 0), Margin = new Padding(0, 0, 0, 10) };
-        var okBtn     = new Button  { Text = "OK",     DialogResult = DialogResult.OK,     AutoSize = true, MinimumSize = new Size(80, 0) };
-        var cancelBtn = new Button  { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(80, 0), Margin = new Padding(6, 0, 0, 0) };
+        var label     = new Label    { Text = "Enter a name for this VPN profile:", AutoSize = true, Margin = new Padding(0, 0, 0, 4) };
+        var textBox   = new TextBox  { Text = defaultName, MinimumSize = new Size(300, 0), Margin = new Padding(0, 0, 0, 10) };
+        var shareBox  = new CheckBox { Text = "Available to all users on this PC", AutoSize = true, Margin = new Padding(0, 0, 0, 10) };
+        var okBtn     = new Button   { Text = "OK",     DialogResult = DialogResult.OK,     AutoSize = true, MinimumSize = new Size(80, 0) };
+        var cancelBtn = new Button   { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(80, 0), Margin = new Padding(6, 0, 0, 0) };
 
         var buttons = new FlowLayoutPanel
         {
@@ -603,7 +620,7 @@ public class TrayApplicationContext : ApplicationContext
         var table = new TableLayoutPanel
         {
             ColumnCount  = 1,
-            RowCount     = 3,
+            RowCount     = 4,
             AutoSize     = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding      = new Padding(12),
@@ -613,9 +630,11 @@ public class TrayApplicationContext : ApplicationContext
         table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        table.Controls.Add(label,   0, 0);
-        table.Controls.Add(textBox, 0, 1);
-        table.Controls.Add(buttons, 0, 2);
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        table.Controls.Add(label,    0, 0);
+        table.Controls.Add(textBox,  0, 1);
+        table.Controls.Add(shareBox, 0, 2);
+        table.Controls.Add(buttons,  0, 3);
 
         using var form = new Form
         {
@@ -632,7 +651,7 @@ public class TrayApplicationContext : ApplicationContext
             CancelButton        = cancelBtn
         };
         form.Controls.Add(table);
-        return form.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
+        return form.ShowDialog() == DialogResult.OK ? (textBox.Text.Trim(), shareBox.Checked) : null;
     }
 
     // ── Icon construction ─────────────────────────────────────────────────────

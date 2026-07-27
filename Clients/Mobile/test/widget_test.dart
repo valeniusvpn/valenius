@@ -44,11 +44,21 @@ class _FakeConfigStore implements ConfigStore {
   Future<void> delete(String name) async {}
 }
 
-/// Active registration, no pending configs.
+/// Active registration. No pending configs/deletes by default; tests that
+/// exercise the profile-change notification pass one in.
 class _FakeApi implements BackendApi {
+  _FakeApi({
+    this.pendingForeignConfigs = const [],
+    this.pendingDeleteProfileName,
+  });
+
+  final List<PendingConfig> pendingForeignConfigs;
+  final String? pendingDeleteProfileName;
+
   @override
   Future<StatusResponse> register({
     required bool trayRunning,
+    required List<String> profiles,
     String? hostname,
   }) async =>
       StatusResponse(
@@ -67,11 +77,12 @@ class _FakeApi implements BackendApi {
         mfaEnrollmentOpen: false,
         mfaSessionExpiresAt: null,
         gatewayProfiles: const [],
-        pendingForeignConfigs: const [],
+        pendingForeignConfigs: pendingForeignConfigs,
         mfaApproveNumber: null,
         pendingApprovals: const [],
         logUploadRequested: false,
         remoteLanCidrsByProfile: const [],
+        pendingDeleteProfileName: pendingDeleteProfileName,
       );
 
   @override
@@ -145,5 +156,57 @@ void main() {
 
     // Verification flips the row to the "Verified" pill (stub reports a handshake).
     expect(find.text('Verified'), findsOneWidget);
+  });
+
+  testWidgets('shows a notification when the heartbeat delivers a new profile',
+      (WidgetTester tester) async {
+    final keyStore = _MemKeyStore();
+    await keyStore.write('valenius.backendUrl', 'https://test.example');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          keyStoreProvider.overrideWithValue(keyStore),
+          deviceInfoProvider.overrideWithValue(_FakeDeviceInfo()),
+          pushTokensProvider.overrideWithValue(_FakePushTokens()),
+          configStoreProvider.overrideWithValue(_FakeConfigStore()),
+          backendFactoryProvider.overrideWithValue((_, __) => _FakeApi(
+                pendingForeignConfigs: [
+                  PendingConfig(
+                      fileName: 'NewCo-VPN.conf', content: '[Interface]\n'),
+                ],
+              )),
+          registrationPollIntervalProvider.overrideWithValue(null),
+          connectivityChangesProvider.overrideWithValue(null),
+        ],
+        child: const ValeniusApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text("Profile 'NewCo-VPN' added"), findsOneWidget);
+  });
+
+  testWidgets('shows a notification when the heartbeat deletes a profile',
+      (WidgetTester tester) async {
+    final keyStore = _MemKeyStore();
+    await keyStore.write('valenius.backendUrl', 'https://test.example');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          keyStoreProvider.overrideWithValue(keyStore),
+          deviceInfoProvider.overrideWithValue(_FakeDeviceInfo()),
+          pushTokensProvider.overrideWithValue(_FakePushTokens()),
+          configStoreProvider.overrideWithValue(_FakeConfigStore()),
+          backendFactoryProvider.overrideWithValue((_, __) =>
+              _FakeApi(pendingDeleteProfileName: 'HomeNet-VPN')),
+          registrationPollIntervalProvider.overrideWithValue(null),
+          connectivityChangesProvider.overrideWithValue(null),
+        ],
+        child: const ValeniusApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text("Profile 'HomeNet-VPN' removed"), findsOneWidget);
   });
 }

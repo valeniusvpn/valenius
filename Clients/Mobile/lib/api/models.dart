@@ -17,11 +17,12 @@ class CiMap {
 }
 
 /// Mirrors the backend `StatusResponse` (`ClientsController.cs`). NOTE: the
-/// heartbeat does **not** carry a profile list — the available profiles are
+/// heartbeat does **not** carry a full profile list — the available profiles are
 /// derived client-side from the configs this device has received and stored
-/// (see the config store). The heartbeat only advertises *pending* configs to
-/// fetch/install, plus activation/MFA/connect state. Unknown/missing fields
-/// degrade to false/null so older backends stay compatible.
+/// (see the config store). The heartbeat advertises *pending* configs to
+/// fetch/install, one profile name to delete (`pendingDeleteProfileName`), plus
+/// activation/MFA/connect state. Unknown/missing fields degrade to false/null so
+/// older backends stay compatible.
 class StatusResponse {
   StatusResponse({
     required this.isActive,
@@ -45,6 +46,7 @@ class StatusResponse {
     required this.logUploadRequested,
     required this.remoteLanCidrsByProfile,
     this.clientApiKey,
+    this.pendingDeleteProfileName,
   });
 
   factory StatusResponse.fromJson(Map<String, dynamic> json) {
@@ -83,6 +85,7 @@ class StatusResponse {
           .map((e) => LanCidrProfile.fromJson(e as Map<String, dynamic>))
           .toList(),
       clientApiKey: m.string('clientApiKey'),
+      pendingDeleteProfileName: m.string('pendingDeleteProfileName'),
     );
   }
 
@@ -125,6 +128,13 @@ class StatusResponse {
   /// still on the previous key). The app persists it to secure storage and uses it for
   /// subsequent requests. Null in the normal case.
   final String? clientApiKey;
+
+  /// A profile the backend wants removed from this device (foreign-profile deprovision,
+  /// or a native customer/config deletion) — mirrors the desktop `ClientRegistrationService`
+  /// / Linux `core.py` handling of the same field. The backend auto-clears it once a later
+  /// `register` call's `profiles` list no longer contains this name, so the client must
+  /// actually delete the stored config (not just hide it) for the clear to ever happen.
+  final String? pendingDeleteProfileName;
 }
 
 /// A cross-device approval this phone must act on (it's the approver).

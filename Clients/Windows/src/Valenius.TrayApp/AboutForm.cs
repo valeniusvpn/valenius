@@ -199,6 +199,23 @@ internal sealed class AboutForm : Form
 
     private static string ReadBackendUrl()
     {
+        // Mirrors BackendUrlProvider's own precedence: a persisted user/MDM-set URL in
+        // backend.dat always wins over the install-time appsettings.json default.
+        var backendDatPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "Valenius", "backend.dat");
+
+        if (File.Exists(backendDatPath))
+        {
+            try
+            {
+                var persisted = File.ReadAllText(backendDatPath).Trim();
+                if (!string.IsNullOrEmpty(persisted))
+                    return persisted.TrimEnd('/');
+            }
+            catch { }
+        }
+
         // Production layout: {app}\trayapp\  →  {app}\service\appsettings.json
         var candidate = Path.GetFullPath(
             Path.Combine(AppContext.BaseDirectory, "..", "service", "appsettings.json"));

@@ -37,6 +37,7 @@ public class Client
         "macos" or "macOS" or "Mac" or "Darwin" => "bi-apple",
         "Linux" => "bi-ubuntu",
         "Windows" => "bi-windows",
+        "homeassistant" => "bi-house-gear-fill",
         _ => Hostname.Contains("LAP", StringComparison.OrdinalIgnoreCase)
             ? "bi-laptop"
             : "bi-windows",
@@ -104,7 +105,9 @@ public class Client
     /// <summary>JSON array of profile names last reported by the client, e.g. ["Office_VPN","Home"]</summary>
     public string? KnownProfiles { get; set; }
 
-    /// <summary>Profile the admin has requested to be deleted on the client. Cleared automatically once the client confirms removal.</summary>
+    /// <summary>Unused — superseded by the <c>ClientPendingDeletes</c> queue table (a single scalar
+    /// field can't hold more than one in-flight deletion; see <see cref="ClientPendingDelete"/>).
+    /// Left in place only so existing backups still round-trip; always null going forward.</summary>
     [MaxLength(50)]
     public string? PendingDeleteProfileName { get; set; }
 
@@ -228,6 +231,14 @@ public class Client
     /// <see cref="Customer.MfaSessionLifetimeHours"/>.
     /// </summary>
     public int? MfaSessionLifetimeHours { get; set; }
+
+    // ── Device tunnel (Windows, Pro) ────────────────────────────────────────────
+
+    /// <summary>
+    /// Per-client override for <see cref="Customer.DeviceTunnelDefaultEnabled"/>. Null inherits
+    /// the customer default.
+    /// </summary>
+    public bool? DeviceTunnelEnabled { get; set; }
 
     /// <summary>Base32-encoded per-client TOTP secret. Null = not enrolled. Server-generated.</summary>
     [MaxLength(64)]

@@ -147,6 +147,28 @@ final mfaStateProvider = StateProvider<MfaState>((_) => const MfaState());
 final pendingApprovalsProvider =
     StateProvider<List<PendingApproval>>((_) => const []);
 
+/// What happened to a profile as a result of the latest heartbeat ingest —
+/// consumed by the UI to show a one-shot notification (see home_screen.dart).
+enum ProfileChangeKind { added, updated, deleted }
+
+class ProfileChangeEvent {
+  ProfileChangeEvent(this.name, this.kind) : at = DateTime.now();
+
+  final String name;
+  final ProfileChangeKind kind;
+
+  /// Distinguishes two otherwise-identical events (same name+kind on separate
+  /// heartbeats) so `ref.listen` fires again instead of treating a repeat as
+  /// "no change" — see [ProfilesController] for the equivalent list refresh.
+  final DateTime at;
+}
+
+/// Most recent profile add/update/delete detected by the heartbeat ingest, or
+/// null before the first one. Overwritten (not queued) — a UI that's been
+/// backgrounded through several changes only sees the latest.
+final profileChangeEventProvider =
+    StateProvider<ProfileChangeEvent?>((_) => null);
+
 /// The profile list shown in the UI — derived from the configs this device has
 /// received and stored (the heartbeat carries no profile list).
 final profilesControllerProvider =
@@ -175,6 +197,10 @@ final registrationControllerProvider =
     onMfaState: (mfa) => ref.read(mfaStateProvider.notifier).state = mfa,
     onMfaGate: (gatedProfile) =>
         ref.read(connectionControllerProvider.notifier).onMfaGate(gatedProfile),
+    onProfileDeleted: (name) =>
+        ref.read(connectionControllerProvider.notifier).onProfileDeleted(name),
+    onProfileChange: (event) =>
+        ref.read(profileChangeEventProvider.notifier).state = event,
     onPendingApprovals: (list) =>
         ref.read(pendingApprovalsProvider.notifier).state = list,
     onAutoConnect: (enabled, profileName, configText) =>
@@ -264,6 +290,8 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     required this.onRemoteLanCidrs,
     required this.onMfaState,
     required this.onMfaGate,
+    required this.onProfileDeleted,
+    required this.onProfileChange,
     required this.onPendingApprovals,
     required this.onAutoConnect,
     this.pollInterval,
@@ -284,6 +312,15 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   /// expired). Argument is the gated server profile name so the connection layer
   /// only tears down that tunnel, not a hand-connected foreign one.
   final void Function(String? gatedProfile) onMfaGate;
+
+  /// Called after a backend-requested profile deletion has been applied to the
+  /// config store, so the connection layer can tear down that tunnel if it's active.
+  final void Function(String deletedProfile) onProfileDeleted;
+
+  /// Called for every profile add/update/delete detected during config ingest,
+  /// purely so the UI can surface a notification — does not drive any tunnel logic
+  /// (that's [onProfileDeleted]).
+  final void Function(ProfileChangeEvent) onProfileChange;
   final void Function(List<PendingApproval>) onPendingApprovals;
 
   /// Applies the backend's on-demand auto-connect policy. [configText] is the
@@ -459,7 +496,13 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     if (api == null) return;
     for (var attempt = 0; ; attempt++) {
       try {
-        final resp = await api.register(trayRunning: true, hostname: _hostname);
+        final knownProfiles =
+            (await configStore.list()).map((p) => p.name).toList();
+        final resp = await api.register(
+          trayRunning: true,
+          hostname: _hostname,
+          profiles: knownProfiles,
+        );
         // Backend key rotation: adopt + persist the new key so subsequent requests (and the
         // next app launch) authenticate with it. Only sent while still on the previous key.
         final rotatedKey = resp.clientApiKey;
@@ -541,28 +584,58 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     }
   }
 
-  /// Persist any configs the heartbeat delivered. Foreign configs are inline and
-  /// one-shot; a native pending config is fetched (and cleared) via GET. Both
-  /// are cleared backend-side on delivery, so this must run every heartbeat.
+  /// Persist any configs the heartbeat delivered, and remove any it asked deleted.
+  /// Foreign configs are inline and one-shot; a native pending config is fetched
+  /// (and cleared) via GET. Both are cleared backend-side on delivery, so this must
+  /// run every heartbeat. The delete is a one-shot request too — the backend only
+  /// clears `pendingDeleteProfileName` once a later heartbeat's `profiles` list
+  /// (sent from [_refreshWithRetry]) confirms the name is actually gone, so an
+  /// interrupted delete here safely retries on the next heartbeat. Every add/update/
+  /// delete also fires [onProfileChange] so the UI can show a one-shot notification.
   Future<void> _ingestConfigs(BackendApi api, StatusResponse resp) async {
     var changed = false;
+    // Snapshot before any writes below, so a config that's both added and later
+    // re-provisioned within the same batch still classifies against what the
+    // device actually had before this heartbeat started.
+    final existingNames =
+        (await configStore.list()).map((p) => p.name).toSet();
 
     for (final c in resp.pendingForeignConfigs) {
-      if (await _store(c.fileName, c.content)) changed = true;
+      if (await _store(c.fileName, c.content, existingNames)) changed = true;
     }
 
     if (resp.hasPendingConfig) {
       final pc = await api.fetchPendingConfig();
-      if (pc != null && await _store(pc.fileName, pc.content)) changed = true;
+      if (pc != null && await _store(pc.fileName, pc.content, existingNames)) {
+        changed = true;
+      }
+    }
+
+    final deleteName = resp.pendingDeleteProfileName;
+    if (deleteName != null && deleteName.isNotEmpty) {
+      await configStore.delete(deleteName);
+      changed = true;
+      onProfileDeleted(deleteName);
+      onProfileChange(ProfileChangeEvent(deleteName, ProfileChangeKind.deleted));
     }
 
     if (changed) onConfigsChanged();
   }
 
-  Future<bool> _store(String fileName, String content) async {
+  Future<bool> _store(
+    String fileName,
+    String content,
+    Set<String> existingNames,
+  ) async {
     final name = profileNameFromFileName(fileName);
     if (!isValidProfileName(name) || content.isEmpty) return false;
     await configStore.save(name, content);
+    onProfileChange(ProfileChangeEvent(
+      name,
+      existingNames.contains(name)
+          ? ProfileChangeKind.updated
+          : ProfileChangeKind.added,
+    ));
     return true;
   }
 }

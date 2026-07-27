@@ -34,6 +34,10 @@ public class PipeCommand
     public string? MfaCode { get; set; }
     /// <summary>DNS host for <see cref="CommandType.SetBackendUrl"/> (without scheme; the service prepends https://).</summary>
     public string? BackendDns { get; set; }
+    /// <summary>For <see cref="CommandType.UploadConfig"/>: when true, the uploaded profile is also
+    /// archived to the backend so every OS user on this machine can receive it, not just the
+    /// uploading account. Defaults to (null/false) local-only, matching prior behavior.</summary>
+    public bool? ShareWithAllUsers { get; set; }
 }
 
 public class PipeResponse
@@ -45,6 +49,11 @@ public class PipeResponse
     /// (the client's own LAN overlaps a network reachable through the VPN, or the assigned VPN
     /// IP itself). The TrayApp shows a blocking modal for this instead of the usual balloon.</summary>
     public bool IsLanConflict { get; set; }
+    /// <summary>For <see cref="CommandType.UploadConfig"/> with <see cref="PipeCommand.ShareWithAllUsers"/>:
+    /// true when the local save succeeded (<see cref="Success"/> is still true) but archiving the
+    /// profile to the backend for other OS users failed — <see cref="Error"/> carries a
+    /// user-facing explanation. The profile stays usable, just not yet shared.</summary>
+    public bool ShareFailed { get; set; }
 }
 
 /// <summary>One connected WireGuard tunnel. Multiple may be active simultaneously
@@ -53,6 +62,13 @@ public class ConnectedTunnelInfo
 {
     public string Name { get; set; } = "";
     public bool IsVerified { get; set; }
+    /// <summary>
+    /// True once the initial ~60s verification window elapsed with no success. Not terminal —
+    /// verification keeps retrying at a slower cadence in the background, and a late success
+    /// still clears this and sets <see cref="IsVerified"/>. The tray shows an amber
+    /// "Confirmation failed" tag instead of the plain "Connected" one.
+    /// </summary>
+    public bool VerificationFailed { get; set; }
     public string? ConnectedUser { get; set; }
     public DateTime ConnectedSince { get; set; }
 }
@@ -65,6 +81,8 @@ public class TunnelStatus
     /// The UI replaces the green dot with a green checkmark when this is true.
     /// </summary>
     public bool IsVerified { get; set; }
+    /// <summary>Mirrors <see cref="ConnectedTunnelInfo.VerificationFailed"/> for the primary/server tunnel.</summary>
+    public bool VerificationFailed { get; set; }
     public string? ConnectedUser { get; set; }
     public string? TunnelName { get; set; }
     public DateTime? ConnectedSince { get; set; }

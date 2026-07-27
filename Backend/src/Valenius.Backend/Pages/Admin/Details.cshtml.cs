@@ -22,6 +22,9 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
     public List<ClientForeignProfile> ForeignProfiles { get; private set; } = [];
     public List<Customer> ShareableCustomers { get; private set; } = [];
     public List<string> KnownProfiles { get; private set; } = [];
+    /// <summary>Profile names currently queued for on-device deletion (see ClientPendingDelete) —
+    /// there can be more than one in flight at once.</summary>
+    public HashSet<string> PendingDeleteProfileNames { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
     public bool IsOnline { get; private set; }
     public bool IsWgConnected { get; private set; }
 
@@ -102,6 +105,9 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
             try { KnownProfiles = JsonSerializer.Deserialize<List<string>>(client.KnownProfiles) ?? []; }
             catch { /* leave empty */ }
         }
+        PendingDeleteProfileNames = new HashSet<string>(
+            await db.ClientPendingDeletes.Where(d => d.ClientId == id).Select(d => d.ProfileName).ToListAsync(),
+            StringComparer.OrdinalIgnoreCase);
         IsOnline      = presence.IsOnline(client.ClientKey);
         IsWgConnected = tunnels.IsConnected(client.ClientKey);
 
@@ -720,8 +726,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (!User.IsInRole("Admin")) return Forbid();
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
-        if (!string.IsNullOrWhiteSpace(profileName))
-            client.PendingDeleteProfileName = profileName.Trim();
+        await ClientPendingDeleteQueue.QueueAsync(db, client.Id, profileName);
         await db.SaveChangesAsync();
         notifier.Notify(client.ClientKey);
         return RedirectToPage(new { id });
@@ -746,6 +751,24 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         client.AutoConnectEnabled = autoConnectEnabled;
         var profile = autoConnectProfileName?.Trim();
         client.AutoConnectProfileName = string.IsNullOrEmpty(profile) ? null : profile;
+        await db.SaveChangesAsync();
+        notifier.Notify(client.ClientKey);
+        return RedirectToPage(new { id });
+    }
+
+    /// <summary>Per-client override for the Windows device tunnel (Inherit/Enabled/Disabled) — see
+    /// <see cref="Models.Client.DeviceTunnelEnabled"/> / <see cref="Models.Customer.DeviceTunnelDefaultEnabled"/>.</summary>
+    public async Task<IActionResult> OnPostSetDeviceTunnelAsync(int id, string deviceTunnel)
+    {
+        if (!User.IsInRole("Admin")) return Forbid();
+        var client = await db.Clients.FindAsync(id);
+        if (client is null) return NotFound();
+        client.DeviceTunnelEnabled = deviceTunnel switch
+        {
+            "Enabled"  => true,
+            "Disabled" => false,
+            _          => null,   // "Inherit"
+        };
         await db.SaveChangesAsync();
         notifier.Notify(client.ClientKey);
         return RedirectToPage(new { id });
@@ -826,6 +849,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (sourceCustomer is null) return NotFound();
 
         var result = await provisioner.ProvisionForeignAsync(client, sourceCustomer);
+        await provisioner.ReconcileStaleProfilesAsync(client);
         await db.SaveChangesAsync();
         notifier.Notify(client.ClientKey);
         _ = audit.LogAsync(Audit.Client, "Foreign profile provisioned", $"Client: {client.Hostname}",
@@ -886,6 +910,12 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
                     $"Source customer: {fp.SourceCustomer.Name}");
             }
         }
+
+        // Sweep any profile this client was archived as once holding but no longer should —
+        // e.g. one whose own deletion was clobbered by another racing it (see
+        // ClientPendingDelete) — so "Re-provision" also cleans up stale profiles, not just
+        // pushes the current ones.
+        await provisioner.ReconcileStaleProfilesAsync(client);
 
         await db.SaveChangesAsync();
         notifier.Notify(client.ClientKey);

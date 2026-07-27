@@ -14,8 +14,16 @@ String get _clientPlatform => Platform.isIOS ? 'iOS' : 'Android';
 /// The backend surface the app depends on. An interface so tests inject a fake
 /// without HTTP.
 abstract interface class BackendApi {
-  /// POST /api/clients/register — heartbeat; returns the current status.
-  Future<StatusResponse> register({required bool trayRunning, String? hostname});
+  /// POST /api/clients/register — heartbeat; returns the current status. [profiles] is
+  /// the list of profile names currently stored on this device — mirrors the desktop
+  /// clients' `RegisterRequest.Profiles`, and is how the backend confirms a
+  /// `pendingDeleteProfileName` was actually deleted (it clears the flag once a request's
+  /// `profiles` no longer contains that name) instead of re-sending it forever.
+  Future<StatusResponse> register({
+    required bool trayRunning,
+    required List<String> profiles,
+    String? hostname,
+  });
 
   /// POST /api/clients/pairing/redeem — activate + join a customer via a QR code. Returns the
   /// installation's API key (the caller persists it), or null if the backend didn't send one.
@@ -105,6 +113,7 @@ class BackendClient implements BackendApi {
   @override
   Future<StatusResponse> register({
     required bool trayRunning,
+    required List<String> profiles,
     String? hostname,
   }) async {
     // The app version shown in the admin panel ("Client ver") — every other client sends this
@@ -129,6 +138,7 @@ class BackendClient implements BackendApi {
         'trayRunning': trayRunning,
         'platform': _clientPlatform,
         'version': appVersion,
+        'profiles': profiles,
       }),
     ).timeout(_timeout);
     if (res.statusCode != 200) {

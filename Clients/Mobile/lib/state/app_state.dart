@@ -238,6 +238,17 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
     await _disconnect();
   }
 
+  /// The backend deleted this profile (foreign-profile deprovision, or a native
+  /// deletion) and the config was just removed from the store — tear the tunnel
+  /// down if it's the one currently active, so the app doesn't keep showing a
+  /// "connected" profile whose config no longer exists. No-op otherwise.
+  Future<void> onProfileDeleted(String name) async {
+    final active = state.activeProfile;
+    if (active == null || state.busy) return;
+    if (active != name) return;
+    await _disconnect();
+  }
+
   /// On a network change, re-confirm the active tunnel and tear it down only if we
   /// can be confident it's dead: it was verified end-to-end via the gateway /health
   /// probe and that probe now fails for the whole budget (the new network can't reach

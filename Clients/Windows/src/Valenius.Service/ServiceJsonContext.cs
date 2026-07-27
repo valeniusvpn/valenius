@@ -65,7 +65,12 @@ internal record ClientStatusResponse(
     /// <summary>When true, run the local repair checks immediately instead of waiting for the next
     /// service restart — currently the data-directory ACL self-heal. A generic hook other
     /// client-side repairs can join later. One-shot — cleared server-side after being sent.</summary>
-    bool PendingConfigRepair = false);
+    bool PendingConfigRepair = false,
+    /// <summary>When true, connect this customer's own native sidecar profile (ServerProfileName)
+    /// automatically at boot, before any user logs on, using the same away-from-trusted-network
+    /// policy as the generic auto-connect. Already resolved server-side (per-client override, else
+    /// customer default) and already gated on ServerProfileName actually being set.</summary>
+    bool DeviceTunnelEnabled = false);
 
 internal record PendingForeignConfigEntry(string FileName, string Content);
 internal record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
@@ -73,6 +78,8 @@ internal record LanCidrProfileEntry(string ProfileName, string[] Cidrs);
 internal record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "", string? Detail = null);
 internal record PendingConfigResponse(string FileName, string Content);
 internal record MfaEnrollConfirmRequest(string ClientKey, string Code);
+/// <summary>Body for POST /api/clients/profiles/archive — see <see cref="ClientRegistrationService.ArchiveProfileAsync"/>.</summary>
+internal record ArchiveProfileRequest(string ClientKey, string ProfileName, string Content);
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(RegistrationState))]
@@ -86,4 +93,5 @@ internal record MfaEnrollConfirmRequest(string ClientKey, string Code);
 [JsonSerializable(typeof(PendingForeignConfigEntry[]))]
 [JsonSerializable(typeof(GatewayProfileEntry[]))]
 [JsonSerializable(typeof(LanCidrProfileEntry[]))]
+[JsonSerializable(typeof(ArchiveProfileRequest))]
 internal partial class ServiceJsonContext : JsonSerializerContext { }

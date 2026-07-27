@@ -2,7 +2,9 @@
 # Upgrades an existing Valenius Community install (created by install.sh) in place to
 # Pro: backs up the database, swaps the backend to the pre-built Pro image, and adds a
 # license key -- keeping the same database, volumes, and API key so existing clients
-# never notice. See update.sh (repo root) for a same-edition version upgrade instead.
+# never notice. See update.sh (repo root) for routine updates afterwards -- it
+# auto-detects Community vs Pro and pulls/rebuilds accordingly, so you only need this
+# script again to change the license key or force a backup before a Pro update.
 # Mirrors documentation/docs/self-hosting/pro.md ("Upgrading from Community") and
 # help/docs/install/backend-pro.md -- keep these in sync if you change this script.
 #
@@ -12,7 +14,7 @@
 #   ./proupgrade.sh --skip-backup                # advanced: skip the automatic pg_dump
 #
 # Safe to re-run: if the stack is already on the Pro image, it only updates the license
-# key and restarts.
+# key and restarts (also pulling the latest Pro image along the way).
 
 set -euo pipefail
 
@@ -101,7 +103,7 @@ fi
 # ── Rewrite the deploy files ──────────────────────────────────────────────
 
 if [ "$ALREADY_PRO" = "1" ]; then
-  log "Stack is already on the Pro image -- just updating the license key."
+  log "Stack is already on the Pro image -- updating the license key and pulling the latest image. (For routine updates without a license change, ./update.sh does this too.)"
 else
   cp "$COMPOSE_FILE" "$COMPOSE_FILE.pre-pro.bak"
   log "Saved a copy of the old compose file to $COMPOSE_FILE.pre-pro.bak (revert by copying it back and running 'docker compose up -d')."
@@ -162,4 +164,6 @@ Valenius Pro is up, running on the same database as your Community install.
 
   To revert to Community: copy $COMPOSE_FILE.pre-pro.bak back over
   $COMPOSE_FILE, then 'docker compose up -d' in $DEPLOY_DIR.
+
+  To update:  ./update.sh   (auto-detects Pro and pulls the latest published image)
 EOF

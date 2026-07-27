@@ -1,3 +1,21 @@
+/* Valenius brand blue, mapped onto Material's "custom" palette slot (see
+   mkdocs.yml). Same hex values as the admin panel's --brand-primary /
+   --brand-accent (Backend/.../Pages/Shared/_Layout.cshtml) — keep in sync. */
+[data-md-color-primary="custom"] {
+    --md-primary-fg-color: #0F4E66;
+    --md-primary-fg-color--light: #1DABDA;
+    --md-primary-fg-color--dark: #0a3a4d;
+    --md-primary-bg-color: #ffffff;
+    --md-primary-bg-color--light: hsla(0, 0%, 100%, 0.7);
+}
+
+[data-md-color-accent="custom"] {
+    --md-accent-fg-color: #1DABDA;
+    --md-accent-fg-color--transparent: rgba(29, 171, 218, 0.1);
+    --md-accent-bg-color: #ffffff;
+    --md-accent-bg-color--light: hsla(0, 0%, 100%, 0.7);
+}
+
 /* Inline "Pro" badge — marks Pro-only features throughout the site.
    Usage in Markdown:  <span class="pro-badge">Pro</span>  */
 .md-typeset .pro-badge {

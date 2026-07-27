@@ -21,8 +21,7 @@ public class PipeServer : BackgroundService
     private readonly AutoConnectManager _autoConnect;
     private readonly ILogger<PipeServer> _logger;
 
-    private readonly ConnectivityVerifier _verifier;
-    private readonly HandshakeVerifier _handshakeVerifier;
+    private readonly TunnelVerifier _tunnelVerifier;
     private readonly BackendUrlProvider _backendUrl;
 
     public PipeServer(
@@ -33,22 +32,20 @@ public class PipeServer : BackgroundService
         RegistrationManager registration,
         ClientRegistrationService registrationSvc,
         AutoConnectManager autoConnect,
-        ConnectivityVerifier verifier,
-        HandshakeVerifier handshakeVerifier,
+        TunnelVerifier tunnelVerifier,
         BackendUrlProvider backendUrl,
         ILogger<PipeServer> logger)
     {
-        _wg                = wg;
-        _configs           = configs;
-        _state             = state;
-        _updater           = updater;
-        _registration      = registration;
-        _registrationSvc   = registrationSvc;
-        _autoConnect       = autoConnect;
-        _verifier          = verifier;
-        _handshakeVerifier = handshakeVerifier;
-        _backendUrl        = backendUrl;
-        _logger            = logger;
+        _wg              = wg;
+        _configs         = configs;
+        _state           = state;
+        _updater         = updater;
+        _registration    = registration;
+        _registrationSvc = registrationSvc;
+        _autoConnect     = autoConnect;
+        _tunnelVerifier  = tunnelVerifier;
+        _backendUrl      = backendUrl;
+        _logger          = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -200,6 +197,29 @@ public class PipeServer : BackgroundService
                     return Fail("Profile name may only contain letters, digits, underscores, and hyphens (max 50 chars).");
 
                 _configs.SaveConfig(username, cmd.ProfileName!, cmd.ConfigContent);
+
+                // Opt-in only: the default upload stays local-only to this OS user, exactly as
+                // before. Only mark it managed on a *successful* archive call — otherwise a later
+                // SyncManagedProfiles reconciliation would see a "managed" profile the backend
+                // never actually received and delete the uploader's own only copy.
+                if (cmd.ShareWithAllUsers == true)
+                {
+                    var shared = await _registrationSvc.ArchiveProfileAsync(cmd.ProfileName!, cmd.ConfigContent, ct);
+                    if (shared)
+                    {
+                        _configs.MarkManaged(username, cmd.ProfileName!);
+                    }
+                    else
+                    {
+                        return new PipeResponse
+                        {
+                            Success     = true,
+                            ShareFailed = true,
+                            Error       = "Profile saved, but could not be shared with other users on this PC. Check your connection and try again."
+                        };
+                    }
+                }
+
                 return Ok();
             }
 
@@ -279,9 +299,9 @@ public class PipeServer : BackgroundService
                 var probe     = _registration.GetGatewayProbe(tunnelName);
                 var skipCheck = _registration.GetSkipConnectivityCheck();
                 if (probe is { } gw && !skipCheck)
-                    _ = Task.Run(() => RunGatewayVerifyAsync(tunnelName, gw.Ip, gw.Port, ct), ct);
+                    _ = Task.Run(() => _tunnelVerifier.RunGatewayVerifyAsync(tunnelName, gw.Ip, gw.Port, ct), ct);
                 else
-                    _ = Task.Run(() => RunHandshakeVerifyAsync(tunnelName, ct), ct);
+                    _ = Task.Run(() => _tunnelVerifier.RunHandshakeVerifyAsync(tunnelName, ct), ct);
 
                 return Ok();
             }
@@ -363,10 +383,16 @@ public class PipeServer : BackgroundService
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromSeconds(8));
-                var regTask    = _registrationSvc.TryRegisterAsync(ct: cts.Token);
-                var updateTask = _updater.CheckAsync(cts.Token);
-                try { await regTask; }    catch { }
-                try { await updateTask; } catch { }
+                var regTask      = _registrationSvc.TryRegisterAsync(ct: cts.Token);
+                var updateTask   = _updater.CheckAsync(cts.Token);
+                // Pulls this Client's backend-authoritative profile set and reconciles it into
+                // `username`'s local folder — see ConfigManager.SyncManagedProfiles. Runs on every
+                // tray start and popup-open so a new/empty OS user account on an already-provisioned
+                // machine gets its profiles without waiting for the next heartbeat cycle.
+                var profilesTask = _registrationSvc.ResyncProfilesAsync(username, cts.Token);
+                try { await regTask; }      catch { }
+                try { await updateTask; }   catch { }
+                try { await profilesTask; } catch { }
 
                 var syncStatus = BuildTunnelStatus(username);
                 return Ok(syncStatus, ValeniusJsonContext.Default.TunnelStatus);
@@ -454,58 +480,6 @@ public class PipeServer : BackgroundService
     }
 
     /// <summary>
-    /// Verifies a sidecar tunnel via the HTTP /health gateway probe, falling back to the local
-    /// WireGuard handshake check if the gateway probe doesn't succeed (e.g. the health port is
-    /// firewalled from VPN clients). Either success marks the tunnel verified.
-    /// </summary>
-    private async Task RunGatewayVerifyAsync(string tunnelName, string gatewayIp, int healthPort, CancellationToken ct)
-    {
-        try
-        {
-            if (await _verifier.VerifyAsync(gatewayIp, healthPort, ct))
-            {
-                _state.SetVerified(tunnelName, viaGateway: true);
-                _logger.LogInformation("Gateway connectivity verified for tunnel '{Tunnel}'.", tunnelName);
-                return;
-            }
-
-            _logger.LogInformation(
-                "Gateway probe did not succeed for '{Tunnel}' — falling back to handshake check.", tunnelName);
-            if (await _handshakeVerifier.VerifyAsync(tunnelName, ct))
-            {
-                _state.SetVerified(tunnelName);
-                _logger.LogInformation("Handshake verified for tunnel '{Tunnel}' (gateway fallback).", tunnelName);
-            }
-        }
-        catch (OperationCanceledException) { /* service stopping */ }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Gateway verification threw for tunnel '{Tunnel}'.", tunnelName);
-        }
-    }
-
-    /// <summary>
-    /// Verifies a non-primary (foreign) tunnel via its local WireGuard handshake. Marks the
-    /// tunnel verified once a recent handshake is observed; no routed gateway is required.
-    /// </summary>
-    private async Task RunHandshakeVerifyAsync(string tunnelName, CancellationToken ct)
-    {
-        try
-        {
-            if (await _handshakeVerifier.VerifyAsync(tunnelName, ct))
-            {
-                _state.SetVerified(tunnelName);
-                _logger.LogInformation("Handshake verified for tunnel '{Tunnel}'.", tunnelName);
-            }
-        }
-        catch (OperationCanceledException) { /* service stopping */ }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Handshake verification threw for tunnel '{Tunnel}'.", tunnelName);
-        }
-    }
-
-    /// <summary>
     /// Builds the full tunnel status for the calling user, including the multi-tunnel
     /// <see cref="TunnelStatus.ConnectedTunnels"/> set and the mirrored single-tunnel
     /// compatibility fields (taken from the server/primary profile, else the first entry).
@@ -523,6 +497,7 @@ public class PipeServer : BackgroundService
             ConnectedTunnels     = connected,
             IsConnected          = primary is not null,
             IsVerified           = primary?.IsVerified ?? false,
+            VerificationFailed   = primary?.VerificationFailed ?? false,
             TunnelName           = primary?.Name,
             ConnectedUser        = primary?.ConnectedUser,
             ConnectedSince       = primary?.ConnectedSince,

@@ -125,6 +125,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with WidgetsBindingObse
       }
     });
 
+    ref.listen(profileChangeEventProvider, (prev, next) {
+      if (next == null) return;
+      final String verb;
+      final Color color;
+      switch (next.kind) {
+        case ProfileChangeKind.added:
+          verb = 'added';
+          color = ValeniusColors.verifiedPill;
+          break;
+        case ProfileChangeKind.updated:
+          verb = 'updated';
+          color = ValeniusColors.verifiedPill;
+          break;
+        case ProfileChangeKind.deleted:
+          verb = 'removed';
+          color = ValeniusColors.deleteHot;
+          break;
+      }
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text("Profile '${next.name}' $verb"),
+          backgroundColor: color,
+          duration: const Duration(seconds: 4),
+        ));
+    });
+
     ref.listen(mfaStateProvider, (prev, next) {
       // Fire only on an actual gated -> cleared transition, not on every
       // heartbeat — otherwise this would also fire (wrongly) on first load

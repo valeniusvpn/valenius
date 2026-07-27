@@ -750,6 +750,34 @@
                         </div>
                         }
 
+                        <!-- Device tunnel default -->
+                        <div class="card mb-3">
+                            <div class="card-header"><i class="bi bi-laptop me-2"></i>Device tunnel</div>
+                            <div class="card-body">
+                                <p class="small text-muted mb-3">
+                                    When enabled, this customer's clients connect their own integrated-server
+                                    profile automatically at boot, before any user logs on — so domain GPOs and
+                                    login scripts work correctly off the office network. Uses the same
+                                    trusted-network policy as Auto Connect (never connects while already on a
+                                    trusted network). Override per client on the client's Details page.
+                                </p>
+                                <form method="post" asp-page-handler="SaveDeviceTunnelDefault">
+                                    <input type="hidden" name="id" value="@c.Id" />
+                                    <div class="form-check form-switch mb-3">
+                                        <input type="checkbox" class="form-check-input" id="deviceTunnelDefaultEnabled"
+                                               name="deviceTunnelDefaultEnabled" value="true"
+                                               @(c.DeviceTunnelDefaultEnabled ? "checked" : "") />
+                                        <label class="form-check-label small" for="deviceTunnelDefaultEnabled">
+                                            Connect automatically before login by default
+                                        </label>
+                                    </div>
+                                    <button type="submit" class="btn btn-primary btn-sm">
+                                        <i class="bi bi-floppy me-1"></i>Save
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+
                     </div>
 
                     <!-- Right column — enrollment & operations (actions) -->

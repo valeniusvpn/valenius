@@ -69,9 +69,13 @@ IHost host = Host.CreateDefaultBuilder(args)
             client.Timeout = TimeSpan.FromSeconds(70);
         }).AddHttpMessageHandler<ApiKeyHandler>();
 
-        services.AddSingleton<ClientRegistrationService>();
         services.AddSingleton<ConnectivityVerifier>();
         services.AddSingleton<HandshakeVerifier>();
+        // Shared post-connect verification (retry loop) used by manual connect, AutoConnect, and
+        // PendingConnect alike — see TunnelVerifier's doc comment for why this must be one
+        // implementation, not one per connect path.
+        services.AddSingleton<TunnelVerifier>();
+        services.AddSingleton<ClientRegistrationService>();
 
         // Registered FIRST so its StartAsync runs before any other hosted service — repairs the
         // data-dir ACLs (if a bad install left them unreadable) before the heartbeat/config code runs.
