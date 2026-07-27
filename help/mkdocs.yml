@@ -81,6 +81,7 @@ nav:
       - Linux client: install/client-linux.md
       - macOS client: install/client-macos.md
       - Mobile app: install/client-mobile.md
+      - Home Assistant add-on: install/client-homeassistant.md
       - First steps after install: install/first-steps.md
   - Working with Valenius:
       - working/index.md
