@@ -247,6 +247,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with WidgetsBindingObse
     final controller = ref.read(connectionControllerProvider.notifier);
     final store = ref.read(configStoreProvider);
     final gateways = ref.watch(gatewayTargetsProvider);
+    final fallbacks = ref.watch(fallbackTargetsProvider);
     return ListView.separated(
       itemCount: profiles.length,
       separatorBuilder: (_, __) =>
@@ -258,13 +259,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with WidgetsBindingObse
           name: p.name,
           connected: connected,
           verified: connected && conn.verified,
+          fallbackPort: connected ? conn.fallbackPortUsed : 0,
           mfaGated: p.mfaGated,
           deletable: p.deletable,
           onTap: conn.busy
               ? null
               : () async {
                   final cfg = await store.read(p.name) ?? '';
-                  await controller.toggle(p.name, cfg, gateways[p.name]);
+                  await controller.toggle(p.name, cfg, gateways[p.name],
+                      fallback: fallbacks[p.name]);
                 },
         );
       },

@@ -12,7 +12,7 @@ namespace Valenius.Backend.Pages.Admin;
 // Increase limits so large self-contained installers (60–150 MB) can be uploaded.
 [RequestSizeLimit(200_000_000)]
 [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
-public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAuditService audit) : PageModel
+public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAuditService audit, ApiKeyStore apiKeyStore) : PageModel
 {
     /// <summary>The OS streams, in tab order, with display labels + accepted file extensions.</summary>
     public static readonly (string Os, string Label, string[] Ext, string Accept)[] Streams =
@@ -214,7 +214,7 @@ public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAudi
 
         // Force https: the client talks to the backend over TLS only.
         var backendUrl = $"https://{Request.Host}";
-        var apiKey     = config["Valenius:ApiKey"] ?? "";
+        var apiKey     = apiKeyStore.Key;
         var ini = $"""
             ; Valenius client setup
             ; Place this file in the same folder as the installer and run the installer.

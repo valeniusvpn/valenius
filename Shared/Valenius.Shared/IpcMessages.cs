@@ -21,7 +21,11 @@ public enum CommandType
     SendLogs,
     /// <summary>Sent by the TrayApp first-run prompt to set the backend server address. The DNS name
     /// is carried in <see cref="PipeCommand.BackendDns"/>; the service prepends https:// and persists it.</summary>
-    SetBackendUrl
+    SetBackendUrl,
+    /// <summary>Sent by the TrayApp's first-run "Use standalone" choice. No payload — the service just
+    /// persists that the user opted out of backend setup, so the tray stops prompting and shows the
+    /// normal popup (local profiles, no backend contacted) instead of the setup-required block.</summary>
+    SetStandaloneMode
 }
 
 public class PipeCommand
@@ -69,6 +73,15 @@ public class ConnectedTunnelInfo
     /// "Confirmation failed" tag instead of the plain "Connected" one.
     /// </summary>
     public bool VerificationFailed { get; set; }
+    /// <summary>
+    /// The UDP port this tunnel switched to (typically 443) after the primary WireGuard® port
+    /// produced no successful verification within the trigger window
+    /// (docs/design/port-443-fallback.md), or 0 if it's still on the primary port. Sticky for the
+    /// life of the connection — cleared only by a fresh connect, which always starts back on the
+    /// primary port. The tray appends " · &lt;port&gt;" to whichever tag it would otherwise show,
+    /// since it's useful for the user to know their traffic left on an alternate port.
+    /// </summary>
+    public int FallbackPortUsed { get; set; }
     public string? ConnectedUser { get; set; }
     public DateTime ConnectedSince { get; set; }
 }
@@ -83,6 +96,8 @@ public class TunnelStatus
     public bool IsVerified { get; set; }
     /// <summary>Mirrors <see cref="ConnectedTunnelInfo.VerificationFailed"/> for the primary/server tunnel.</summary>
     public bool VerificationFailed { get; set; }
+    /// <summary>Mirrors <see cref="ConnectedTunnelInfo.FallbackPortUsed"/> for the primary/server tunnel.</summary>
+    public int FallbackPortUsed { get; set; }
     public string? ConnectedUser { get; set; }
     public string? TunnelName { get; set; }
     public DateTime? ConnectedSince { get; set; }
@@ -104,6 +119,14 @@ public class TunnelStatus
     /// from an older service deserializes to <c>false</c> (configured) and never triggers a spurious prompt.
     /// </summary>
     public bool BackendUnconfigured { get; set; }
+    /// <summary>
+    /// True once the user explicitly chose "Use standalone" in the first-run setup dialog while
+    /// <see cref="BackendUnconfigured"/> is true. The tray shows the normal popup (local profiles,
+    /// connect/upload/delete all work with no backend contacted) instead of the setup-required
+    /// block, plus a "Connect to a server" action to opt in later. Default <c>false</c> preserves
+    /// today's behavior — same reasoning as <see cref="BackendUnconfigured"/>'s doc comment.
+    /// </summary>
+    public bool StandaloneMode { get; set; }
     public string[] AvailableProfiles  { get; set; } = [];
     public string[] DeletableProfiles  { get; set; } = [];
     public bool     AutoConnectEnabled { get; set; }

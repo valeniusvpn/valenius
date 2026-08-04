@@ -19,6 +19,38 @@ String normalizeAllowedIps(String config) {
   return lines.join('\n');
 }
 
+/// Per-profile UDP fallback port + trigger window (mirrors `FallbackEndpoint` from the
+/// heartbeat) — how long [ConnectionController] waits with no successful verification
+/// before it tries [port] once (docs/design/port-443-fallback.md).
+class FallbackTarget {
+  const FallbackTarget({required this.port, required this.triggerSeconds});
+
+  final int port;
+  final int triggerSeconds;
+}
+
+/// Rewrites the port in the config's single "Endpoint = host:port" line, keeping the
+/// host unchanged — the mobile analogue of the Windows `ConfigManager.PrepareConfigPath`
+/// endpoint override. Used only for the port-443 fallback retry: the in-memory config
+/// text handed to the tunnel is never written back to the config store, so the stored
+/// profile keeps its real endpoint and the next connect always starts on the primary
+/// port again.
+String rewriteEndpointPort(String config, int port) {
+  final lines = config.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    final eq = lines[i].indexOf('=');
+    if (eq < 0) continue;
+    if (lines[i].substring(0, eq).trim().toLowerCase() != 'endpoint') continue;
+    final value = lines[i].substring(eq + 1).trim();
+    final colon = value.lastIndexOf(':');
+    if (colon < 0) continue;
+    final host = value.substring(0, colon);
+    lines[i] = 'Endpoint = $host:$port';
+    break;
+  }
+  return lines.join('\n');
+}
+
 String _maskIpv4Cidr(String cidr) {
   final slash = cidr.indexOf('/');
   if (slash < 0) return cidr;

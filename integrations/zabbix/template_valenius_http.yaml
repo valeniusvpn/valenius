@@ -1,0 +1,1267 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: b4974d2094f54da09da2addf038110db
+      name: Templates/Applications
+  templates:
+    - uuid: 748816ccb65d4527966c7e750bb4083c
+      template: 'Valenius by HTTP'
+      name: 'Valenius by HTTP'
+      description: |
+        Monitors a Valenius VPN backend via its Prometheus-compatible /api/v1/metrics
+        endpoint. One HTTP agent item per minute regardless of fleet size; everything
+        else is a dependent item or LLD-discovered prototype parsed from that one
+        payload via Zabbix's built-in Prometheus preprocessing.
+
+        Requires a monitoring:read token, minted from the backend's Admin -> Monitoring
+        page. See https://documentation.valenius.com/monitoring/ and
+        https://documentation.valenius.com/integrations/zabbix/.
+
+        Per-gateway items/triggers (Pro only, need an integrated WireGuard server) are
+        discovered automatically; on Community-only or External-only fleets the
+        discovery rule simply finds nothing.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: ebc36b0f6f7e4420b8ec6162db2040cf
+          name: 'Get metrics'
+          type: HTTP_AGENT
+          key: valenius.get.metrics
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          units: ''
+          url: '{$VALENIUS.URL}/api/v1/metrics'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$VALENIUS.TOKEN}'
+          timeout: '{$VALENIUS.HTTP.TIMEOUT}'
+          delay: 1m
+          description: 'Master item. Raw Prometheus text exposition — everything else is a dependent item parsed out of this.'
+          tags:
+            - tag: component
+              value: control-plane
+
+        - uuid: abb43c7e191d4828bb5d7ac76e07d9a9
+          name: 'Control plane is responding'
+          type: DEPENDENT
+          key: valenius.up
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_up
+                - value
+                - ''
+          valuemap:
+            name: 'Boolean'
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: availability
+
+        - uuid: 9cf1454c419f478f888799200c73f515
+          name: 'Backend version'
+          type: DEPENDENT
+          key: valenius.build.version
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'valenius_build_info'
+                - label
+                - version
+          tags:
+            - tag: component
+              value: control-plane
+
+        - uuid: c89634619c874180a1c2e44f738be538
+          name: 'Backend edition'
+          type: DEPENDENT
+          key: valenius.build.edition
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'valenius_build_info'
+                - label
+                - edition
+          tags:
+            - tag: component
+              value: control-plane
+
+        - uuid: 3c12ea7febce47adb97878c42da68fdf
+          name: 'Process start time'
+          type: DEPENDENT
+          key: valenius.start.timestamp
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          units: unixtime
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_start_timestamp_seconds
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: control-plane
+
+        - uuid: a1acd172ebf64ccb9ee64e5507309478
+          name: 'Metrics snapshot generated at'
+          type: DEPENDENT
+          key: valenius.stats.generated.timestamp
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: UNSIGNED
+          units: unixtime
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_stats_generated_timestamp_seconds
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: control-plane
+
+        - uuid: eaa2394b636d4524ab02b0932080be42
+          name: 'Metrics snapshot age'
+          type: DEPENDENT
+          key: valenius.stats.age
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: FLOAT
+          units: s
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_stats_generated_timestamp_seconds
+                - value
+                - ''
+            - type: JAVASCRIPT
+              parameters:
+                - 'return Math.round(Date.now()/1000 - value);'
+          description: 'How stale the 15s server-side snapshot cache is. High values mean the control plane itself is having trouble, not that any one gateway is down.'
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: availability
+
+        - uuid: 0b777161d8ca4bb48613ab8f6e8dc35a
+          name: 'Database reachable'
+          type: DEPENDENT
+          key: valenius.db.up
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_db_up
+                - value
+                - ''
+          valuemap:
+            name: 'Boolean'
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: availability
+
+        - uuid: 5e4de6b48c20461b8f3023b8211fe6fb
+          name: 'Database probe query duration'
+          type: DEPENDENT
+          key: valenius.db.query.duration
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: FLOAT
+          units: s
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_db_query_duration_seconds
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: performance
+
+        - uuid: 1daf1eef371f4768a20e56d754431931
+          name: 'License is valid'
+          type: DEPENDENT
+          key: valenius.license.valid
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_license_valid
+                - value
+                - ''
+          valuemap:
+            name: 'License validity'
+          tags:
+            - tag: component
+              value: license
+            - tag: scope
+              value: availability
+
+        - uuid: 8fa92e887e7c43d686766ac54cd73a3a
+          name: 'License grace period active'
+          type: DEPENDENT
+          key: valenius.license.grace
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_license_grace_active
+                - value
+                - ''
+          valuemap:
+            name: 'Boolean'
+          tags:
+            - tag: component
+              value: license
+
+        - uuid: 3ec9c5191c244ecdb90ff05a43c1940e
+          name: 'License time until expiry'
+          type: DEPENDENT
+          key: valenius.license.expiry.left
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: FLOAT
+          units: s
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_license_expiry_timestamp_seconds
+                - value
+                - ''
+            - type: JAVASCRIPT
+              parameters:
+                - 'return value - Date.now()/1000;'
+          description: 'Only present when the license carries an expiry (Pro). Community/perpetual licenses have no such series, so this item goes unsupported by design — not an error.'
+          tags:
+            - tag: component
+              value: license
+            - tag: scope
+              value: notice
+
+        - uuid: c693bb8f7817426b97d7d584e2f9f871
+          name: 'License seats total'
+          type: DEPENDENT
+          key: valenius.license.seats.total
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: FLOAT
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_license_seats_total
+                - value
+                - ''
+          description: '-1 means unlimited.'
+          tags:
+            - tag: component
+              value: license
+            - tag: scope
+              value: capacity
+
+        - uuid: 1f2a497928a241ed86d60f4cc4ab7e3f
+          name: 'License seats used'
+          type: DEPENDENT
+          key: valenius.license.seats.used
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_license_seats_used
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: license
+            - tag: scope
+              value: capacity
+
+        - uuid: 76d0b477e6014489b4aac028b7341e34
+          name: 'License seats used, percent'
+          type: CALCULATED
+          key: valenius.license.seats.pct
+          delay: 1m
+          history: 7d
+          trends: 365d
+          value_type: FLOAT
+          units: '%'
+          params: 'last(//valenius.license.seats.used)/last(//valenius.license.seats.total)*100'
+          description: 'Meaningless (and not evaluated by any trigger) when seats.total is -1 (unlimited).'
+          tags:
+            - tag: component
+              value: license
+            - tag: scope
+              value: capacity
+
+        - uuid: 3381f4945c084d2d917cedbbb3069e1a
+          name: 'Gateways configured'
+          type: DEPENDENT
+          key: valenius.gateways.total
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_gateways_total
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: gateway
+            - tag: scope
+              value: capacity
+
+        - uuid: 031db5cea786405e9e9b8d279c1ada04
+          name: 'Gateways online'
+          type: DEPENDENT
+          key: valenius.gateways.online
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_gateways_online
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: gateway
+            - tag: scope
+              value: availability
+
+        - uuid: c37de6d0a1a4404a94b3cc3dfc251823
+          name: 'Peers (clients) total'
+          type: DEPENDENT
+          key: valenius.peers.total
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_peers_total
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: network
+            - tag: scope
+              value: capacity
+
+        - uuid: 239c68209e0c43d9a2056afc6ce57370
+          name: 'Peers (clients) connected'
+          type: DEPENDENT
+          key: valenius.peers.connected
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_peers_connected
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: network
+            - tag: scope
+              value: availability
+
+        - uuid: d27a33da27ac47c98c627bbc7ca6733a
+          name: 'Tenants (customers) total'
+          type: DEPENDENT
+          key: valenius.tenants.total
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_tenants_total
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: capacity
+
+        - uuid: 49b23397c225409c895483ce4f2787e4
+          name: 'Metrics series in this scrape'
+          type: DEPENDENT
+          key: valenius.metrics.series.total
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - valenius_metrics_series_total
+                - value
+                - ''
+          description: 'Payload/cardinality sanity check.'
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: notice
+
+        - uuid: 8af991bc550f462fb0ab1b143dfc80af
+          name: 'API request duration, p95'
+          type: DEPENDENT
+          key: valenius.http.latency.p95
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: FLOAT
+          units: s
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'valenius_http_request_duration_seconds{quantile="0.95"}'
+                - value
+                - ''
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: performance
+
+        - uuid: 37ad211b3a244940ba705afb82853abc
+          name: 'HTTP 5xx responses'
+          type: DEPENDENT
+          key: valenius.http.requests.5xx
+          delay: '0'
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          master_item:
+            key: valenius.get.metrics
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'valenius_http_requests_total{status_class="5xx"}'
+                - function
+                - sum
+          description: 'Summed across the method label. Since process start, not a rate — compare consecutive values, don''t alert on the absolute number alone.'
+          tags:
+            - tag: component
+              value: control-plane
+            - tag: scope
+              value: performance
+
+      discovery_rules:
+        - uuid: 816b8fac95854519936a992b152e8fbe
+          name: 'Gateway discovery'
+          type: DEPENDENT
+          key: valenius.discovery.gateways
+          delay: '0'
+          master_item:
+            key: valenius.get.metrics
+          lld_macro_paths:
+            - lld_macro: '{#GATEWAY}'
+              path: '$.gateway'
+          preprocessing:
+            - type: PROMETHEUS_TO_JSON
+              parameters:
+                - valenius_gateway_info
+          description: 'Discovers one entry per Pro gateway (customer with an integrated WireGuard server) from valenius_gateway_info. Finds nothing on a Community-only or External-only fleet — that''s expected, not a failure.'
+          item_prototypes:
+            - uuid: dd26a61746914a2ea19e55ee134a1800
+              name: 'Gateway {#GATEWAY}: up'
+              type: DEPENDENT
+              key: 'valenius.gateway.up[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_up{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              valuemap:
+                name: 'Boolean'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 7e1cc0a9c61e47d39a79295fb0ed54fe
+              name: 'Gateway {#GATEWAY}: last seen'
+              type: DEPENDENT
+              key: 'valenius.gateway.last_seen[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              units: unixtime
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_last_seen_timestamp_seconds{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 206efc40f22549508faf1dc5f7ba4407
+              name: 'Gateway {#GATEWAY}: stats age'
+              type: DEPENDENT
+              key: 'valenius.gateway.stats_age[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: FLOAT
+              units: s
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_stats_age_seconds{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 0cac04bc8dc54a939d206ec2bff7f94e
+              name: 'Gateway {#GATEWAY}: peers total'
+              type: DEPENDENT
+              key: 'valenius.gateway.peers.total[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_peers_total{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: capacity
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 9a9d13ca8e7a4067871cb876a41246f7
+              name: 'Gateway {#GATEWAY}: peers connected'
+              type: DEPENDENT
+              key: 'valenius.gateway.peers.connected[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_peers_connected{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: ad1ea2a3f5594cb4bf7c42e23be780b0
+              name: 'Gateway {#GATEWAY}: oldest handshake'
+              type: DEPENDENT
+              key: 'valenius.gateway.handshake_age_max[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: FLOAT
+              units: s
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_handshake_age_max_seconds{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 16e1ab8b9b014518b9266c0e9228c183
+              name: 'Gateway {#GATEWAY}: received traffic'
+              type: DEPENDENT
+              key: 'valenius.gateway.rx[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              units: Bps
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_rx_bytes_total{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+                - type: CHANGE_PER_SECOND
+                  parameters: []
+              description: 'Lifetime counter, reset-aware on the backend side; Zabbix converts it to a per-second rate.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: performance
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 4c51ceffb3e94f26942941c95420beb4
+              name: 'Gateway {#GATEWAY}: sent traffic'
+              type: DEPENDENT
+              key: 'valenius.gateway.tx[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              units: Bps
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_tx_bytes_total{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+                - type: CHANGE_PER_SECOND
+                  parameters: []
+              description: 'Lifetime counter, reset-aware on the backend side; Zabbix converts it to a per-second rate.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: performance
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: f6cfa161dada45129d61b2afabe31b46
+              name: 'Gateway {#GATEWAY}: endpoint changes'
+              type: DEPENDENT
+              key: 'valenius.gateway.endpoint_changes[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_endpoint_changes_total{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              description: 'Cumulative since backend start (resets on restart). Roaming/NAT-churn indicator — watch the trend, not the absolute number.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: notice
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 5a19a83477084119be41854fecee17f3
+              name: 'Gateway {#GATEWAY}: host CPU usage'
+              type: DEPENDENT
+              key: 'valenius.gateway.cpu[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: FLOAT
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_cpu_usage_ratio{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              description: '0..1 ratio.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: performance
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 051e7c29a7b14f07b366acf79d1ce883
+              name: 'Gateway {#GATEWAY}: host memory usage'
+              type: DEPENDENT
+              key: 'valenius.gateway.memory[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: FLOAT
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_memory_usage_ratio{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              description: '0..1 ratio.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: performance
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: b895919ba23f4f9b9ce71759587d3f30
+              name: 'Gateway {#GATEWAY}: host load average (1m)'
+              type: DEPENDENT
+              key: 'valenius.gateway.load1[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: FLOAT
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_load1{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: performance
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 99fbbb479780459ea7e51d5a5a58fd67
+              name: 'Gateway {#GATEWAY}: conntrack entries used'
+              type: DEPENDENT
+              key: 'valenius.gateway.conntrack.used[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_conntrack_used{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              description: 'Only present when the host has the nf_conntrack kernel module loaded.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: capacity
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: a6a29b5f69e64dec833bc76daeb0b132
+              name: 'Gateway {#GATEWAY}: conntrack table size'
+              type: DEPENDENT
+              key: 'valenius.gateway.conntrack.max[{#GATEWAY}]'
+              delay: '0'
+              history: 7d
+              trends: 365d
+              value_type: UNSIGNED
+              master_item:
+                key: valenius.get.metrics
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'valenius_gateway_conntrack_max{gateway="{#GATEWAY}"}'
+                    - value
+                    - ''
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: capacity
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+            - uuid: 5893316888084ce6ac768a85c2115fe8
+              name: 'Gateway {#GATEWAY}: conntrack usage, percent'
+              type: CALCULATED
+              key: 'valenius.gateway.conntrack.pct[{#GATEWAY}]'
+              delay: 1m
+              history: 7d
+              trends: 365d
+              value_type: FLOAT
+              units: '%'
+              params: 'last(//valenius.gateway.conntrack.used[{#GATEWAY}])/last(//valenius.gateway.conntrack.max[{#GATEWAY}])*100'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: capacity
+                - tag: gateway
+                  value: '{#GATEWAY}'
+
+          trigger_prototypes:
+            - uuid: 6a3e0394b905434cbf342bca7fd5ed8a
+              name: 'Gateway {#GATEWAY} is down'
+              expression: 'last(/Valenius by HTTP/valenius.gateway.up[{#GATEWAY}])=0'
+              priority: HIGH
+              description: 'The gateway''s sidecar did not answer the most recent poll.'
+              dependencies:
+                - name: 'Service is unavailable'
+                  expression: 'nodata(/Valenius by HTTP/valenius.get.metrics,{$VALENIUS.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+
+            - uuid: dc3c78a3aca24619bdc59997d1249463
+              name: 'Gateway {#GATEWAY} data is stale'
+              expression: 'last(/Valenius by HTTP/valenius.gateway.stats_age[{#GATEWAY}])>{$VALENIUS.GATEWAY.LASTSEEN.MAX}'
+              priority: AVERAGE
+              description: 'Last successful poll of this gateway is older than the threshold, even if it hasn''t flipped to fully down yet.'
+              dependencies:
+                - name: 'Gateway {#GATEWAY} is down'
+                  expression: 'last(/Valenius by HTTP/valenius.gateway.up[{#GATEWAY}])=0'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+
+            - uuid: a42604a04f974eb596a4389e4e13935e
+              name: 'Gateway {#GATEWAY} has no connected peers'
+              expression: 'last(/Valenius by HTTP/valenius.gateway.peers.connected[{#GATEWAY}])=0 and last(/Valenius by HTTP/valenius.gateway.peers.total[{#GATEWAY}])>0'
+              priority: HIGH
+              dependencies:
+                - name: 'Gateway {#GATEWAY} is down'
+                  expression: 'last(/Valenius by HTTP/valenius.gateway.up[{#GATEWAY}])=0'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+
+            - uuid: 8da2c822d50f44e2ae9fbda105c06400
+              name: 'Gateway {#GATEWAY} connected peers dropped sharply'
+              expression: 'last(/Valenius by HTTP/valenius.gateway.peers.connected[{#GATEWAY}])<(avg(/Valenius by HTTP/valenius.gateway.peers.connected[{#GATEWAY}],1h)*0.5) and last(/Valenius by HTTP/valenius.gateway.peers.total[{#GATEWAY}])>0'
+              priority: WARNING
+              description: 'Connected peers fell below half the trailing 1h average.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+
+            - uuid: 72351bcc9cdb4fdfb2e19994c44188a3
+              name: 'Gateway {#GATEWAY} oldest handshake exceeds threshold'
+              expression: 'last(/Valenius by HTTP/valenius.gateway.handshake_age_max[{#GATEWAY}])>{$VALENIUS.GATEWAY.HANDSHAKE.MAX}'
+              priority: WARNING
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: availability
+
+            - uuid: fdb10ad2f0f944feb39f9c4b380686b6
+              name: 'Gateway {#GATEWAY} host CPU usage high'
+              expression: 'min(/Valenius by HTTP/valenius.gateway.cpu[{#GATEWAY}],5m)>({$VALENIUS.GATEWAY.CPU.WARN}/100)'
+              priority: WARNING
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: performance
+
+            - uuid: 9b2652a2e96b4c49bd9c0eec6e94fea2
+              name: 'Gateway {#GATEWAY} conntrack table nearly full'
+              expression: 'last(/Valenius by HTTP/valenius.gateway.conntrack.pct[{#GATEWAY}])>{$VALENIUS.GATEWAY.CONNTRACK.WARN}'
+              priority: WARNING
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: capacity
+
+            - uuid: a70eae41c6514307a7f9d322a4d1e709
+              name: 'Gateway {#GATEWAY} elevated endpoint churn'
+              expression: '(last(/Valenius by HTTP/valenius.gateway.endpoint_changes[{#GATEWAY}])-last(/Valenius by HTTP/valenius.gateway.endpoint_changes[{#GATEWAY}],#2))>{$VALENIUS.GATEWAY.ENDPOINT.CHURN.WARN}'
+              priority: INFO
+              description: 'Roaming/NAT-churn indicator, not necessarily a problem — informational.'
+              tags:
+                - tag: component
+                  value: gateway
+                - tag: scope
+                  value: notice
+
+          graph_prototypes:
+            - uuid: 8fd064ca0e7149d6a6de2fa3062024b0
+              name: 'Gateway {#GATEWAY}: traffic'
+              graph_items:
+                - color: 2563EB
+                  item:
+                    host: 'Valenius by HTTP'
+                    key: 'valenius.gateway.rx[{#GATEWAY}]'
+                - color: D97706
+                  drawtype: GRADIENT_LINE
+                  item:
+                    host: 'Valenius by HTTP'
+                    key: 'valenius.gateway.tx[{#GATEWAY}]'
+
+      macros:
+        - macro: '{$VALENIUS.URL}'
+          value: 'https://valenius.example.com'
+          description: 'Base URL, no trailing slash.'
+        - macro: '{$VALENIUS.TOKEN}'
+          type: SECRET_TEXT
+          description: 'monitoring:read token, minted from the backend''s Admin -> Monitoring page.'
+        - macro: '{$VALENIUS.HTTP.TIMEOUT}'
+          value: 10s
+        - macro: '{$VALENIUS.NODATA.TIMEOUT}'
+          value: 5m
+        - macro: '{$VALENIUS.STATS.AGE.MAX}'
+          value: '300'
+          description: 'Seconds.'
+        - macro: '{$VALENIUS.LICENSE.EXPIRY.WARN}'
+          value: 30d
+        - macro: '{$VALENIUS.LICENSE.EXPIRY.CRIT}'
+          value: 7d
+        - macro: '{$VALENIUS.LICENSE.SEATS.WARN}'
+          value: '90'
+          description: 'Percent.'
+        - macro: '{$VALENIUS.LICENSE.SEATS.CRIT}'
+          value: '98'
+          description: 'Percent.'
+        - macro: '{$VALENIUS.API.LATENCY.WARN}'
+          value: '1'
+          description: 'Seconds, p95.'
+        - macro: '{$VALENIUS.HTTP.5XX.WARN}'
+          value: '5'
+          description: 'New 5xx responses between two consecutive scrapes.'
+        - macro: '{$VALENIUS.GATEWAY.LASTSEEN.MAX}'
+          value: '300'
+          description: 'Seconds.'
+        - macro: '{$VALENIUS.GATEWAY.HANDSHAKE.MAX}'
+          value: '600'
+          description: 'Seconds.'
+        - macro: '{$VALENIUS.GATEWAY.CPU.WARN}'
+          value: '90'
+          description: 'Percent.'
+        - macro: '{$VALENIUS.GATEWAY.CONNTRACK.WARN}'
+          value: '80'
+          description: 'Percent.'
+        - macro: '{$VALENIUS.GATEWAY.ENDPOINT.CHURN.WARN}'
+          value: '5'
+          description: 'New endpoint changes between two consecutive polls.'
+
+      valuemaps:
+        - uuid: f7d05eb00e6c4f84b8223c5cb07f169b
+          name: 'Boolean'
+          mappings:
+            - value: '0'
+              newvalue: 'No'
+            - value: '1'
+              newvalue: 'Yes'
+        - uuid: 27f026060d6e44809ccf3815cc83110c
+          name: 'License validity'
+          mappings:
+            - value: '0'
+              newvalue: Invalid
+            - value: '1'
+              newvalue: Valid
+
+      dashboards:
+        - uuid: 11d6473d3a9946e2b7416bbcc79ef009
+          name: 'Valenius overview'
+          pages:
+            - widgets:
+                - type: item
+                  name: 'Gateways online'
+                  x: '0'
+                  'y': '0'
+                  width: '6'
+                  height: '4'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'Valenius by HTTP'
+                        key: 'valenius.gateways.online'
+                - type: item
+                  name: 'Peers connected'
+                  x: '6'
+                  'y': '0'
+                  width: '6'
+                  height: '4'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'Valenius by HTTP'
+                        key: 'valenius.peers.connected'
+                - type: item
+                  name: 'License seats used'
+                  x: '12'
+                  'y': '0'
+                  width: '6'
+                  height: '4'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'Valenius by HTTP'
+                        key: 'valenius.license.seats.pct'
+                - type: item
+                  name: 'API latency (p95)'
+                  x: '18'
+                  'y': '0'
+                  width: '6'
+                  height: '4'
+                  fields:
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'Valenius by HTTP'
+                        key: 'valenius.http.latency.p95'
+  triggers:
+    - uuid: c65fb8d3bfbb41f5a8690611fda6f167
+      name: 'Service is unavailable'
+      expression: 'nodata(/Valenius by HTTP/valenius.get.metrics,{$VALENIUS.NODATA.TIMEOUT})=1'
+      priority: HIGH
+      tags:
+        - tag: component
+          value: control-plane
+        - tag: scope
+          value: availability
+
+    - uuid: f55f7fb0372b42eab9a58011e50a8ac3
+      name: 'Database is unreachable'
+      expression: 'last(/Valenius by HTTP/valenius.db.up)=0'
+      priority: HIGH
+      dependencies:
+        - name: 'Service is unavailable'
+          expression: 'nodata(/Valenius by HTTP/valenius.get.metrics,{$VALENIUS.NODATA.TIMEOUT})=1'
+      tags:
+        - tag: component
+          value: control-plane
+        - tag: scope
+          value: availability
+
+    - uuid: 5f380a1bb32a482da3f696565a97a15c
+      name: 'Metrics snapshot is stale'
+      expression: 'last(/Valenius by HTTP/valenius.stats.age)>{$VALENIUS.STATS.AGE.MAX}'
+      priority: WARNING
+      tags:
+        - tag: component
+          value: control-plane
+        - tag: scope
+          value: availability
+
+    - uuid: 2c665a0c799e4a9a8d8136f3f9795d39
+      name: 'License is invalid'
+      expression: 'last(/Valenius by HTTP/valenius.license.valid)=0'
+      priority: HIGH
+      tags:
+        - tag: component
+          value: license
+        - tag: scope
+          value: availability
+
+    - uuid: 1e48758d9098448db97dea4a178598dc
+      name: 'License expires soon (critical)'
+      expression: 'last(/Valenius by HTTP/valenius.license.expiry.left)<{$VALENIUS.LICENSE.EXPIRY.CRIT}'
+      priority: AVERAGE
+      tags:
+        - tag: component
+          value: license
+        - tag: scope
+          value: notice
+
+    - uuid: 59687102514c49878aa6afadbb4786bf
+      name: 'License expires soon (warning)'
+      expression: 'last(/Valenius by HTTP/valenius.license.expiry.left)<{$VALENIUS.LICENSE.EXPIRY.WARN}'
+      priority: WARNING
+      dependencies:
+        - name: 'License expires soon (critical)'
+          expression: 'last(/Valenius by HTTP/valenius.license.expiry.left)<{$VALENIUS.LICENSE.EXPIRY.CRIT}'
+      tags:
+        - tag: component
+          value: license
+        - tag: scope
+          value: notice
+
+    - uuid: f3fea99b84ac40cd827b5d7d4f0810eb
+      name: 'License seat usage critical'
+      expression: 'last(/Valenius by HTTP/valenius.license.seats.total)>0 and last(/Valenius by HTTP/valenius.license.seats.pct)>{$VALENIUS.LICENSE.SEATS.CRIT}'
+      priority: AVERAGE
+      tags:
+        - tag: component
+          value: license
+        - tag: scope
+          value: capacity
+
+    - uuid: 98cd2a28e2a948b3befa8450fa077f93
+      name: 'License seat usage high'
+      expression: 'last(/Valenius by HTTP/valenius.license.seats.total)>0 and last(/Valenius by HTTP/valenius.license.seats.pct)>{$VALENIUS.LICENSE.SEATS.WARN}'
+      priority: WARNING
+      dependencies:
+        - name: 'License seat usage critical'
+          expression: 'last(/Valenius by HTTP/valenius.license.seats.total)>0 and last(/Valenius by HTTP/valenius.license.seats.pct)>{$VALENIUS.LICENSE.SEATS.CRIT}'
+      tags:
+        - tag: component
+          value: license
+        - tag: scope
+          value: capacity
+
+    - uuid: 7c28fd7db46f4a70bc0fac439ac15764
+      name: 'API request latency is high'
+      expression: 'min(/Valenius by HTTP/valenius.http.latency.p95,5m)>{$VALENIUS.API.LATENCY.WARN}'
+      priority: WARNING
+      tags:
+        - tag: component
+          value: control-plane
+        - tag: scope
+          value: performance
+
+    - uuid: 303b6b4eaffa4f8483c5fae165f139b3
+      name: 'Elevated HTTP 5xx rate'
+      expression: '(last(/Valenius by HTTP/valenius.http.requests.5xx)-last(/Valenius by HTTP/valenius.http.requests.5xx,#2))>{$VALENIUS.HTTP.5XX.WARN}'
+      priority: WARNING
+      tags:
+        - tag: component
+          value: control-plane
+        - tag: scope
+          value: performance
+
+    - uuid: fa87c6f36e93457d8675c32134f2cc1b
+      name: 'Backend version has changed'
+      expression: 'last(/Valenius by HTTP/valenius.build.version,#1)<>last(/Valenius by HTTP/valenius.build.version,#2)'
+      priority: INFO
+      manual_close: 'YES'
+      tags:
+        - tag: component
+          value: control-plane
+        - tag: scope
+          value: notice

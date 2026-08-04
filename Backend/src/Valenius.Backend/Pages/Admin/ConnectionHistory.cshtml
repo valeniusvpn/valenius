@@ -131,6 +131,10 @@ else
                                 {
                                     <span class="badge bg-success"><i class="bi bi-plug-fill me-1"></i>Connect</span>
                                 }
+                                else if (log.EventType == "PortFallback")
+                                {
+                                    <span class="badge bg-warning text-dark" title="@log.Detail"><i class="bi bi-broadcast me-1"></i>Fallback port</span>
+                                }
                                 else
                                 {
                                     <span class="badge bg-secondary"><i class="bi bi-plug me-1"></i>Disconnect</span>

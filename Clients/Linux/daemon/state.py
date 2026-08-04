@@ -33,6 +33,7 @@ class _TunnelEntry:
     since: datetime
     verified: bool = False
     verified_via_gateway: bool = False
+    verification_failed: bool = False
 
 
 @dataclass
@@ -105,6 +106,17 @@ class DaemonState:
             if entry:
                 entry.verified = True
                 entry.verified_via_gateway = via_gateway
+                entry.verification_failed = False
+
+    def set_verification_failed(self, tunnel_name: str) -> None:
+        """Marks that the initial fast verification window elapsed with no success. Not
+        terminal -- verification keeps retrying at a slower cadence afterward (see
+        DaemonCore._verify_after_connect), and a later success still clears this via
+        set_verified. No-op if the tunnel disconnected in the meantime."""
+        with self._lock:
+            entry = self._active.get(tunnel_name)
+            if entry:
+                entry.verification_failed = True
 
     def set_unverified(self, tunnel_name: str) -> None:
         """Clear the verified flag while a network-change re-verify is in flight.
@@ -116,6 +128,7 @@ class DaemonState:
             entry = self._active.get(tunnel_name)
             if entry:
                 entry.verified = False
+                entry.verification_failed = False
 
     def is_verified_via_gateway(self, tunnel_name: str) -> bool:
         with self._lock:
@@ -134,6 +147,7 @@ class DaemonState:
                 ConnectedTunnelInfo(
                     Name=name,
                     IsVerified=entry.verified,
+                    VerificationFailed=entry.verification_failed,
                     ConnectedUser=entry.user,
                     ConnectedSince=entry.since.isoformat(),
                 )

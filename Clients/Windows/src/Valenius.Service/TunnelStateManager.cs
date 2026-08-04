@@ -14,7 +14,7 @@ public class TunnelStateManager
     private readonly Dictionary<string, Entry> _active =
         new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record Entry(string User, DateTime Since, bool Verified, bool VerifiedViaGateway = false, bool VerificationFailed = false);
+    private sealed record Entry(string User, DateTime Since, bool Verified, bool VerifiedViaGateway = false, bool VerificationFailed = false, int FallbackPortUsed = 0);
 
     public void SetConnected(string tunnelName, string user)
     {
@@ -52,6 +52,23 @@ public class TunnelStateManager
         {
             if (_active.TryGetValue(tunnelName, out var e))
                 _active[tunnelName] = e with { VerificationFailed = true };
+        }
+    }
+
+    /// <summary>
+    /// Records that <paramref name="tunnelName"/> switched to the UDP fallback port
+    /// (docs/design/port-443-fallback.md) after the primary port produced no successful
+    /// verification. Sticky for the life of the connection — surfaced to the tray via
+    /// <see cref="ConnectedTunnelInfo.FallbackPortUsed"/> so the "Verified"/"Connected" tag can
+    /// show which port the tunnel is actually on. No-op if the tunnel disconnected in the
+    /// meantime.
+    /// </summary>
+    public void MarkUsedFallbackPort(string tunnelName, int port)
+    {
+        lock (_lock)
+        {
+            if (_active.TryGetValue(tunnelName, out var e))
+                _active[tunnelName] = e with { FallbackPortUsed = port };
         }
     }
 
@@ -115,6 +132,7 @@ public class TunnelStateManager
                     Name               = kv.Key,
                     IsVerified         = kv.Value.Verified,
                     VerificationFailed = kv.Value.VerificationFailed,
+                    FallbackPortUsed   = kv.Value.FallbackPortUsed,
                     ConnectedUser      = kv.Value.User,
                     ConnectedSince     = kv.Value.Since
                 })

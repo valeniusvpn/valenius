@@ -22,10 +22,12 @@ public class WireGuardController
 
     public bool IsWireGuardInstalled() => File.Exists(WireGuardExe);
 
-    public async Task<(bool Success, string Output)> ConnectAsync(string configPath)
+    public async Task<(bool Success, string Output)> ConnectAsync(string configPath, int? fallbackPort = null)
     {
-        // Decrypt to a SYSTEM-only temp file if the stored config is DPAPI-encrypted.
-        var wireGuardPath = _configs.PrepareConfigPath(configPath);
+        // Decrypt to a SYSTEM-only temp file if the stored config is DPAPI-encrypted, optionally
+        // rewriting the Endpoint port for a port-443 fallback retry (never persisted — see
+        // ConfigManager.PrepareConfigPath).
+        var wireGuardPath = _configs.PrepareConfigPath(configPath, fallbackPort);
 
         var result = await RunAsync($"/installtunnelservice \"{wireGuardPath}\"");
         if (result.Success)

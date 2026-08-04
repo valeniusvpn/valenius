@@ -109,6 +109,28 @@ public class RegistrationManager
         return null;
     }
 
+    // Per-profile UDP fallback port + trigger window, refreshed on every heartbeat. Present only
+    // when the serving sidecar has confirmed the redirect is actually active — see
+    // docs/design/port-443-fallback.md §4.4 — so a profile absent here means "no fallback offered",
+    // never "fallback offered but unconfirmed".
+    private volatile Dictionary<string, (int Port, int TriggerSeconds)> _fallbackPorts =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public void SetFallbackPorts(IEnumerable<(string ProfileName, int Port, int TriggerSeconds)> entries)
+    {
+        var map = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, port, triggerSeconds) in entries)
+            if (!string.IsNullOrEmpty(name) && port > 0)
+                map[name] = (port, triggerSeconds > 0 ? triggerSeconds : 20);
+        _fallbackPorts = map;
+    }
+
+    /// <summary>The UDP fallback port + trigger window (seconds of no successful verification
+    /// before trying it) advertised for <paramref name="profileName"/>, or null when none is
+    /// offered (no customer opt-in, or opted-in but not confirmed active).</summary>
+    public (int Port, int TriggerSeconds)? GetFallbackConfig(string profileName) =>
+        _fallbackPorts.TryGetValue(profileName, out var entry) ? entry : null;
+
     // MFA session gating state, refreshed on every heartbeat/poll (in-memory only).
     private volatile bool _mfaRequired;
     private volatile string? _mfaAuthorizeUrl;
@@ -204,6 +226,44 @@ public class RegistrationManager
             var state = Load() ?? new RegistrationState();
             state.IsActive = isActive;
             state.LastCheckedUtc = DateTime.UtcNow;
+            Save(state);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>True once the user chose "Use standalone" in the first-run setup dialog.</summary>
+    public bool GetStandaloneModeChosen() => Load()?.StandaloneModeChosen ?? false;
+
+    public async Task SetStandaloneModeAsync(bool value)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var state = Load() ?? new RegistrationState();
+            state.StandaloneModeChosen = value;
+            Save(state);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>True once this (previously standalone) client's local profiles have all been
+    /// successfully archived to the backend after activation. See
+    /// <see cref="ClientRegistrationService.TransferLocalProfilesAsync"/>.</summary>
+    public bool GetProfilesTransferred() => Load()?.ProfilesTransferredToBackend ?? false;
+
+    public async Task SetProfilesTransferredAsync(bool value)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var state = Load() ?? new RegistrationState();
+            state.ProfilesTransferredToBackend = value;
             Save(state);
         }
         finally

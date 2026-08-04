@@ -50,6 +50,14 @@ public sealed class AuditService(
     {
         var ctx = http.HttpContext;
         if (ctx is null) return "System";
+
+        // Management API caller (docs/design/management-api.md §11) — stashed by
+        // ApiTokenFilter. Checked first: a management-API request has no OIDC/local
+        // AppUser identity on ctx.User at all, so falling through to the claim lookups
+        // below would just return "Unknown" for every token-authenticated write.
+        if (ctx.Items["ApiCaller"] is ApiCaller caller)
+            return $"token:{caller.Name}#{caller.TokenId}";
+
         return ctx.User.FindFirstValue(ClaimTypes.Email)
             ?? ctx.User.FindFirstValue(ClaimTypes.Name)
             ?? ctx.User.FindFirstValue("sub")

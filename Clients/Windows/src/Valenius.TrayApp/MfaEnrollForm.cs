@@ -7,11 +7,35 @@ namespace Valenius.TrayApp;
 /// Modal dialog for per-client TOTP enrollment: renders the otpauth QR, shows the secret
 /// for manual entry, and collects the confirmation code. The caller sends the code to the
 /// service (MfaEnrollConfirm) and shows the result via <see cref="SetError"/>.
+///
+/// Laid out manually from the real monitor DPI (like <see cref="TrayPopupForm"/>'s <c>Sc()</c>
+/// and <see cref="BackendUrlForm"/>), not <c>AutoScaleMode.Dpi</c>: that path scales control
+/// Fonts but not their fixed pixel Location/Size, which clips wrapped text and leaves the
+/// Form's own (correctly-scaled) client area mismatched with its (unscaled) children on a
+/// high-DPI monitor. <see cref="ApplyScale"/> recomputes every Font and Bounds from
+/// <see cref="DeviceDpi"/> and sizes the Form to the actual laid-out content.
 /// </summary>
 internal sealed class MfaEnrollForm : Form
 {
-    private readonly TextBox _code;
-    private readonly Label   _error;
+    private const int BaseW         = 360;
+    private const int BasePadTop    = 12;
+    private const int BasePadSide   = 20;
+    private const int BasePadBottom = 12;
+    private const int BaseGap       = 8;
+    private const int BaseQrSize    = 200;
+    private const int BaseCodeW     = 140;
+    private const int BaseCodeH     = 34;
+    private const int BaseBtnW      = 140;
+    private const int BaseConfirmH  = 34;
+    private const int BaseCancelH   = 28;
+
+    private readonly Label     _intro;
+    private readonly PictureBox _qr;
+    private readonly Label     _secretLabel;
+    private readonly TextBox   _code;
+    private readonly Button    _confirm;
+    private readonly Button    _cancel;
+    private readonly Label     _error;
 
     public string EnteredCode => _code.Text.Trim();
 
@@ -23,67 +47,51 @@ internal sealed class MfaEnrollForm : Form
         MaximizeBox     = false;
         MinimizeBox     = false;
         ShowInTaskbar   = false;
-        ClientSize      = new Size(360, 470);
         BackColor       = Color.FromArgb(22, 32, 48);
         ForeColor       = Color.White;
-        Font            = new Font("Segoe UI", 9f);
-        // Scale the absolutely-positioned controls with the monitor DPI (PerMonitorV2).
-        AutoScaleDimensions = new SizeF(96f, 96f);
-        AutoScaleMode       = AutoScaleMode.Dpi;
+        AutoScaleMode   = AutoScaleMode.None; // scaled by hand in ApplyScale() -- see class remarks
 
-        var intro = new Label
+        _intro = new Label
         {
             Text      = "Scan this with your authenticator app (Google Authenticator, Microsoft Authenticator, etc.), then enter the 6-digit code to finish setup.",
-            Location  = new Point(20, 12),
-            Size      = new Size(320, 52),
+            AutoSize  = true,
             TextAlign = ContentAlignment.TopCenter
         };
 
-        var qr = new PictureBox
+        _qr = new PictureBox
         {
-            Location = new Point(80, 70),
-            Size     = new Size(200, 200),
-            SizeMode = PictureBoxSizeMode.StretchImage,
+            SizeMode  = PictureBoxSizeMode.StretchImage,
             BackColor = Color.White,
-            Image    = RenderQr(otpAuthUri)
+            Image     = RenderQr(otpAuthUri)
         };
 
         var secret = ExtractSecret(otpAuthUri);
-        var secretLabel = new Label
+        _secretLabel = new Label
         {
             Text      = secret is null ? "" : $"Manual key: {secret}",
-            Location  = new Point(20, 278),
-            Size      = new Size(320, 20),
+            AutoSize  = true,
             TextAlign = ContentAlignment.MiddleCenter,
-            ForeColor = Color.FromArgb(180, 198, 222),
-            Font      = new Font("Consolas", 8f)
+            ForeColor = Color.FromArgb(180, 198, 222)
         };
 
         _code = new TextBox
         {
-            Location  = new Point(110, 306),
-            Size      = new Size(140, 34),
             MaxLength = 6,
-            TextAlign = HorizontalAlignment.Center,
-            Font      = new Font("Segoe UI", 16f)
+            TextAlign = HorizontalAlignment.Center
         };
 
-        var confirm = new Button
+        _confirm = new Button
         {
             Text         = "Confirm",
-            Location     = new Point(110, 348),
-            Size         = new Size(140, 34),
             DialogResult = DialogResult.OK,
             FlatStyle    = FlatStyle.Flat,
             BackColor    = Color.FromArgb(59, 130, 246),
             ForeColor    = Color.White
         };
 
-        var cancel = new Button
+        _cancel = new Button
         {
             Text         = "Cancel",
-            Location     = new Point(110, 388),
-            Size         = new Size(140, 28),
             DialogResult = DialogResult.Cancel,
             FlatStyle    = FlatStyle.Flat,
             ForeColor    = Color.White
@@ -91,21 +99,101 @@ internal sealed class MfaEnrollForm : Form
 
         _error = new Label
         {
-            Location  = new Point(20, 424),
-            Size      = new Size(320, 36),
+            AutoSize  = true,
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = Color.FromArgb(247, 168, 178)
         };
 
-        Controls.AddRange([intro, qr, secretLabel, _code, confirm, cancel, _error]);
-        AcceptButton = confirm;
-        CancelButton = cancel;
+        Controls.AddRange([_intro, _qr, _secretLabel, _code, _confirm, _cancel, _error]);
+        AcceptButton = _confirm;
+        CancelButton = _cancel;
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        ApplyScale();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        ApplyScale();
+    }
+
+    /// <summary>
+    /// Recomputes every control's Font and Bounds from the monitor's real DPI, then shrink-wraps
+    /// the Form's ClientSize to the resulting content. Safe to call repeatedly (DPI change, or
+    /// after <see cref="SetError"/> changes how tall the error label needs to be).
+    /// </summary>
+    private void ApplyScale()
+    {
+        float scale = DeviceDpi / 96f;
+        int Sc(int v) => (int)MathF.Round(v * scale);
+
+        var baseFont   = new Font("Segoe UI", 9f);
+        var secretFont = new Font("Consolas", 8f);
+        var codeFont   = new Font("Segoe UI", 16f);
+
+        Font = baseFont;
+
+        int pad   = Sc(BasePadSide);
+        int gap   = Sc(BaseGap);
+        int width = Sc(BaseW) - pad * 2;
+
+        _intro.Font        = baseFont;
+        _intro.MinimumSize = new Size(width, 0);
+        _intro.MaximumSize = new Size(width, 0);
+        _intro.Location    = new Point(pad, Sc(BasePadTop));
+
+        int y = _intro.Bottom + gap;
+
+        int qrSize   = Sc(BaseQrSize);
+        _qr.Size     = new Size(qrSize, qrSize);
+        _qr.Location = new Point(pad + (width - qrSize) / 2, y);
+
+        y = _qr.Bottom + gap;
+
+        _secretLabel.Font     = secretFont;
+        _secretLabel.Location = new Point(pad + Math.Max(0, (width - _secretLabel.PreferredSize.Width) / 2), y);
+
+        y = _secretLabel.Bottom + gap;
+
+        int codeW = Sc(BaseCodeW), codeH = Sc(BaseCodeH);
+        _code.Font     = codeFont;
+        _code.Size     = new Size(codeW, codeH);
+        _code.Location = new Point(pad + (width - codeW) / 2, y);
+
+        y = _code.Bottom + gap;
+
+        int btnW     = Sc(BaseBtnW);
+        int confirmH = Sc(BaseConfirmH);
+        _confirm.Font     = baseFont;
+        _confirm.Size     = new Size(btnW, confirmH);
+        _confirm.Location = new Point(pad + (width - btnW) / 2, y);
+
+        y = _confirm.Bottom + gap;
+
+        int cancelH = Sc(BaseCancelH);
+        _cancel.Font     = baseFont;
+        _cancel.Size     = new Size(btnW, cancelH);
+        _cancel.Location = new Point(pad + (width - btnW) / 2, y);
+
+        y = _cancel.Bottom + gap;
+
+        _error.Font        = baseFont;
+        _error.MinimumSize = new Size(width, 0);
+        _error.MaximumSize = new Size(width, 0);
+        _error.Location    = new Point(pad, y);
+
+        ClientSize = new Size(Sc(BaseW), _error.Bottom + Sc(BasePadBottom));
     }
 
     /// <summary>Shows an error and keeps the dialog open for a retry.</summary>
     public void SetError(string message)
     {
         _error.Text = message;
+        ApplyScale(); // the error text may now need more room than the empty-state reservation
         _code.SelectAll();
         _code.Focus();
     }

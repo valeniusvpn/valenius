@@ -38,4 +38,5 @@ public static class Audit
     public const string Release  = "Release";
     public const string System   = "System";
     public const string Mfa      = "Mfa";
+    public const string Api      = "Api";
 }

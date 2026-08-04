@@ -144,6 +144,32 @@ ApiKey=@Model.ClientApiKey</pre>
                 </div>
             </div>
 
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-arrow-repeat me-2"></i>Client heartbeat</div>
+                <div class="card-body">
+                    <form method="post" asp-page-handler="SaveHeartbeat" class="row g-2 align-items-end">
+                        <div class="col-auto">
+                            <label asp-for="Settings.DefaultHeartbeatIntervalMinutes" class="form-label small fw-semibold">Default heartbeat interval (minutes)</label>
+                            <input asp-for="Settings.DefaultHeartbeatIntervalMinutes" type="number" min="1" max="60"
+                                   class="form-control form-control-sm" style="max-width:130px" />
+                        </div>
+                        <div class="col-auto">
+                            <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                        </div>
+                        <div class="col-12">
+                            <div class="form-text">
+                                How often clients check in with the backend by default (1-60 min); a customer can
+                                override this under Admin &rarr; Customers &rarr; Details. This is the periodic
+                                register/presence cadence, not the trigger-delivery path: admin-initiated actions
+                                (Connect, config push, forced update, etc.) reach the client independently via a
+                                long-poll connection and typically land within about a minute regardless of this
+                                setting. Default 1.
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
             <div class="card mb-0">
                 <div class="card-header"><i class="bi bi-clock-history me-2"></i>Traffic data retention</div>
                 <div class="card-body">

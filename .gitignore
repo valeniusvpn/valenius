@@ -38,6 +38,8 @@ Thumbs.db
 # Go build output
 Server/sidecar/wg-sidecar
 Server/sidecar/sidecar.exe
+# Linux-built binary (go build ./... on Linux, or in the NET_ADMIN test container)
+Server/sidecar/sidecar
 
 # Jobs
 jobs/

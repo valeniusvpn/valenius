@@ -19,6 +19,13 @@ public sealed class NullSidecarService : ISidecarService
     public Task<bool> RemovePeerAsync(string sidecarUrl, string publicKey)
         => Task.FromResult(false);
 
+    public Task<(bool Ok, string Message, bool Active)> SetFallbackAsync(
+        string sidecarUrl, bool enabled, int port)
+        => Task.FromResult((false, "Sidecar integration requires the Pro edition.", false));
+
+    public Task<SidecarSelfTest?> GetSelfTestAsync(string sidecarUrl)
+        => Task.FromResult<SidecarSelfTest?>(null);
+
     public Task<bool> PushGrantAsync(string sidecarUrl, string grantJson, string signatureBase64)
         => Task.FromResult(false);
 

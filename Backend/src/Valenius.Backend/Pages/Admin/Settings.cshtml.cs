@@ -11,7 +11,7 @@ using Valenius.Backend.Services;
 
 namespace Valenius.Backend.Pages.Admin;
 
-public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvider schemeProvider, IEmailService email, IAuditService audit, ApiKeyStore apiKeyStore) : PageModel
+public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvider schemeProvider, IEmailService email, IAuditService audit, ApiKeyStore apiKeyStore, HeartbeatSettingsStore heartbeatSettings) : PageModel
 {
     [BindProperty]
     public ServerSettings Settings { get; set; } = default!;
@@ -75,6 +75,23 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
         await db.SaveChangesAsync();
         _ = audit.LogAsync(Audit.Settings, "Traffic retention saved", $"{current.TrafficRetentionDays} days");
         TempData["Success"]     = "Traffic retention saved.";
+        TempData["SettingsTab"] = "#tab-connectivity";
+        return RedirectToPage();
+    }
+
+    /// <summary>
+    /// Save the system-wide default heartbeat interval (used by any customer that doesn't set
+    /// its own override). Updates the in-memory HeartbeatSettingsStore too, so it takes effect
+    /// immediately without a restart.
+    /// </summary>
+    public async Task<IActionResult> OnPostSaveHeartbeatAsync()
+    {
+        var current = await db.ServerSettings.FirstAsync();
+        current.DefaultHeartbeatIntervalMinutes = Math.Clamp(Settings.DefaultHeartbeatIntervalMinutes, 1, 60);
+        await db.SaveChangesAsync();
+        heartbeatSettings.DefaultIntervalMinutes = current.DefaultHeartbeatIntervalMinutes;
+        _ = audit.LogAsync(Audit.Settings, "Default heartbeat interval saved", $"{current.DefaultHeartbeatIntervalMinutes} min");
+        TempData["Success"]     = "Default heartbeat interval saved.";
         TempData["SettingsTab"] = "#tab-connectivity";
         return RedirectToPage();
     }

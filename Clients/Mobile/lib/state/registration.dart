@@ -7,6 +7,7 @@ import '../api/identity.dart';
 import '../api/models.dart';
 import '../config/config_store.dart';
 import '../config/profile_name.dart';
+import '../config/wg_normalize.dart' show FallbackTarget;
 import '../diagnostics/diagnostics.dart';
 import '../platform/device_info.dart';
 import '../platform/health_probe.dart';
@@ -113,6 +114,12 @@ final backendFactoryProvider =
 final gatewayTargetsProvider =
     StateProvider<Map<String, GatewayTarget>>((_) => const {});
 
+/// Per-profile UDP fallback port + trigger window from the latest heartbeat
+/// (`StatusResponse.fallbackEndpoints`). Empty when none are advertised (no customer
+/// opt-in, or opted-in but not yet confirmed active by the sidecar).
+final fallbackTargetsProvider =
+    StateProvider<Map<String, FallbackTarget>>((_) => const {});
+
 /// Per-profile physical LAN CIDR(s) behind that profile's own sidecar, from the latest
 /// heartbeat (`StatusResponse.RemoteLanCidrsByProfile[]`). Used by the pre-connect
 /// LAN-conflict check to detect the remote network for full-tunnel profiles. Keyed by
@@ -192,6 +199,8 @@ final registrationControllerProvider =
         ref.read(profilesControllerProvider.notifier).load(),
     onGatewayTargets: (targets) =>
         ref.read(gatewayTargetsProvider.notifier).state = targets,
+    onFallbackTargets: (targets) =>
+        ref.read(fallbackTargetsProvider.notifier).state = targets,
     onRemoteLanCidrs: (cidrs) =>
         ref.read(remoteLanCidrsProvider.notifier).state = cidrs,
     onMfaState: (mfa) => ref.read(mfaStateProvider.notifier).state = mfa,
@@ -287,6 +296,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     required this.backendFactory,
     required this.onConfigsChanged,
     required this.onGatewayTargets,
+    required this.onFallbackTargets,
     required this.onRemoteLanCidrs,
     required this.onMfaState,
     required this.onMfaGate,
@@ -305,6 +315,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   final BackendApi Function(String, String) backendFactory;
   final void Function() onConfigsChanged;
   final void Function(Map<String, GatewayTarget>) onGatewayTargets;
+  final void Function(Map<String, FallbackTarget>) onFallbackTargets;
   final void Function(Map<String, List<String>>) onRemoteLanCidrs;
   final void Function(MfaState) onMfaState;
 
@@ -369,11 +380,11 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   /// a no-op before `start()` has set [_api] (there's no clientKey to report against yet), and
   /// failures are swallowed — the underlying connect/disconnect/verify already succeeded or
   /// failed on its own regardless of whether this report lands.
-  Future<void> logEvent(String eventType, String tunnelName) async {
+  Future<void> logEvent(String eventType, String tunnelName, {String? detail}) async {
     final api = _api;
     if (api == null) return;
     try {
-      await api.logEvent(eventType, tunnelName);
+      await api.logEvent(eventType, tunnelName, detail: detail);
     } catch (e) {
       DiagnosticsLog.instance.add('logEvent($eventType, $tunnelName) failed: $e');
     }
@@ -516,6 +527,12 @@ class RegistrationController extends StateNotifier<RegistrationState> {
             if (g.gatewayIp.isNotEmpty && g.healthPort > 0)
               g.profileName:
                   GatewayTarget(ip: g.gatewayIp, healthPort: g.healthPort),
+        });
+        onFallbackTargets({
+          for (final f in resp.fallbackEndpoints)
+            if (f.profileName.isNotEmpty && f.port > 0)
+              f.profileName: FallbackTarget(
+                  port: f.port, triggerSeconds: f.triggerSeconds),
         });
         onRemoteLanCidrs({
           for (final e in resp.remoteLanCidrsByProfile)

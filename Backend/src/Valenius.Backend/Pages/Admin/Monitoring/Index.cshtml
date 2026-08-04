@@ -1,0 +1,163 @@
+@page
+@model Valenius.Backend.Pages.Admin.Monitoring.IndexModel
+@using Valenius.Backend.Pages.Admin.Monitoring
+@{
+    ViewData["Title"] = "Monitoring";
+}
+
+<h1 class="page-title mb-4">Monitoring</h1>
+
+<div class="alert alert-secondary d-flex align-items-start gap-2 mb-4">
+    <i class="bi bi-info-circle-fill mt-1"></i>
+    <div>
+        Read-only Prometheus metrics for an external NMS (Zabbix, Grafana, etc.):
+        <code>GET /api/v1/metrics</code> and <code>GET /api/v1/monitoring/status</code>,
+        authenticated with <code>Authorization: Bearer &lt;token&gt;</code>. Tokens minted here
+        can only ever carry the <code>monitoring:read</code> scope — they cannot read client
+        configs, keys, or act on anything.
+    </div>
+</div>
+
+@if (Model.JustMintedToken is not null)
+{
+    <div class="alert alert-warning">
+        <div class="fw-semibold mb-2">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            Token "@Model.JustMintedTokenName" created — this is the only time the full value is shown.
+        </div>
+        <div class="input-group input-group-sm mb-2">
+            <input id="justMintedToken" class="form-control font-monospace" value="@Model.JustMintedToken" readonly />
+            <button class="btn btn-outline-secondary" type="button" onclick="copyField('justMintedToken','copyIconMinted')">
+                <i class="bi bi-clipboard" id="copyIconMinted"></i>
+            </button>
+        </div>
+        <div class="small text-muted">Copy it now and store it in a secrets manager — reloading this page will not show it again.</div>
+    </div>
+}
+
+@if (TempData["Success"] is string ok)
+{
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+        <i class="bi bi-check-circle me-1"></i>@ok
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+}
+
+<div class="row g-3">
+    <div class="col-lg-7">
+        @if (!Model.Tokens.Any())
+        {
+            <div class="alert alert-info d-flex align-items-center gap-2">
+                <i class="bi bi-info-circle-fill"></i>
+                No monitoring tokens yet.
+            </div>
+        }
+        else
+        {
+            <div class="card mb-3">
+                <table class="table table-hover mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th><i class="bi bi-tag me-1"></i>Name</th>
+                            <th><i class="bi bi-hash me-1"></i>Token id</th>
+                            <th><i class="bi bi-clock-history me-1"></i>Last used</th>
+                            <th><i class="bi bi-hourglass-split me-1"></i>Expires</th>
+                            <th>State</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var t in Model.Tokens)
+                        {
+                            <tr>
+                                <td class="fw-semibold">
+                                    @t.Name
+                                    @if (!string.IsNullOrWhiteSpace(t.Description))
+                                    {
+                                        <div class="small text-muted">@t.Description</div>
+                                    }
+                                </td>
+                                <td class="font-monospace small">@t.TokenId</td>
+                                <td class="text-muted small">@(t.LastUsedAt?.ToString("u") ?? "Never")</td>
+                                <td class="text-muted small">@(t.ExpiresAt?.ToString("u") ?? "Never")</td>
+                                <td>
+                                    @switch (t.State)
+                                    {
+                                        case IndexModel.TokenState.Active:
+                                            <span class="badge bg-success">Active</span>
+                                            break;
+                                        case IndexModel.TokenState.Expired:
+                                            <span class="badge bg-warning text-dark">Expired</span>
+                                            break;
+                                        case IndexModel.TokenState.Revoked:
+                                            <span class="badge bg-secondary">Revoked</span>
+                                            break;
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    @if (t.State != IndexModel.TokenState.Revoked)
+                                    {
+                                        <form method="post" asp-page-handler="Revoke" asp-route-id="@t.Id"
+                                              onsubmit="return confirm('Revoke token &quot;@t.Name&quot;? Anything using it stops working immediately.');">
+                                            <button class="btn btn-sm btn-outline-danger" type="submit">
+                                                <i class="bi bi-x-circle me-1"></i>Revoke
+                                            </button>
+                                        </form>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-plus-circle me-2"></i>Create monitoring token</div>
+            <div class="card-body">
+                @if (Model.Error is not null)
+                {
+                    <div class="alert alert-danger py-2">
+                        <i class="bi bi-x-circle me-1"></i>@Model.Error
+                    </div>
+                }
+                <form method="post" asp-page-handler="Create">
+                    <div class="mb-3">
+                        <label asp-for="Name" class="form-label small fw-semibold">Name</label>
+                        <input asp-for="Name" class="form-control" placeholder="e.g. Zabbix server" required />
+                    </div>
+                    <div class="mb-3">
+                        <label asp-for="Description" class="form-label small fw-semibold">Description (optional)</label>
+                        <textarea asp-for="Description" class="form-control" rows="2"></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label asp-for="IpAllowlist" class="form-label small fw-semibold">IP allowlist (optional)</label>
+                        <input asp-for="IpAllowlist" class="form-control" placeholder="e.g. 10.0.0.0/8, 203.0.113.4" />
+                    </div>
+                    <div class="mb-3">
+                        <label asp-for="ExpiresInDays" class="form-label small fw-semibold">Expires in (days, optional)</label>
+                        <input asp-for="ExpiresInDays" type="number" min="1" class="form-control" placeholder="Never" />
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-key-fill me-1"></i>Create token
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+    function copyField(fieldId, iconId) {
+        const el = document.getElementById(fieldId);
+        navigator.clipboard.writeText(el.value).then(() => {
+            const icon = document.getElementById(iconId);
+            icon.classList.replace('bi-clipboard', 'bi-clipboard-check');
+            setTimeout(() => icon.classList.replace('bi-clipboard-check', 'bi-clipboard'), 1500);
+        });
+    }
+</script>
+}

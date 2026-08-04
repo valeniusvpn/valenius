@@ -24,5 +24,10 @@ public class ConnectionLog
     [MaxLength(45)]
     public string WanIp { get; set; } = "";
 
+    /// <summary>Free-text detail for non-connect/disconnect event types (e.g. "PortFallback" carries
+    /// the port switched to). Empty for the plain Connect/Disconnect events.</summary>
+    [MaxLength(255)]
+    public string Detail { get; set; } = "";
+
     public DateTime OccurredAt { get; set; }
 }

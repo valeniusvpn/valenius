@@ -98,6 +98,7 @@ class PipeResponse:
 class ConnectedTunnelInfo:
     Name: str = ""
     IsVerified: bool = False
+    VerificationFailed: bool = False
     ConnectedUser: Optional[str] = None
     ConnectedSince: Optional[str] = None
 
@@ -105,6 +106,7 @@ class ConnectedTunnelInfo:
         return {
             'Name': self.Name,
             'IsVerified': self.IsVerified,
+            'VerificationFailed': self.VerificationFailed,
             'ConnectedUser': self.ConnectedUser,
             'ConnectedSince': self.ConnectedSince,
         }
@@ -114,6 +116,7 @@ class ConnectedTunnelInfo:
         return ConnectedTunnelInfo(
             Name=d.get('Name', ''),
             IsVerified=d.get('IsVerified', False),
+            VerificationFailed=d.get('VerificationFailed', False),
             ConnectedUser=d.get('ConnectedUser'),
             ConnectedSince=d.get('ConnectedSince'),
         )

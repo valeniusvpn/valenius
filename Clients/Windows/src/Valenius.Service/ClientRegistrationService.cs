@@ -263,6 +263,51 @@ public class ClientRegistrationService : BackgroundService
         }
     }
 
+    private int _transferInProgress; // 0/1 guard via Interlocked — see TransferLocalProfilesAsync
+
+    /// <summary>
+    /// One-time (per activation) bulk archive of every local, unmanaged profile to the backend —
+    /// the standalone-to-backend handoff. Reuses <see cref="ArchiveProfileAsync"/> per profile,
+    /// exactly like the existing "share with all users" checkbox flow does for a single upload.
+    /// Deliberately does NOT mark profiles managed: per product decision, a transferred profile
+    /// stays private/user-deletable, matching how a self-uploaded profile behaves on a normal
+    /// already-connected client. Only sets <c>ProfilesTransferredToBackend</c> once every profile
+    /// archived successfully — a partial failure retries the whole batch on the next
+    /// heartbeat/poll (both call <see cref="ProcessStatusResponseAsync"/>, which is what invokes
+    /// this). <see cref="_transferInProgress"/> guards against the heartbeat and long-poll loops
+    /// both trying to run this concurrently before the flag is persisted.
+    /// </summary>
+    public async Task TransferLocalProfilesAsync(CancellationToken ct)
+    {
+        if (Interlocked.CompareExchange(ref _transferInProgress, 1, 0) != 0)
+            return;
+        try
+        {
+            var profiles = _configs.GetAllUnmanagedProfilesWithContent();
+            if (profiles.Count == 0)
+            {
+                await _registration.SetProfilesTransferredAsync(true);
+                return;
+            }
+
+            var allOk = true;
+            foreach (var (_, profileName, content) in profiles)
+            {
+                var ok = await ArchiveProfileAsync(profileName, content, ct);
+                allOk &= ok;
+                if (!ok)
+                    _logger.LogWarning("Failed to transfer local profile '{Profile}' to the backend; will retry.", profileName);
+            }
+
+            if (allOk)
+                await _registration.SetProfilesTransferredAsync(true);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _transferInProgress, 0);
+        }
+    }
+
     /// <summary>
     /// Archives a manually-uploaded profile's content to the backend so it becomes part of this
     /// Client's authoritative set and can be pulled by <see cref="ResyncProfilesAsync"/> onto every
@@ -326,6 +371,14 @@ public class ClientRegistrationService : BackgroundService
             _logger.LogDebug(ex, "Could not persist registration state to local cache.");
         }
 
+        // A previously-standalone client just got activated for the first time: hand its local
+        // profiles to the backend so it behaves like an always-connected client from now on.
+        // The ProfilesTransferred guard makes this a no-op once it has fully succeeded once;
+        // TransferLocalProfilesAsync itself is fire-and-forget so a slow/offline archive call
+        // never blocks the heartbeat/poll loop that called us.
+        if (result.IsActive && _registration.GetStandaloneModeChosen() && !_registration.GetProfilesTransferred())
+            _ = TransferLocalProfilesAsync(ct);
+
         _registration.SetServerProfileName(result.ServerProfileName);
         _registration.SetServerHealthUrl(result.ServerHealthUrl);
         _registration.SetServerVpnIp(result.ServerVpnIp);
@@ -336,6 +389,9 @@ public class ClientRegistrationService : BackgroundService
         _registration.SetGatewayProfiles(
             (result.GatewayProfiles ?? [])
             .Select(g => (g.ProfileName, g.GatewayIp, g.HealthPort)));
+        _registration.SetFallbackPorts(
+            (result.FallbackEndpoints ?? [])
+            .Select(f => (f.ProfileName, f.Port, f.TriggerSeconds)));
         _registration.SetDeviceTunnelEnabled(result.DeviceTunnelEnabled);
         if (result.DeviceTunnelEnabled && !string.IsNullOrEmpty(result.ServerProfileName))
         {

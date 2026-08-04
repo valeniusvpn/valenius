@@ -13,6 +13,7 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Valenius.Backend.Data;
 using Valenius.Backend.Filters;
 using Valenius.Backend.Licensing;
+using Valenius.Backend.Monitoring;
 using Valenius.Backend.Services;
 using Valenius.Shared;
 
@@ -54,6 +55,39 @@ public static class OssStartup
                         Window      = TimeSpan.FromMinutes(1),
                         QueueLimit  = 0,
                     }));
+            // Management API (docs/design/management-api.md §9) — partitioned by token id,
+            // not IP: automation usually sits behind one NAT address, so an IP partition
+            // would make several integrations starve each other. Parsed straight from the
+            // raw header (no DB call) since the rate limiter runs before ApiTokenFilter in
+            // the pipeline; an unparseable/missing header falls back to IP, matching §9's
+            // "falling back to IP for unauthenticated attempts". The tighter configs:read
+            // bucket (§9, 60/min) is added in Phase 3 alongside the endpoints that need it.
+            opts.AddPolicy("mgmt-api", ctx =>
+                RateLimitPartition.GetSlidingWindowLimiter(
+                    ApiTokenGenerator.TryParseAuthorizationHeader(ctx.Request.Headers.Authorization.ToString())?.TokenId
+                        ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    _ => new SlidingWindowRateLimiterOptions
+                    {
+                        PermitLimit       = 600,
+                        Window            = TimeSpan.FromMinutes(1),
+                        SegmentsPerWindow = 6,
+                        QueueLimit        = 0,
+                    }));
+            // /api/v1/metrics + /api/v1/monitoring/status (docs/valenius-zabbix-monitoring-concept.md
+            // §3.1: "12 req/min per token"). Same token-id partition-key pattern as "mgmt-api" —
+            // a Zabbix master item polls once a minute, so 12/min gives headroom for retries
+            // without opening the door to a scrape storm.
+            opts.AddPolicy("monitoring", ctx =>
+                RateLimitPartition.GetSlidingWindowLimiter(
+                    ApiTokenGenerator.TryParseAuthorizationHeader(ctx.Request.Headers.Authorization.ToString())?.TokenId
+                        ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    _ => new SlidingWindowRateLimiterOptions
+                    {
+                        PermitLimit       = 12,
+                        Window            = TimeSpan.FromMinutes(1),
+                        SegmentsPerWindow = 4,
+                        QueueLimit        = 0,
+                    }));
             opts.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
         });
 
@@ -64,9 +98,28 @@ public static class OssStartup
         builder.Services.AddControllers();
         builder.Services.AddScoped<ApiKeyFilter>();
         builder.Services.AddSingleton<ApiKeyStore>();
+        // Management API (Pro controllers) — the auth core lives in OSS so it can be called
+        // both by ApiTokenFilter (over HTTP) and, later, by an in-process MCP tool handler
+        // (docs/design/management-api.md §17.3), with one implementation of the logic.
+        builder.Services.AddSingleton<ApiTokenUsageThrottle>();
+        builder.Services.AddScoped<ApiCallerResolver>();
+        builder.Services.AddScoped<ApiTokenFilter>();
+        builder.Services.AddSingleton<HeartbeatSettingsStore>();
         builder.Services.AddSingleton<ClientNotifier>();
         builder.Services.AddSingleton<ClientPresenceTracker>();
         builder.Services.AddSingleton<WgTunnelTracker>();
+        builder.Services.AddSingleton<ManagementEventNotifier>();
+        builder.Services.AddSingleton<IManagementEventLog, NullManagementEventLog>();
+        builder.Services.AddSingleton<BackendEgressIpProvider>();
+        builder.Services.AddSingleton<WireGuardHandshakeProbe>();
+
+        // Zabbix/NMS monitoring surface (docs/valenius-zabbix-monitoring-concept.md).
+        builder.Services.AddSingleton<RequestMetricsCollector>();
+        builder.Services.AddSingleton<MetricsSnapshotCache>();
+        builder.Services.AddScoped<MetricsSnapshotBuilder>();
+        // Phase 2 — always empty in OSS; only Backend.Pro's WgTunnelReconcilerService ever
+        // populates it, since only Pro talks to a sidecar at all.
+        builder.Services.AddSingleton<GatewayMetricsTracker>();
 
         // Audit log
         builder.Services.AddHttpContextAccessor();
@@ -100,6 +153,14 @@ public static class OssStartup
             opts.Conventions.AuthorizePage("/Admin/Alerts",      "AdminOnly");
             opts.Conventions.AuthorizeFolder("/Admin/Server",    "AdminOnly");
             opts.Conventions.AuthorizeFolder("/Admin/Appliances","AdminOnly");
+            // Physical page lives in Backend.Pro (Management API is Pro-only), merged into
+            // this Razor Pages app via AddApplicationPart — convention still lives here
+            // since RazorPagesOptions is a single shared instance across both projects.
+            opts.Conventions.AuthorizeFolder("/Admin/ApiTokens", "AdminOnly");
+            opts.Conventions.AuthorizePage("/Admin/ApiReference", "AdminOnly");
+            // OSS-native (unlike /Admin/ApiTokens above) — mints monitoring:read-only tokens
+            // so self-hosted Community admins aren't blocked on Pro for the Zabbix integration.
+            opts.Conventions.AuthorizeFolder("/Admin/Monitoring", "AdminOnly");
         });
 
         // --- Read OIDC configuration from DB before service registration ---
@@ -284,6 +345,8 @@ public static class OssStartup
             """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiKeyRotatedAt" TIMESTAMP NULL""");
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "TrafficRetentionDays" INTEGER NOT NULL DEFAULT 90""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "DefaultHeartbeatIntervalMinutes" INTEGER NOT NULL DEFAULT 1""");
         // WireGuard traffic accounting: reset-aware lifetime counters on the client + a per-interval sample table.
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgRxLastRaw" BIGINT NULL""");
@@ -337,6 +400,17 @@ public static class OssStartup
             """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceTunnelEnabled" BOOLEAN NULL""");
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DeviceTunnelDefaultEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
+        // Port-443 fallback (docs/design/port-443-fallback.md).
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPortEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPort" INT NOT NULL DEFAULT 443""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPortActive" BOOLEAN NOT NULL DEFAULT FALSE""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackTriggerSeconds" INT NOT NULL DEFAULT 20""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "ConnectionLogs" ADD COLUMN IF NOT EXISTS "Detail" VARCHAR(255) NOT NULL DEFAULT ''""");
         await db.Database.ExecuteSqlRawAsync(
             """
             CREATE TABLE IF NOT EXISTS "MfaSessions" (
@@ -557,6 +631,50 @@ public static class OssStartup
         }
         await db.SaveChangesAsync();
 
+        // Management API (Pro) — token table + ClientKey exposure toggle. Table lives in
+        // OSS because ApplicationDbContext/EnsureCreated are OSS; the controllers that use
+        // it are Pro-only. See docs/design/management-api.md §4.2.
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "ApiTokens" (
+                "Id"          SERIAL PRIMARY KEY,
+                "TokenId"     VARCHAR(20)  NOT NULL,
+                "SecretHash"  VARCHAR(64)  NOT NULL,
+                "Name"        VARCHAR(100) NOT NULL DEFAULT '',
+                "Description" VARCHAR(500),
+                "Scopes"      VARCHAR(500) NOT NULL DEFAULT '',
+                "CustomerId"  INTEGER REFERENCES "Customers"("Id") ON DELETE CASCADE,
+                "IpAllowlist" VARCHAR(500),
+                "CreatedAt"   TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                "CreatedBy"   VARCHAR(200) NOT NULL DEFAULT '',
+                "ExpiresAt"   TIMESTAMP,
+                "LastUsedAt"  TIMESTAMP,
+                "LastUsedIp"  VARCHAR(45),
+                "RevokedAt"   TIMESTAMP
+            )
+            """);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ApiTokens_TokenId" ON "ApiTokens" ("TokenId")""");
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiExposeClientKey" BOOLEAN NOT NULL DEFAULT FALSE""");
+
+        // Management API event feed (docs/design/management-api.md phase 4) — Pro-only writer
+        // (NullManagementEventLog no-ops in OSS), but the table lives here so EF's model and the
+        // idempotent-SQL-patch convention stay in one place regardless of edition.
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "ManagementEvents" (
+                "Id"         BIGSERIAL PRIMARY KEY,
+                "Type"       VARCHAR(40)  NOT NULL,
+                "ClientId"   INTEGER,
+                "CustomerId" INTEGER,
+                "OccurredAt" TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                "Detail"     VARCHAR(500)
+            )
+            """);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_ManagementEvents_CustomerId" ON "ManagementEvents" ("CustomerId")""");
+
         // Seed ServerSettings row (Id = 1).
         if (!db.ServerSettings.Any())
         {
@@ -649,6 +767,13 @@ public static class OssStartup
             var store = app.Services.GetRequiredService<ApiKeyStore>();
             store.Key         = s.ApiKey!;
             store.PreviousKey = s.PreviousApiKey;
+        }
+
+        // Load the system-wide default heartbeat interval into its in-memory cache.
+        {
+            var s = await db.ServerSettings.FirstAsync();
+            app.Services.GetRequiredService<HeartbeatSettingsStore>().DefaultIntervalMinutes =
+                s.DefaultHeartbeatIntervalMinutes is >= 1 and <= 60 ? s.DefaultHeartbeatIntervalMinutes : 1;
         }
 
         // Bootstrap internal CA (no-op in OSS; Pro CaService generates key material).
@@ -759,6 +884,24 @@ public static class OssStartup
             ctx.Response.Headers["Referrer-Policy"]           = "strict-origin-when-cross-origin";
             ctx.Response.Headers["X-Permitted-Cross-Domain-Policies"] = "none";
             await next();
+        });
+
+        // Backs valenius_http_requests_total / valenius_http_request_duration_seconds
+        // (docs/valenius-zabbix-monitoring-concept.md §4.1). Method + status_class only —
+        // never per-path, see root CLAUDE.md "Do not add per-path HTTP request labels".
+        app.Use(async (ctx, next) =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                await next();
+            }
+            finally
+            {
+                sw.Stop();
+                ctx.RequestServices.GetRequiredService<RequestMetricsCollector>()
+                    .Record(ctx.Request.Method, ctx.Response.StatusCode, sw.Elapsed.TotalSeconds);
+            }
         });
 
         app.UseHsts();

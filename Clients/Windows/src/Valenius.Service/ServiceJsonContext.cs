@@ -70,10 +70,18 @@ internal record ClientStatusResponse(
     /// automatically at boot, before any user logs on, using the same away-from-trusted-network
     /// policy as the generic auto-connect. Already resolved server-side (per-client override, else
     /// customer default) and already gated on ServerProfileName actually being set.</summary>
-    bool DeviceTunnelEnabled = false);
+    bool DeviceTunnelEnabled = false,
+    /// <summary>Per-profile alternate UDP port (typically 443) to retry a profile's Endpoint on
+    /// when the primary port appears blocked. Scoped per profile like GatewayProfiles: the native
+    /// profile carries its own customer's setting, each foreign profile its own source customer's.
+    /// A profile absent from this list never falls back. The backend only lists a profile once the
+    /// serving side is confirmed to answer on that port, so it is safe to try without a pre-check.
+    /// See docs/design/port-443-fallback.md.</summary>
+    FallbackEndpointEntry[]? FallbackEndpoints = null);
 
 internal record PendingForeignConfigEntry(string FileName, string Content);
 internal record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
+internal record FallbackEndpointEntry(string ProfileName, int Port, int TriggerSeconds);
 internal record LanCidrProfileEntry(string ProfileName, string[] Cidrs);
 internal record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "", string? Detail = null);
 internal record PendingConfigResponse(string FileName, string Content);
@@ -92,6 +100,7 @@ internal record ArchiveProfileRequest(string ClientKey, string ProfileName, stri
 [JsonSerializable(typeof(TrustedNetworkEntry[]))]
 [JsonSerializable(typeof(PendingForeignConfigEntry[]))]
 [JsonSerializable(typeof(GatewayProfileEntry[]))]
+[JsonSerializable(typeof(FallbackEndpointEntry[]))]
 [JsonSerializable(typeof(LanCidrProfileEntry[]))]
 [JsonSerializable(typeof(ArchiveProfileRequest))]
 internal partial class ServiceJsonContext : JsonSerializerContext { }

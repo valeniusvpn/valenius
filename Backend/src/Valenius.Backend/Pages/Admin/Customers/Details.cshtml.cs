@@ -8,9 +8,13 @@ using Valenius.Backend.Services;
 
 namespace Valenius.Backend.Pages.Admin.Customers;
 
-public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILicenseEnforcement enforcement, ISidecarService sidecar, IPeerProvisioningService provisioner, IAuditService audit) : PageModel
+public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILicenseEnforcement enforcement, ISidecarService sidecar, IPeerProvisioningService provisioner, IAuditService audit, HeartbeatSettingsStore heartbeatSettings, BackendEgressIpProvider egressIp, WireGuardHandshakeProbe handshakeProbe) : PageModel
 {
     public Customer     Customer             { get; private set; } = null!;
+
+    /// <summary>System-wide default heartbeat interval (Admin -> Settings), used when this
+    /// customer has no override of its own.</summary>
+    public int DefaultHeartbeatIntervalMinutes => heartbeatSettings.DefaultIntervalMinutes;
     public List<Client> Clients              { get; private set; } = [];
     public List<AppUser> Users               { get; private set; } = [];
 
@@ -26,11 +30,38 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
     public string? SidecarInterfaceAddress { get; private set; }
     public string? SidecarVersion          { get; private set; }
 
+    /// <summary>The sidecar's WireGuard static public key from /info — the identity the handshake
+    /// probe encrypts to, and therefore what a successful handshake proves it really holds.</summary>
+    public string? SidecarPublicKey        { get; private set; }
+
     /// <summary>Physical LAN CIDR(s) the sidecar detected on its host, freshly fetched from
     /// /info (falls back to the last-cached <see cref="Customer.SidecarLanCidrs"/> value when the
     /// live call fails). This is what's sent to clients as StatusResponse.RemoteLanCidrs for the
     /// pre-connect LAN-conflict check.</summary>
     public List<string> DetectedLanCidrs { get; private set; } = [];
+    /// <summary>Whether the sidecar confirms the port-fallback redirect is installed right now
+    /// (fresh from /info, falling back to the cached <see cref="Customer.FallbackPortActive"/>
+    /// when the sidecar is unreachable). This — not the admin's toggle — is what decides whether
+    /// clients are offered the fallback; see docs/design/port-443-fallback.md §4.4.</summary>
+    public bool    FallbackActive          { get; private set; }
+    public string? FallbackError           { get; private set; }
+
+    /// <summary>A sidecar address is configured but GET /info did not answer.</summary>
+    public bool    SidecarUnreachable      { get; private set; }
+
+    /// <summary>This backend's public egress IPv4, resolved only when a sidecar is unreachable so
+    /// the firewall guidance can name a single source address instead of telling the operator to
+    /// expose the management port to the internet. Null when it could not be determined.</summary>
+    public string? BackendPublicIp         { get; private set; }
+
+    /// <summary>
+    /// The sidecar enrolled successfully at some point but cannot be reached now. Enrollment is
+    /// sidecar → backend (outbound, usually permitted); the management API is backend → sidecar
+    /// (inbound, needs an explicit rule). So this specific combination points hard at a blocked
+    /// inbound port rather than a mis-set address or a stopped container.
+    /// </summary>
+    public bool    SidecarEnrolledButUnreachable => SidecarUnreachable && HasActiveSidecarCert;
+
     public bool    HasActiveSidecarCert    { get; private set; }
     public bool    EnrollmentTokenIsSet    { get; private set; }
     public bool?   UdpPortReachable        { get; private set; }
@@ -57,6 +88,32 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
     public int             PoolRemaining       => license.MaxEndpoints < 0
                                                     ? int.MaxValue
                                                     : license.MaxEndpoints - TotalAssigned;
+
+    /// <summary>
+    /// Loads everything the page renders. Extracted so the handlers that return Page() directly
+    /// (rather than redirecting) populate the same state as a plain GET — they previously each
+    /// reloaded an ad-hoc subset, which left the hero counters and traffic panel empty after a
+    /// "Test connection".
+    /// </summary>
+    private async Task LoadPageDataAsync(Customer customer)
+    {
+        var id   = customer.Id;
+        Customer = customer;
+        Clients  = await db.Clients.Where(c => c.CustomerId == id && !c.IsDeleted)
+                                   .OrderBy(c => c.Hostname).ToListAsync();
+        Users    = await db.AppUsers.Where(u => u.CustomerId == id)
+                                    .OrderBy(u => u.DisplayName).ToListAsync();
+        TrustedNetworks = await db.TrustedNetworks.Where(t => t.CustomerId == id)
+                                                  .OrderBy(t => t.Subnet).ToListAsync();
+        ActiveCount = Clients.Count(c => c.IsActive);
+        CustomerRx  = Clients.Sum(c => c.WgRxLifetime);
+        CustomerTx  = Clients.Sum(c => c.WgTxLifetime);
+        TrafficBuckets = await Valenius.Backend.Services.TrafficQuery.LoadRangeAsync(
+            db, Clients.Select(c => c.Id).ToList(), Valenius.Backend.Services.TrafficRange.Default);
+        TotalAssigned        = await db.Customers.SumAsync(c => c.MaxEndpoints);
+        HasActiveSidecarCert = await db.SidecarCertificates.AnyAsync(c => c.CustomerId == id && !c.IsRevoked);
+        EnrollmentTokenIsSet = !string.IsNullOrEmpty(customer.EnrollmentToken);
+    }
 
     public async Task<IActionResult> OnGetAsync(int id)
     {
@@ -108,10 +165,25 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         SidecarListenPort       = info?.ListenPort;
         SidecarInterfaceAddress = info?.InterfaceAddress;
         SidecarVersion          = info?.Version;
+        SidecarPublicKey        = info?.PublicKey;
+        // Unreachable sidecar → fall back to the last cached verdict rather than reporting
+        // "not active", which would wrongly suggest the admin's setting had been rejected.
+        FallbackActive          = info?.FallbackActive ?? customer.FallbackPortActive;
+        FallbackError           = info?.FallbackError;
         TransitConflicts        = await ComputeTransitConflictsAsync(customer, info?.InterfaceAddress);
         DetectedLanCidrs         = info?.LanCidrs is { Count: > 0 } fresh
             ? fresh
             : (customer.SidecarLanCidrs?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? []).ToList();
+
+        // An address is configured but /info didn't answer. The management API is the only way in,
+        // so this is where the firewall guidance below becomes relevant.
+        SidecarUnreachable = info is null;
+        if (SidecarUnreachable)
+        {
+            // Only looked up when it's actually needed — see BackendEgressIpProvider. Deployments
+            // that reach their sidecars over a site-to-site VPN never hit this path at all.
+            BackendPublicIp = await egressIp.GetAsync(HttpContext.RequestAborted);
+        }
     }
 
     /// <summary>
@@ -150,41 +222,49 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         return RedirectToPage(new { id });
     }
 
-    /// <summary>Saves the tenant-default MFA policy + session lifetime (Pro).</summary>
     /// <summary>MFA policy editing is locked when the Pro license is expired (enforcement continues).</summary>
     public bool MfaEditable => IsProEdition && license.IsValid;
 
-    public async Task<IActionResult> OnPostSaveMfaDefaultsAsync(int id, string defaultMfaPolicy, int mfaSessionLifetimeHours)
+    /// <summary>
+    /// Saves the Integrated Server tab's "Policies" card — the tenant-default MFA policy +
+    /// session lifetime (Pro) and the Windows device-tunnel default, which share one form.
+    /// The MFA fields are absent from the POST when the card renders them read-only (no enrolled
+    /// sidecar) or inside a disabled fieldset (expired licence), so they are applied only when
+    /// actually submitted; the device-tunnel switch is always present.
+    /// See <see cref="Models.Customer.DeviceTunnelDefaultEnabled"/> /
+    /// <see cref="Models.Client.DeviceTunnelEnabled"/>.
+    /// </summary>
+    public async Task<IActionResult> OnPostSavePoliciesAsync(
+        int id, string? defaultMfaPolicy, int? mfaSessionLifetimeHours, bool deviceTunnelDefaultEnabled)
     {
-        if (!MfaEditable)
-        {
-            TempData["Warning"] = "MFA policy editing is locked — the Pro license is inactive or expired.";
-            return RedirectToPage(new { id });
-        }
         var customer = await db.Customers.FindAsync(id);
         if (customer is null) return NotFound();
-        customer.DefaultMfaPolicy = defaultMfaPolicy switch
-        {
-            "PerConnection" => MfaPolicy.PerConnection,
-            "Interval"      => MfaPolicy.Interval,
-            _               => MfaPolicy.Disabled,
-        };
-        customer.MfaSessionLifetimeHours = mfaSessionLifetimeHours is >= 1 and <= 720
-            ? mfaSessionLifetimeHours : 12;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Mfa, "Customer MFA defaults updated", $"Customer: {customer.Name}",
-            $"policy={customer.DefaultMfaPolicy}, lifetime={customer.MfaSessionLifetimeHours}h");
-        return RedirectToPage(new { id });
-    }
 
-    /// <summary>Tenant default for the Windows device tunnel — see
-    /// <see cref="Models.Customer.DeviceTunnelDefaultEnabled"/> / <see cref="Models.Client.DeviceTunnelEnabled"/>.</summary>
-    public async Task<IActionResult> OnPostSaveDeviceTunnelDefaultAsync(int id, bool deviceTunnelDefaultEnabled)
-    {
-        var customer = await db.Customers.FindAsync(id);
-        if (customer is null) return NotFound();
         customer.DeviceTunnelDefaultEnabled = deviceTunnelDefaultEnabled;
+
+        if (defaultMfaPolicy is not null)
+        {
+            if (!MfaEditable)
+            {
+                TempData["Warning"] = "MFA policy editing is locked — the Pro license is inactive or expired.";
+            }
+            else
+            {
+                customer.DefaultMfaPolicy = defaultMfaPolicy switch
+                {
+                    "PerConnection" => MfaPolicy.PerConnection,
+                    "Interval"      => MfaPolicy.Interval,
+                    _               => MfaPolicy.Disabled,
+                };
+                customer.MfaSessionLifetimeHours = mfaSessionLifetimeHours is >= 1 and <= 720
+                    ? mfaSessionLifetimeHours.Value : 12;
+                _ = audit.LogAsync(Audit.Mfa, "Customer MFA defaults updated", $"Customer: {customer.Name}",
+                    $"policy={customer.DefaultMfaPolicy}, lifetime={customer.MfaSessionLifetimeHours}h");
+            }
+        }
+
         await db.SaveChangesAsync();
+        TempData["WgTab"] = true;
         return RedirectToPage(new { id });
     }
 
@@ -309,7 +389,8 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
     public async Task<IActionResult> OnPostSaveServerAsync(
         int id, string? sidecarUrl,
         int sidecarManagementPort, int sidecarHealthPort, string? serverEndpoint, string? vpnPrefix,
-        string? dnsServer, string? dnsSearchDomains, string? allowedIPs)
+        string? dnsServer, string? dnsSearchDomains, string? allowedIPs,
+        bool fallbackPortEnabled = false, int fallbackPort = 443, int fallbackTriggerSeconds = 20)
     {
         if (!IsValidIpv4(dnsServer))
         {
@@ -354,6 +435,46 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         // port (9004). It must never silently reuse the mTLS management port.
         customer.SidecarHealthPort     = sidecarHealthPort is > 0 and <= 65535 ? sidecarHealthPort : 0;
 
+        // ── Port fallback (docs/design/port-443-fallback.md) ──────────────────────
+        // The intent is stored either way, but the sidecar is only asked to change when the
+        // intent actually changed — a save of unrelated fields must not re-push (and possibly
+        // re-fail) a rule that is already in the state the admin asked for.
+        var newFallbackPort = fallbackPort is > 0 and <= 65535 ? fallbackPort : 443;
+        var fallbackChanged = customer.FallbackPortEnabled != fallbackPortEnabled
+                              || customer.FallbackPort != newFallbackPort;
+        customer.FallbackPortEnabled = fallbackPortEnabled;
+        customer.FallbackPort        = newFallbackPort;
+        // Client-side timing only — never pushed to the sidecar, so it doesn't participate in
+        // fallbackChanged / the SetFallbackAsync call below.
+        customer.FallbackTriggerSeconds = fallbackTriggerSeconds is >= 1 and <= 300 ? fallbackTriggerSeconds : 20;
+
+        if (fallbackChanged && customer.ServerMode == "Valenius" && !string.IsNullOrEmpty(customer.SidecarUrl))
+        {
+            var (ok, message, active) = await sidecar.SetFallbackAsync(
+                customer.SidecarBaseUrl, fallbackPortEnabled, newFallbackPort);
+
+            // FallbackPortActive is the observed state the heartbeat gates on, so it follows
+            // the sidecar's answer — never the admin's intent. A refusal leaves the toggle on
+            // (so the admin can see and retry what they asked for) but clients are not offered
+            // a port the server does not actually answer on.
+            customer.FallbackPortActive = active;
+            if (!ok)
+                TempData["WgError"] = "Port fallback was not applied: " + message;
+            else
+                TempData["WgSuccess"] = message;
+
+            _ = audit.LogAsync(Audit.Customer, "Port fallback changed", $"Customer: {customer.Name}",
+                $"enabled={fallbackPortEnabled}, port={newFallbackPort}, applied={ok}, active={active}");
+        }
+        else if (fallbackChanged)
+        {
+            // No sidecar to ask (no address configured, or not a Valenius customer) — nothing
+            // can confirm the redirect, so nothing is advertised to clients.
+            customer.FallbackPortActive = false;
+            _ = audit.LogAsync(Audit.Customer, "Port fallback changed", $"Customer: {customer.Name}",
+                $"enabled={fallbackPortEnabled}, port={newFallbackPort}, no sidecar to apply to");
+        }
+
         await db.SaveChangesAsync();
         TempData["WgTab"] = true;
         return RedirectToPage(new { id });
@@ -376,12 +497,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
     {
         var customer = await db.Customers.FindAsync(id);
         if (customer is null) return NotFound();
-        Customer        = customer;
-        Clients         = await db.Clients.Where(c => c.CustomerId == id && !c.IsDeleted).OrderBy(c => c.Hostname).ToListAsync();
-        Users           = await db.AppUsers.Where(u => u.CustomerId == id).OrderBy(u => u.DisplayName).ToListAsync();
-        TrustedNetworks = await db.TrustedNetworks.Where(t => t.CustomerId == id).OrderBy(t => t.Subnet).ToListAsync();
-        HasActiveSidecarCert = await db.SidecarCertificates.AnyAsync(c => c.CustomerId == id && !c.IsRevoked);
-        EnrollmentTokenIsSet = !string.IsNullOrEmpty(customer.EnrollmentToken);
+        await LoadPageDataAsync(customer);
 
         var host = string.IsNullOrWhiteSpace(sidecarHost)
             ? customer.SidecarUrl ?? ""
@@ -457,6 +573,306 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         return h.Trim();
     }
 
+    // ── Firewall port checks ──────────────────────────────────────────────────
+    //
+    // What can honestly be determined, per protocol:
+    //
+    //   TCP  — definitive. A completed handshake proves the port is open; a refusal or
+    //          timeout proves the backend cannot use it.
+    //   UDP  — one-sided. An ICMP port-unreachable proves the port is CLOSED, but silence
+    //          means "open" and "silently dropped by a firewall" alike, because WireGuard
+    //          ignores packets it can't decrypt. So a UDP probe can disprove, never confirm,
+    //          and must never be rendered as a green pass.
+    //
+    // All checks run from the BACKEND's network position, which is not a VPN client's. A
+    // sidecar allowlisted for this backend can pass every check here and still be unreachable
+    // for clients — the UI says so rather than implying the fleet is fine.
+
+    public enum PortState { Ok, Warn, Fail, Unknown }
+
+    public sealed record PortCheck(string Key, PortState State, string Label, string Detail);
+
+    /// <summary>Results of the last "Check ports" run; null when it hasn't been run.</summary>
+    public List<PortCheck>? PortChecks { get; private set; }
+
+    public PortCheck? PortCheckFor(string key) => PortChecks?.FirstOrDefault(p => p.Key == key);
+
+    public async Task<IActionResult> OnPostCheckPortsAsync(int id)
+    {
+        var customer = await db.Customers.FindAsync(id);
+        if (customer is null) return NotFound();
+        await LoadPageDataAsync(customer);
+        await FetchSidecarInfoAsync(customer);
+
+        var mgmtHost   = customer.SidecarUrl ?? "";
+        var publicHost = !string.IsNullOrWhiteSpace(customer.ServerEndpoint)
+            ? StripToHost(customer.ServerEndpoint)
+            : mgmtHost;
+        var healthPort = customer.SidecarHealthPort > 0 ? customer.SidecarHealthPort : 9004;
+
+        // A real WireGuard handshake is the ONLY way to confirm a UDP port — the ICMP probe can
+        // disprove but never prove, which is why it can only ever produce an amber "no rejection".
+        // So when a handshake is possible, use it and get a definitive answer; the ICMP probe is
+        // kept solely for the cases where it isn't (OSS, unreachable sidecar, unknown server key).
+        var canHandshake = IsProEdition
+                           && !SidecarUnreachable
+                           && SidecarListenPort.HasValue
+                           && !string.IsNullOrEmpty(SidecarPublicKey)
+                           && !string.IsNullOrEmpty(publicHost);
+
+        var mgmtTcpTask   = CheckTcpPortAsync(mgmtHost, customer.SidecarManagementPort);
+        var healthTcpTask = CheckTcpPortAsync(publicHost, healthPort);
+
+        // Only fall back to the ICMP probes when no handshake is available. They each burn their
+        // full timeout when the port is open (silence is the expected result), so they run in
+        // parallel with the TCP checks rather than after them.
+        var wgUdpTask = !canHandshake && SidecarListenPort.HasValue
+            ? CheckUdpPortAsync(publicHost, SidecarListenPort.Value)
+            : Task.FromResult<bool?>(null);
+        var fbUdpTask = !canHandshake && customer.FallbackPortEnabled
+            ? CheckUdpPortAsync(publicHost, customer.FallbackPort)
+            : Task.FromResult<bool?>(null);
+
+        await Task.WhenAll(mgmtTcpTask, healthTcpTask, wgUdpTask, fbUdpTask);
+
+        var checks = new List<PortCheck>();
+
+        // Management: the /info call already told us whether the port is *usable*. Probing TCP
+        // as well splits the failure case in two, which point at completely different fixes:
+        // a blocked port is a firewall problem, an open port with no answer is the container
+        // or mTLS.
+        checks.Add(!SidecarUnreachable
+            ? new PortCheck("mgmt", PortState.Ok, "Open", "Management API answered.")
+            : await mgmtTcpTask
+                ? new PortCheck("mgmt", PortState.Warn, "Port open, no answer",
+                    "The port accepts connections but the management API did not respond — "
+                    + "check the container is running and enrolled, not the firewall.")
+                : new PortCheck("mgmt", PortState.Fail, "Blocked",
+                    "No TCP connection from this backend."));
+
+        checks.Add(await healthTcpTask
+            ? new PortCheck("health", PortState.Ok, "Open", $"TCP connect to {publicHost}:{healthPort} succeeded.")
+            : new PortCheck("health", PortState.Fail, "Blocked",
+                $"No TCP connection to {publicHost}:{healthPort} from this backend."));
+
+        if (canHandshake)
+        {
+            var serverKey = SidecarPublicKey!;
+            var listen    = SidecarListenPort!.Value;
+
+            var wg = await ProbeEndpointAsync(customer, publicHost, listen, serverKey);
+            checks.Add(HandshakeVerdict("wg", wg));
+
+            if (customer.FallbackPortEnabled && customer.FallbackPort != listen)
+            {
+                var fb = await ProbeEndpointAsync(customer, publicHost, customer.FallbackPort, serverKey);
+                var detail = fb.Ok || !wg.Ok
+                    ? fb.Message
+                    : fb.Message + " Since the WireGuard port answered, the peer and server key are "
+                                 + "confirmed good — so this is the redirect or the firewall on this port alone.";
+                checks.Add(fb.Ok
+                    ? HandshakeVerdict("fallback", fb)
+                    : new PortCheck("fallback", PortState.Fail, "No handshake", detail));
+            }
+            UdpConfirmedByHandshake = true;
+        }
+        else
+        {
+            checks.Add(UdpVerdict("wg", await wgUdpTask, SidecarListenPort));
+            if (customer.FallbackPortEnabled)
+                checks.Add(UdpVerdict("fallback", await fbUdpTask, customer.FallbackPort));
+        }
+
+        PortChecks         = checks;
+        PortChecksHost     = publicHost;
+        TempData["WgTab"]  = true;
+        return Page();
+    }
+
+    /// <summary>True when the UDP rows came from a real handshake rather than the ICMP probe, so
+    /// the panel can drop the "UDP can only be disproved" caveat that no longer applies.</summary>
+    public bool UdpConfirmedByHandshake { get; private set; }
+
+    private static PortCheck HandshakeVerdict(string key, WireGuardHandshakeProbe.Result r) => r.Ok
+        ? new PortCheck(key, PortState.Ok, "Open",
+            "Confirmed by a real WireGuard handshake — the port is reachable, the server's key "
+            + "matches, and it accepted a freshly provisioned peer. " + r.Message)
+        : new PortCheck(key, PortState.Fail, "No handshake", r.Message);
+
+    /// <summary>Host the public-facing probes were aimed at, echoed in the UI so the operator can
+    /// see which name was actually tested.</summary>
+    public string? PortChecksHost { get; private set; }
+
+    // ── Full configuration test ───────────────────────────────────────────────
+
+    /// <summary>The sidecar's own host diagnosis; null when unreachable or too old.</summary>
+    public SidecarSelfTest? SelfTest { get; private set; }
+
+    /// <summary>Handshake results per probed endpoint, in the order they were tried.</summary>
+    public List<PortCheck>? HandshakeChecks { get; private set; }
+
+    /// <summary>Set when the temporary test peer could not be cleaned up, so the admin knows to
+    /// look for it rather than discovering a stray peer later.</summary>
+    public string? TestPeerLeak { get; private set; }
+
+    /// <summary>
+    /// End-to-end configuration test. Two halves that deliberately answer different questions:
+    ///
+    /// <list type="number">
+    ///   <item>the sidecar's own <c>/selftest</c> — forwarding, NAT, conf drift: the failures
+    ///   that are invisible from outside because the tunnel connects and then carries nothing;</item>
+    ///   <item>a real WireGuard handshake from here — reachability, the server's key, and whether
+    ///   peer registration actually took effect: the things only observable from outside.</item>
+    /// </list>
+    ///
+    /// The handshake half provisions a throwaway peer, handshakes against the WireGuard port (and
+    /// the fallback port when enabled), then removes it. Deliberately no tunnel is established:
+    /// that would need NET_ADMIN on the backend, and a provisioned 0.0.0.0/0 AllowedIPs would
+    /// hijack the backend's own default route.
+    /// </summary>
+    public async Task<IActionResult> OnPostFullTestAsync(int id)
+    {
+        var customer = await db.Customers.FindAsync(id);
+        if (customer is null) return NotFound();
+        await LoadPageDataAsync(customer);
+        await FetchSidecarInfoAsync(customer);
+        TempData["WgTab"] = true;
+
+        if (!IsProEdition)
+        {
+            TempData["WgError"] = "The full configuration test needs the integrated server (Pro).";
+            return Page();
+        }
+
+        SelfTest = await sidecar.GetSelfTestAsync(customer.SidecarBaseUrl);
+
+        var serverKey = SidecarPublicKey;
+        if (SidecarListenPort is not int listenPort || string.IsNullOrEmpty(serverKey))
+        {
+            TempData["WgError"] = "The sidecar could not be reached, so the handshake test was skipped.";
+            return Page();
+        }
+
+        var probeHost = !string.IsNullOrWhiteSpace(customer.ServerEndpoint)
+            ? StripToHost(customer.ServerEndpoint)
+            : customer.SidecarUrl ?? "";
+        if (string.IsNullOrEmpty(probeHost))
+        {
+            TempData["WgError"] = "No server endpoint is configured, so there is nothing to handshake against.";
+            return Page();
+        }
+
+        var checks = new List<PortCheck>();
+
+        var wg = await ProbeEndpointAsync(customer, probeHost, listenPort, serverKey);
+        checks.Add(new PortCheck("hs-wg", wg.Ok ? PortState.Ok : PortState.Fail,
+            wg.Ok ? $"Handshake OK ({listenPort}/udp)" : $"No handshake ({listenPort}/udp)", wg.Message));
+
+        if (customer.FallbackPortEnabled && customer.FallbackPort != listenPort)
+        {
+            var fb = await ProbeEndpointAsync(customer, probeHost, customer.FallbackPort, serverKey);
+
+            // Cross-probe reasoning: a handshake is silent for three different reasons, but if one
+            // port answered then the peer registration and the server key are both provably fine,
+            // so the other port's silence can only be the port itself.
+            var detail = fb.Ok || !wg.Ok
+                ? fb.Message
+                : fb.Message + " Since the WireGuard port answered, the peer and server key are "
+                             + "confirmed good — so this is the redirect or the firewall on this port alone.";
+            checks.Add(new PortCheck("hs-fallback", fb.Ok ? PortState.Ok : PortState.Fail,
+                fb.Ok ? $"Handshake OK ({customer.FallbackPort}/udp)" : $"No handshake ({customer.FallbackPort}/udp)",
+                detail));
+        }
+
+        HandshakeChecks = checks;
+
+        // Audit-logged because it briefly mutates the sidecar's peer list — a stray test peer
+        // appearing in a later investigation should be traceable to this action.
+        _ = audit.LogAsync(Audit.Customer, "Full configuration test", $"Customer: {customer.Name}",
+            $"selftest={(SelfTest is null ? "unavailable" : SelfTest.Ok ? "ok" : "failed")}, "
+            + string.Join(", ", checks.Select(c => $"{c.Key}={c.State}")));
+
+        return Page();
+    }
+
+    /// <summary>
+    /// Registers a throwaway peer, handshakes against one endpoint, and removes the peer again.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A fresh keypair <b>per endpoint</b>, not one shared across all of them. WireGuard keeps
+    /// per-peer replay protection: it stores the TAI64N timestamp of the last handshake initiation
+    /// it accepted from a peer and silently drops any initiation whose timestamp is not strictly
+    /// greater. Two probes issued microseconds apart can land on the same timestamp, so the second
+    /// one is discarded — which was observed in testing as the fallback port appearing dead while
+    /// the redirect rule's packet counter proved the packet had arrived. A distinct peer has
+    /// distinct replay state, so each endpoint is measured independently rather than being
+    /// sabotaged by the probe before it.
+    /// </para>
+    /// <para>
+    /// The peer is needed at all because WireGuard only answers handshakes from keys it knows —
+    /// which is exactly what makes a reply proof that peer provisioning works.
+    /// </para>
+    /// </remarks>
+    private async Task<WireGuardHandshakeProbe.Result> ProbeEndpointAsync(
+        Customer customer, string host, int port, string serverKey)
+    {
+        var (priv, pub, pubB64) = WireGuardHandshakeProbe.GenerateKeyPair();
+
+        // TEST-NET-1 (RFC 5737) rather than an address from the customer's transit subnet: it can
+        // never collide with a real client's allocation, and if cleanup ever fails the stray peer
+        // is unmistakably a test artefact.
+        if (!await sidecar.AddPeerAsync(customer.SidecarBaseUrl, pubB64, "192.0.2.254/32"))
+            return new WireGuardHandshakeProbe.Result(false,
+                "The test peer could not be registered on the sidecar, so this endpoint was not tested.");
+
+        try
+        {
+            return await handshakeProbe.TryHandshakeAsync(
+                host, port, serverKey, priv, pub, TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            // Always remove the test peer, including when the probe threw. A leak is surfaced
+            // rather than swallowed: a stray peer is a (small) security artefact, not cosmetic.
+            if (!await sidecar.RemovePeerAsync(customer.SidecarBaseUrl, pubB64))
+                TestPeerLeak = pubB64;
+        }
+    }
+
+    /// <summary>
+    /// Maps a UDP probe to a verdict. Deliberately never returns <see cref="PortState.Ok"/>:
+    /// no ICMP rejection is consistent with both an open port and a DROP rule, and claiming
+    /// "open" on that basis would tell an admin their firewall is fine when it isn't.
+    /// </summary>
+    private static PortCheck UdpVerdict(string key, bool? reachable, int? port) => (reachable, port) switch
+    {
+        (_, null)     => new PortCheck(key, PortState.Unknown, "Not checked",
+                             "The port isn't known yet — connect to the sidecar first."),
+        (false, _)    => new PortCheck(key, PortState.Fail, "Closed",
+                             "ICMP port unreachable — nothing is listening, or the packet never arrived."),
+        (true, _)     => new PortCheck(key, PortState.Warn, "No rejection",
+                             "No ICMP rejection came back. That's what an open WireGuard port looks like — "
+                             + "but a firewall that silently drops packets looks identical, so this cannot "
+                             + "confirm the port is open. A real client connect is the only proof."),
+        _             => new PortCheck(key, PortState.Unknown, "Inconclusive",
+                             "The probe could not be completed (DNS or network error)."),
+    };
+
+    /// <summary>TCP reachability from this backend. Definitive both ways, unlike the UDP probe.</summary>
+    private static async Task<bool> CheckTcpPortAsync(string host, int port)
+    {
+        if (string.IsNullOrWhiteSpace(host) || port is < 1 or > 65535) return false;
+        try
+        {
+            using var tcp = new System.Net.Sockets.TcpClient();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+            await tcp.ConnectAsync(host, port, cts.Token);
+            return tcp.Connected;
+        }
+        catch { return false; }
+    }
+
     private static async Task<bool?> CheckUdpPortAsync(string host, int port)
     {
         try
@@ -470,7 +886,10 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         }
         catch (OperationCanceledException)
         {
-            return true; // WireGuard drops unknown packets silently — timeout means port is open
+            // WireGuard silently ignores packets it can't decrypt, so no answer is what an open
+            // port looks like. A firewall that DROPs looks exactly the same, so callers must
+            // treat this as "not rejected", NOT as proof the port is open — see UdpVerdict.
+            return true;
         }
         catch (System.Net.Sockets.SocketException ex) when
             (ex.SocketErrorCode is System.Net.Sockets.SocketError.ConnectionReset

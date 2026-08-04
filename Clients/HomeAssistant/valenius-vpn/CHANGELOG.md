@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2
+
+- Fixed `wg-quick up` failing every attempt with `resolvconf: command not found`,
+  which tore the tunnel back down as soon as it came up. Added `openresolv` to the
+  image so the profile's `DNS =` line can actually be applied.
+
 ## 1.0.1
 
 - Fixed the Docker image failing to build under Home Assistant Supervisor

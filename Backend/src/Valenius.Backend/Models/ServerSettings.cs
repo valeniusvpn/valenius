@@ -90,6 +90,12 @@ public class ServerSettings
     /// Older <see cref="ClientTrafficSample"/> rows are pruned daily by TrafficSamplingService. Default 90.</summary>
     public int TrafficRetentionDays { get; set; } = 90;
 
+    /// <summary>System-wide default heartbeat interval (minutes) used when a customer doesn't set
+    /// its own <see cref="Customer.HeartbeatIntervalMinutes"/> override. Governs the periodic
+    /// register cadence / presence refresh; admin-triggered actions (Connect, config push, etc.)
+    /// are delivered independently via the long-poll (~1 s-55 s), not gated by this value.</summary>
+    public int DefaultHeartbeatIntervalMinutes { get; set; } = 1;
+
     // ── Operational metadata ──────────────────────────────────────────────
     public DateTime? LastBackupAt { get; set; }
 
@@ -100,6 +106,16 @@ public class ServerSettings
     /// <summary>"Valid", "Warning", or "OssMode".</summary>
     [MaxLength(20)]
     public string LicenseStatus { get; set; } = "Valid";
+
+    // ── Management API (Pro) ───────────────────────────────────────────────
+    /// <summary>When true, Management API responses that carry <c>clients:read</c> scope
+    /// include the client's raw <see cref="Client.ClientKey"/>. Off by default: the key can
+    /// drive a device's registration/heartbeat (POST /api/clients/register is
+    /// [ApiKeyExempt]), so it's treated as a secret that happens to be useful as an RMM
+    /// correlation id, not a plain identifier. See docs/design/management-api.md §7.2.1.
+    /// Toggling this writes an Audit.Settings event — it changes what every existing
+    /// management token can read, retroactively.</summary>
+    public bool ApiExposeClientKey { get; set; }
 
     // ── Internal CA (generated once on first run) ─────────────────────────
     // PEM-encoded.  Never exposed via any API endpoint in raw form.

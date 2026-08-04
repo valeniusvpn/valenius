@@ -4,6 +4,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/lan_conflict.dart';
+import '../config/wg_normalize.dart' show FallbackTarget, rewriteEndpointPort;
 import '../diagnostics/diagnostics.dart';
 import '../platform/health_probe.dart';
 import '../platform/vpn_tunnel.dart';
@@ -33,8 +34,9 @@ final StateNotifierProvider<ConnectionController, VpnConnectionState>
     ref.watch(healthProbeProvider),
     networkChanges: ref.watch(connectivityChangesProvider),
     remoteLanCidrsByProfile: () => ref.read(remoteLanCidrsProvider),
-    reportEvent: (eventType, tunnelName) =>
-        ref.read(registrationControllerProvider.notifier).logEvent(eventType, tunnelName),
+    reportEvent: (eventType, tunnelName, {detail}) => ref
+        .read(registrationControllerProvider.notifier)
+        .logEvent(eventType, tunnelName, detail: detail),
   );
 });
 
@@ -45,6 +47,7 @@ class VpnConnectionState {
     this.activeProfile,
     this.verified = false,
     this.verifiedViaGateway = false,
+    this.fallbackPortUsed = 0,
     this.busy = false,
     this.error,
     this.errorAt,
@@ -58,6 +61,14 @@ class VpnConnectionState {
   /// local handshake). A network-change re-verify trusts a failed gateway probe as
   /// "dead" only when the tunnel was confirmed this way.
   final bool verifiedViaGateway;
+
+  /// The UDP port this connection switched to (typically 443) after the primary port
+  /// produced no successful verification within the trigger window
+  /// (docs/design/port-443-fallback.md), or 0 if it's still on the primary port. Sticky
+  /// for the life of the connection — carried through `_markVerified`/re-verify state
+  /// updates, cleared only by a fresh connect/disconnect. The UI appends " · <port>" to
+  /// whichever tag it would otherwise show.
+  final int fallbackPortUsed;
   final bool busy;
 
   /// Last connect/disconnect failure message, or null. [errorAt] lets the UI
@@ -80,7 +91,8 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
     Stream<void>? networkChanges,
     Map<String, List<String>> Function() remoteLanCidrsByProfile =
         _noRemoteLanCidrs,
-    Future<void> Function(String eventType, String tunnelName)? reportEvent,
+    Future<void> Function(String eventType, String tunnelName, {String? detail})?
+        reportEvent,
   })  : _remoteLanCidrsByProfile = remoteLanCidrsByProfile,
         _reportEvent = reportEvent ?? _noReportEvent,
         super(const VpnConnectionState()) {
@@ -90,15 +102,18 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
   }
 
   static Map<String, List<String>> _noRemoteLanCidrs() => const {};
-  static Future<void> _noReportEvent(String eventType, String tunnelName) async {}
+  static Future<void> _noReportEvent(String eventType, String tunnelName,
+      {String? detail}) async {}
 
   final VpnTunnelPlatform _tunnel;
   final HealthProbe _probe;
 
-  /// Reports Connect/Disconnect/Verified to the backend (drives the admin client list's
-  /// presence/connected indicators — see RegistrationController.logEvent). Defaults to a
-  /// no-op so tests that don't care about backend reporting don't need to supply one.
-  final Future<void> Function(String eventType, String tunnelName) _reportEvent;
+  /// Reports Connect/Disconnect/Verified/PortFallback to the backend (drives the admin
+  /// client list's presence/connected indicators and connection history — see
+  /// RegistrationController.logEvent). Defaults to a no-op so tests that don't care about
+  /// backend reporting don't need to supply one.
+  final Future<void> Function(String eventType, String tunnelName, {String? detail})
+      _reportEvent;
 
   /// Per-profile physical LAN CIDR(s) behind that profile's own sidecar, from the latest
   /// heartbeat (`StatusResponse.RemoteLanCidrsByProfile[]`) — read lazily at connect time.
@@ -109,6 +124,16 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
   /// The gateway target for the active profile (if any), kept so a network-change
   /// re-verify can reuse the same /health probe the connect path used.
   GatewayTarget? _activeGateway;
+
+  /// The fallback port/trigger for the active profile (if any), and the original
+  /// decrypted config text — kept so `_verify` can rewrite the Endpoint port and bring
+  /// the tunnel back up without re-reading the config store (docs/design/port-443-fallback.md).
+  FallbackTarget? _activeFallback;
+  String? _activeConfigText;
+
+  /// Whether the fallback-port switch has already been attempted for the current
+  /// connection — at most once per connect, mirroring the Windows `TunnelVerifier`.
+  bool _fallbackTried = false;
 
   StreamSubscription<void>? _netSub;
   bool _reverifying = false;
@@ -133,7 +158,14 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
   /// Tap a profile: connect it (replacing any active one), or disconnect if it's
   /// already the active profile. [gateway] (when the backend advertises one)
   /// enables the gateway /health probe; otherwise verification is handshake-only.
-  Future<void> toggle(String name, String configText, GatewayTarget? gateway) async {
+  /// [fallback] (when the customer opted in and the sidecar confirmed it) lets
+  /// verification retry once on the alternate UDP port if the primary appears blocked.
+  Future<void> toggle(
+    String name,
+    String configText,
+    GatewayTarget? gateway, {
+    FallbackTarget? fallback,
+  }) async {
     if (state.activeProfile == name) {
       // A manual disconnect must stick: suppress the on-demand policy and clear
       // any OS on-demand rule so iOS doesn't reconnect immediately.
@@ -144,7 +176,7 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
       } catch (_) {/* best-effort */}
     } else {
       _onDemandSuppressed = false;
-      await _connect(name, configText, gateway);
+      await _connect(name, configText, gateway, fallback);
     }
   }
 
@@ -176,7 +208,12 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
     }
   }
 
-  Future<void> _connect(String name, String configText, GatewayTarget? gateway) async {
+  Future<void> _connect(
+    String name,
+    String configText,
+    GatewayTarget? gateway,
+    FallbackTarget? fallback,
+  ) async {
     state = const VpnConnectionState(busy: true);
     try {
       // Pre-connect LAN-conflict check — mirrors the desktop clients. No override: the
@@ -199,12 +236,17 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
 
       await _tunnel.up([TunnelConfig(name: name, wgQuickConf: configText)]);
       _activeGateway = gateway;
+      _activeFallback = fallback;
+      _activeConfigText = configText;
+      _fallbackTried = false;
       state = VpnConnectionState(activeProfile: name);
       DiagnosticsLog.instance.add('connect: "$name" up');
       unawaited(_reportEvent('Connect', name));
       unawaited(_verify(name, gateway));
     } catch (e) {
       _activeGateway = null;
+      _activeFallback = null;
+      _activeConfigText = null;
       DiagnosticsLog.instance.add('connect: "$name" failed: $e');
       state = VpnConnectionState(error: '$e', errorAt: DateTime.now());
     }
@@ -216,6 +258,8 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
     try {
       await _tunnel.down();
       _activeGateway = null;
+      _activeFallback = null;
+      _activeConfigText = null;
       state = const VpnConnectionState();
       if (name != null) unawaited(_reportEvent('Disconnect', name));
     } catch (e) {
@@ -266,9 +310,12 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
       if (state.activeProfile != name || state.busy) return;
 
       final wasViaGateway = state.verifiedViaGateway;
+      final fallbackPortUsed = state.fallbackPortUsed;
       final gateway = _activeGateway;
-      // Drop the green check while we re-confirm.
-      state = VpnConnectionState(activeProfile: name);
+      // Drop the green check while we re-confirm. fallbackPortUsed is carried through —
+      // the tunnel itself isn't touched here (only re-probed), so whichever port it was
+      // last brought up on is still the one it's on.
+      state = VpnConnectionState(activeProfile: name, fallbackPortUsed: fallbackPortUsed);
 
       final deadline = DateTime.now().add(_reverifyBudget);
 
@@ -287,6 +334,8 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
             // best-effort; we still surface the lost connection below
           }
           _activeGateway = null;
+          _activeFallback = null;
+          _activeConfigText = null;
           state = VpnConnectionState(
             error: 'VPN connection lost after a network change.',
             errorAt: DateTime.now(),
@@ -309,8 +358,23 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
   /// Background verification mirroring the Windows client: gateway /health probe
   /// through the tunnel (when advertised) with a handshake floor/fallback. Flips
   /// the row to "Verified". Retries ~30 s, then gives up (stays "Connected").
+  ///
+  /// Also owns the port-443 fallback retry (docs/design/port-443-fallback.md §5): if the
+  /// customer's admin-configured trigger window (default 20 s, [FallbackTarget]) passes
+  /// with no successful verification, it rewrites the config's Endpoint port and brings
+  /// the tunnel back up once, then keeps polling — mirrors the Windows `TunnelVerifier`.
+  /// The overall deadline is extended to at least `triggerSeconds + 15` when a fallback is
+  /// configured, so the switch (usually ~10 s before the unmodified 30 s deadline) gets a
+  /// fair window to verify instead of the loop giving up moments later.
   Future<void> _verify(String name, GatewayTarget? gateway) async {
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    final start = DateTime.now();
+    final fallback = _activeFallback;
+    final minWindow = fallback != null
+        ? Duration(seconds: fallback.triggerSeconds + 15)
+        : const Duration(seconds: 30);
+    final window = minWindow < const Duration(seconds: 30) ? const Duration(seconds: 30) : minWindow;
+    final deadline = start.add(window);
+
     while (DateTime.now().isBefore(deadline)) {
       if (state.activeProfile != name) return; // disconnected / switched
 
@@ -321,7 +385,43 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
       if (s != null && _recentHandshake(s)) {
         return _markVerified(name, viaGateway: false);
       }
+
+      if (fallback != null &&
+          !_fallbackTried &&
+          DateTime.now().difference(start).inSeconds >= fallback.triggerSeconds) {
+        _fallbackTried = true;
+        await _trySwitchToFallbackPort(name, fallback);
+        if (state.activeProfile != name) return; // disconnected meanwhile
+      }
+
       await Future<void>.delayed(const Duration(seconds: 2));
+    }
+  }
+
+  /// Reinstalls the tunnel against [fallback]'s UDP port after no successful verification
+  /// within its trigger window. Runs at most once per connect (guarded by the caller's
+  /// `_fallbackTried` flag) — a single alternate-port attempt, not a permanent pin; the
+  /// next connect always starts back on the primary port. On success, marks
+  /// `state.fallbackPortUsed` (UI tag) and reports a best-effort `PortFallback` event to
+  /// the backend (client connection history), same swallow-on-failure pattern as
+  /// Connect/Disconnect/Verified.
+  Future<void> _trySwitchToFallbackPort(String name, FallbackTarget fallback) async {
+    final configText = _activeConfigText;
+    if (configText == null) return;
+
+    DiagnosticsLog.instance.add(
+        'verify: "$name" not confirmed after ${fallback.triggerSeconds}s — retrying via UDP fallback port ${fallback.port}');
+    try {
+      await _tunnel.down();
+      final rewritten = rewriteEndpointPort(configText, fallback.port);
+      await _tunnel.up([TunnelConfig(name: name, wgQuickConf: rewritten)]);
+      if (state.activeProfile != name) return; // disconnected while we were switching
+      state = VpnConnectionState(activeProfile: name, fallbackPortUsed: fallback.port);
+      unawaited(_reportEvent('PortFallback', name,
+          detail:
+              'Switched to UDP ${fallback.port} after ${fallback.triggerSeconds}s with no confirmation on the primary port.'));
+    } catch (e) {
+      DiagnosticsLog.instance.add('verify: "$name" fallback-port reconnect failed: $e');
     }
   }
 
@@ -337,6 +437,7 @@ class ConnectionController extends StateNotifier<VpnConnectionState> {
         activeProfile: name,
         verified: true,
         verifiedViaGateway: viaGateway,
+        fallbackPortUsed: state.fallbackPortUsed,
       );
       // Mirrors Windows/Linux/macOS reporting a "Verified" event upstream — required so the
       // admin client list's "connected" star (which now demands actual gateway verification

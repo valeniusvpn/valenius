@@ -33,6 +33,7 @@ public class TrayApplicationContext : ApplicationContext
     private bool         _uploadConfigOpen;
     private bool         _backendUrlOpen;
     private bool         _backendPromptAutoShown;
+    private bool         _setupChoiceOpen;
 
     public TrayApplicationContext()
     {
@@ -110,11 +111,12 @@ public class TrayApplicationContext : ApplicationContext
         var cursor = Cursor.Position;
 
         // Not configured yet (fresh install, no installer-provided URL): the tray's job is to
-        // collect the server address, so prompt for it instead of showing the (empty) popup.
-        if (_serviceUp && _lastStatus.BackendUnconfigured)
+        // collect the server address, so prompt for it instead of showing the (empty) popup —
+        // unless the user already chose to run standalone, in which case the popup works normally.
+        if (_serviceUp && _lastStatus.BackendUnconfigured && !_lastStatus.StandaloneMode)
         {
             _pollTimer.Start();
-            await PromptBackendUrlAsync();
+            await PromptSetupChoiceAsync();
             return;
         }
 
@@ -172,23 +174,26 @@ public class TrayApplicationContext : ApplicationContext
 
         _serviceUp = true;
 
-        // No backend URL configured yet: show a "Setup required" tray state and, on first discovery,
-        // auto-open the prompt once. Re-prompting on demand happens when the user opens the popup
-        // (see ShowPopupAsync); the background poll must not reopen the dialog on every tick.
-        if (status.BackendUnconfigured)
+        // No backend URL configured yet and the user hasn't chosen standalone: show a
+        // "Setup required" tray state and, on first discovery, auto-open the choice prompt once.
+        // Re-prompting on demand happens when the user opens the popup (see ShowPopupAsync); the
+        // background poll must not reopen the dialog on every tick.
+        if (status.BackendUnconfigured && !status.StandaloneMode)
         {
             _trayIcon.Icon = _iconUnavailable;
             _trayIcon.Text = "Valenius - Setup required";
             _popup.RefreshStatus(status);
-            if (!_backendPromptAutoShown && !_backendUrlOpen)
-                _ = PromptBackendUrlAsync();
+            if (!_backendPromptAutoShown && !_backendUrlOpen && !_setupChoiceOpen)
+                _ = PromptSetupChoiceAsync();
             return;
         }
 
+        // Standalone: no backend, but the user opted in — behaves exactly like a configured
+        // client's UI (profile list, connect/upload/delete), just with a distinct idle tooltip.
         _trayIcon.Icon = status.IsConnected ? _iconConnected : _iconDisconnected;
         _trayIcon.Text = status.IsConnected
             ? $"Valenius - Connected ({status.TunnelName})"
-            : "Valenius - Disconnected";
+            : status.BackendUnconfigured ? "Valenius - Standalone" : "Valenius - Disconnected";
 
         _popup.RefreshStatus(status);
 
@@ -240,7 +245,11 @@ public class TrayApplicationContext : ApplicationContext
             _aboutForm.Activate();
             return;
         }
-        _aboutForm = new AboutForm { SendLogsRequested = () => _ = SendLogsAsync() };
+        _aboutForm = new AboutForm(_lastStatus.StandaloneMode)
+        {
+            SendLogsRequested        = () => _ = SendLogsAsync(),
+            ConnectToServerRequested = () => _ = PromptBackendUrlAsync(),
+        };
         _aboutForm.FormClosed += (_, _) => _aboutForm = null;
         _aboutForm.Show();
     }
@@ -262,6 +271,45 @@ public class TrayApplicationContext : ApplicationContext
     }
 
     // ── First-run backend URL setup ───────────────────────────────────────────
+
+    /// <summary>
+    /// First-run choice (fresh install with no installer-provided URL): connect to a Valenius
+    /// server now, or use the client standalone. Single-instance via <see cref="_setupChoiceOpen"/>.
+    /// On Cancel/close the client stays undecided and this reappears next popup open, same
+    /// precedent as <see cref="PromptBackendUrlAsync"/>.
+    /// </summary>
+    private async Task PromptSetupChoiceAsync()
+    {
+        if (_setupChoiceOpen || _backendUrlOpen) return;
+        _setupChoiceOpen        = true;
+        _backendPromptAutoShown = true; // stop the background poll from queuing more prompts
+        DialogResult choice;
+        using (var form = new SetupChoiceForm())
+            choice = form.ShowDialog();
+        _setupChoiceOpen = false;
+
+        if (choice == DialogResult.Yes) // "Connect to a server"
+        {
+            await PromptBackendUrlAsync();
+            return;
+        }
+
+        if (choice == DialogResult.No) // "Use standalone"
+        {
+            try
+            {
+                var response = await _pipe.SendAsync(new PipeCommand { Command = CommandType.SetStandaloneMode });
+                if (!response.Success)
+                    ShowBalloon("Valenius", response.Error ?? "Could not switch to standalone mode.", ToolTipIcon.Warning);
+            }
+            catch (Exception ex)
+            {
+                ShowBalloon("Valenius", ex.Message, ToolTipIcon.Warning);
+            }
+        }
+
+        await RefreshStatusAsync();
+    }
 
     /// <summary>
     /// Prompts the user for the backend server DNS (fresh install with no installer-provided URL) and

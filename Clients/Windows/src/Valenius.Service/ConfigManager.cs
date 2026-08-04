@@ -82,6 +82,47 @@ public class ConfigManager
             .ToArray();
     }
 
+    /// <summary>
+    /// Every profile across every OS user directory that is NOT admin-managed, with its decrypted
+    /// content — used to bulk-archive a standalone client's locally-uploaded profiles to the
+    /// backend the first time it's activated (see
+    /// <see cref="ClientRegistrationService.TransferLocalProfilesAsync"/>). Skips <see cref="StagedDir"/>
+    /// deliberately: nothing gets staged without a backend already having pushed it, so a
+    /// genuinely standalone client never has staged files, but excluding it is correct regardless.
+    /// </summary>
+    public List<(string Username, string ProfileName, string Content)> GetAllUnmanagedProfilesWithContent()
+    {
+        var result = new List<(string, string, string)>();
+        if (!Directory.Exists(BaseDir)) return result;
+
+        foreach (var userDir in Directory.EnumerateDirectories(BaseDir))
+        {
+            var username = Path.GetFileName(userDir);
+            foreach (var file in Directory.EnumerateFiles(userDir).Where(IsConfigFile))
+            {
+                var profileName = ProfileNameFromPath(file);
+                if (profileName is null || IsManaged(username, profileName)) continue;
+
+                var content = GetProfileContent(username, profileName);
+                if (content is not null)
+                    result.Add((username, profileName, content));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Returns the decrypted plaintext content of a stored profile, or null if not found.</summary>
+    public string? GetProfileContent(string username, string profileName)
+    {
+        var path = GetConfigPath(username, profileName);
+        if (path is null) return null;
+
+        var bytes = path.EndsWith(EncExt, StringComparison.OrdinalIgnoreCase)
+            ? DecryptBytes(path)
+            : File.ReadAllBytes(path);
+        return System.Text.Encoding.UTF8.GetString(bytes);
+    }
+
     // ── Config path resolution ────────────────────────────────────────────────
 
     /// <summary>Returns the stored path (.conf or .conf.enc) for a profile, or null if not found.</summary>
@@ -151,17 +192,44 @@ public class ConfigManager
     /// can use.  For encrypted files, decrypts to <see cref="TempDir"/> and returns the
     /// temp path.  The plaintext temp file is cleaned up by
     /// <see cref="CleanupTempConfig"/> after disconnect.
+    /// <para>
+    /// <paramref name="endpointPortOverride"/>, when set, rewrites the <c>Endpoint =</c> line's
+    /// port (host unchanged) in the temp copy only — the stored file is never touched. Used for
+    /// the port-443 fallback retry (docs/design/port-443-fallback.md §5.1): the canonical config
+    /// keeps its real endpoint, so nothing else (config archive, admin re-provision, QR card) has
+    /// to know a swap happened, and reverting is just "connect again normally". Forces a temp copy
+    /// even for an already-plaintext stored config, since the override must never be persisted.
+    /// </para>
     /// </summary>
-    public string PrepareConfigPath(string storedPath)
+    public string PrepareConfigPath(string storedPath, int? endpointPortOverride = null)
     {
-        if (!storedPath.EndsWith(EncExt, StringComparison.OrdinalIgnoreCase))
-            return storedPath;   // plaintext — no action needed
+        var isEncrypted = storedPath.EndsWith(EncExt, StringComparison.OrdinalIgnoreCase);
+        if (endpointPortOverride is null && !isEncrypted)
+            return storedPath;   // plaintext, no rewrite requested — no action needed
 
         var profileName = ProfileNameFromPath(storedPath)
             ?? throw new InvalidOperationException($"Cannot derive profile name from: {storedPath}");
 
-        return DecryptToTemp(profileName, storedPath);
+        var plainBytes = isEncrypted ? DecryptBytes(storedPath) : File.ReadAllBytes(storedPath);
+
+        if (endpointPortOverride is int port)
+        {
+            var content = System.Text.Encoding.UTF8.GetString(plainBytes);
+            plainBytes = System.Text.Encoding.UTF8.GetBytes(RewriteEndpointPort(content, port));
+        }
+
+        return WriteToTemp(profileName, plainBytes);
     }
+
+    /// <summary>
+    /// Resolves a WireGuard tunnel name to its config path with no OS-user context — a per-user
+    /// copy if one exists, else the machine-level device-tunnel store. Used by
+    /// <c>TunnelVerifier</c>'s fallback-port reinstall, which runs off a background verify loop
+    /// keyed only by tunnel name (mirrors <c>AutoConnectService.FindConfigPath</c>'s device-tunnel
+    /// fallback, which has OS-user context but the same two-step lookup).
+    /// </summary>
+    public string? ResolveConfigPathForTunnel(string tunnelName) =>
+        GetAnyConfigPath(tunnelName) ?? GetDeviceTunnelConfigPath(tunnelName);
 
     /// <summary>
     /// Reads the AllowedIPs CIDRs from a stored config (.conf or .conf.enc).
@@ -509,11 +577,14 @@ public class ConfigManager
 
     // ── Encryption helpers ────────────────────────────────────────────────────
 
-    private string DecryptToTemp(string profileName, string encPath)
+    private static byte[] DecryptBytes(string encPath)
     {
-        var encBytes   = File.ReadAllBytes(encPath);
-        var plainBytes = ProtectedData.Unprotect(encBytes, null, DataProtectionScope.LocalMachine);
+        var encBytes = File.ReadAllBytes(encPath);
+        return ProtectedData.Unprotect(encBytes, null, DataProtectionScope.LocalMachine);
+    }
 
+    private static string WriteToTemp(string profileName, byte[] plainBytes)
+    {
         // Each connect writes into a fresh unique subdirectory rather than a fixed
         // temp\<profile>.conf. A leftover file at a fixed path can be held open by an AV
         // scanner or carry a hostile/empty DACL that even SYSTEM cannot delete or
@@ -525,6 +596,19 @@ public class ConfigManager
         StateFileWriter.WriteAllBytes(tempPath, plainBytes);
         return tempPath;
     }
+
+    /// <summary>
+    /// Rewrites the port in the config's single "Endpoint = host:port" line, keeping the host
+    /// unchanged. Every client config here has exactly one peer (the WireGuard server), so a
+    /// single rewrite is sufficient. Used only for the fallback-port temp copy; never applied to
+    /// a stored file.
+    /// </summary>
+    private static string RewriteEndpointPort(string content, int port) =>
+        EndpointLineRegex.Replace(content, m => $"{m.Groups[1].Value}{m.Groups[2].Value}:{port}");
+
+    private static readonly System.Text.RegularExpressions.Regex EndpointLineRegex = new(
+        @"^(\s*Endpoint\s*=\s*)([^\s:]+):\d+",
+        System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     /// <summary>
     /// Ensures TempDir exists and is empty at service startup. If deleting the directory

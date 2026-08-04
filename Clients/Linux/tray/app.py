@@ -130,6 +130,14 @@ window#wgt-popup {
     color: #b0b8c4;
     font-size: 16px;
 }
+.wgt-dot-failed {
+    color: #a67c00;
+    font-size: 16px;
+}
+.wgt-verification-failed-tag {
+    color: #a67c00;
+    font-size: 12px;
+}
 .wgt-profile-label {
     color: #1a2233;
     font-size: 14px;
@@ -301,6 +309,7 @@ class TrayApp:
 
         connected_names: set[str] = {t.Name for t in status.ConnectedTunnels}
         verified_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.IsVerified}
+        failed_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.VerificationFailed}
 
         if len(connected_names) > 1:
             status_text = f"Connected • {len(connected_names)} tunnels active"
@@ -343,7 +352,8 @@ class TrayApp:
             for profile in status.AvailableProfiles:
                 is_active = profile in connected_names
                 is_verified = profile in verified_names
-                menu.append(self._make_profile_menu_item(profile, is_active, is_verified, mfa_locked))
+                is_failed = profile in failed_names
+                menu.append(self._make_profile_menu_item(profile, is_active, is_verified, is_failed, mfa_locked))
         else:
             item = Gtk.MenuItem(label='No profiles configured')
             item.set_sensitive(False)
@@ -400,11 +410,13 @@ class TrayApp:
         return menu
 
     def _make_profile_menu_item(self, profile: str, active: bool, verified: bool,
-                                 mfa_locked: bool) -> Gtk.MenuItem:
+                                 verification_failed: bool, mfa_locked: bool) -> Gtk.MenuItem:
         if mfa_locked:
             label = f'\U0001f512 {profile}'
         elif active and verified:
             label = f'✓ {profile} (Verified)'
+        elif active and verification_failed:
+            label = f'● {profile} (Confirmation failed)'
         elif active:
             label = f'● {profile} (Connected)'
         else:
@@ -578,6 +590,7 @@ class TrayApp:
         status = self._status
         connected_names: set[str] = {t.Name for t in status.ConnectedTunnels} if status else set()
         verified_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.IsVerified} if status else set()
+        failed_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.VerificationFailed} if status else set()
 
         # ── Header ──────────────────────────────────────────────────────────
         header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -635,7 +648,9 @@ class TrayApp:
             for profile in profiles:
                 is_active = profile in connected_names
                 is_verified = profile in verified_names
-                row = self._make_profile_row(profile, is_active, verified=is_verified, mfa_locked=mfa_locked)
+                is_failed = profile in failed_names
+                row = self._make_profile_row(profile, is_active, verified=is_verified,
+                                              verification_failed=is_failed, mfa_locked=mfa_locked)
                 box.pack_start(row, False, False, 0)
         else:
             no_profiles = Gtk.Label(label='No profiles configured')
@@ -731,7 +746,9 @@ class TrayApp:
 
         box.show_all()
 
-    def _make_profile_row(self, profile: str, active: bool, verified: bool = False, mfa_locked: bool = False) -> Gtk.EventBox:
+    def _make_profile_row(self, profile: str, active: bool, verified: bool = False,
+                           verification_failed: bool = False, mfa_locked: bool = False) -> Gtk.EventBox:
+        verification_failed = verification_failed and not verified and not mfa_locked
         evbox = Gtk.EventBox()
         if mfa_locked:
             evbox.get_style_context().add_class('wgt-profile-row-locked')
@@ -747,6 +764,9 @@ class TrayApp:
         elif active and verified:
             dot = Gtk.Label(label='✓')  # ✓ filled check-badge, same as Windows' verified icon
             dot.get_style_context().add_class('wgt-dot-verified')
+        elif active and verification_failed:
+            dot = Gtk.Label(label='●')
+            dot.get_style_context().add_class('wgt-dot-failed')
         else:
             dot = Gtk.Label(label='●')
             dot.get_style_context().add_class('wgt-dot-active' if active else 'wgt-dot-inactive')
@@ -764,6 +784,11 @@ class TrayApp:
             if verified:
                 tag = Gtk.Label(label='Verified')
                 tag.get_style_context().add_class('wgt-verified-pill')
+            elif verification_failed:
+                # amber "Confirmation failed" tag — not an error state, verification keeps
+                # retrying in the background (mirrors Windows' TrayPopupForm amber tag).
+                tag = Gtk.Label(label='Confirmation failed')
+                tag.get_style_context().add_class('wgt-verification-failed-tag')
             else:
                 tag = Gtk.Label(label='Connected')
                 tag.get_style_context().add_class('wgt-connected-tag')

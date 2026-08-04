@@ -1,5 +1,5 @@
 #define MyAppName      "Valenius"
-#define MyAppVersion   "1.16.25"
+#define MyAppVersion   "1.17.0"
 #define MyAppPublisher "Stranto Business Solutions GmbH"
 #define MyAppURL       "https://valenius.stranto.com"
 #define MyServiceExe   "Valenius.Service.exe"
@@ -190,20 +190,24 @@ begin
     'Terms and Conditions',
     'Please read and accept our Terms and Conditions to continue.');
 
+  { Custom Pascal-script pages are NOT auto-scaled by Inno's Per-Monitor-V2 wizard the
+    way its own built-in pages are -- fixed pixel Left/Top/Width/Height here are design-time
+    (96 DPI) values and must be run through ScaleX/ScaleY, or this page renders cramped and
+    misaligned relative to the rest of the (correctly-scaled) wizard on a high-DPI monitor. }
   DescLabel := TLabel.Create(LicensePage);
   DescLabel.Parent   := LicensePage.Surface;
   DescLabel.AutoSize := False;
   DescLabel.Left     := 0;
-  DescLabel.Top      := 8;
-  DescLabel.Width    := 450;
-  DescLabel.Height   := 52;
+  DescLabel.Top      := ScaleY(8);
+  DescLabel.Width    := ScaleX(450);
+  DescLabel.Height   := ScaleY(52);
   DescLabel.WordWrap := True;
   DescLabel.Caption  := 'By installing Valenius you agree to our Terms and Conditions. Click the link below to open the full document:';
 
   LinkLabel := TNewStaticText.Create(LicensePage);
   LinkLabel.Parent     := LicensePage.Surface;
   LinkLabel.Left       := 0;
-  LinkLabel.Top        := DescLabel.Top + DescLabel.Height + 10;
+  LinkLabel.Top        := DescLabel.Top + DescLabel.Height + ScaleY(10);
   LinkLabel.Caption    := 'https://www.valenius.com/clientagb.pdf';
   LinkLabel.Font.Color := clBlue;
   LinkLabel.Font.Style := [fsUnderline];
@@ -213,8 +217,8 @@ begin
   AcceptCheckbox := TCheckBox.Create(LicensePage);
   AcceptCheckbox.Parent  := LicensePage.Surface;
   AcceptCheckbox.Left    := 0;
-  AcceptCheckbox.Top     := LinkLabel.Top + LinkLabel.Height + 20;
-  AcceptCheckbox.Width   := 450;
+  AcceptCheckbox.Top     := LinkLabel.Top + LinkLabel.Height + ScaleY(20);
+  AcceptCheckbox.Width   := ScaleX(450);
   AcceptCheckbox.Caption := 'I accept the Terms and Conditions';
   AcceptCheckbox.OnClick := @AcceptCheckboxClick;
 end;

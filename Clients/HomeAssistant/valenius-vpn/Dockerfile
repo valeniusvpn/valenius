@@ -13,8 +13,14 @@
 # source build with a Rust toolchain. Debian-slim gets a prebuilt wheel for free.
 FROM python:3.12-slim
 
+# openresolv provides the `resolvconf` command wg-quick shells out to for the
+# profile's `DNS =` line -- without it, `wg-quick up` fails outright (resolvconf:
+# command not found) and tears the whole interface back down. It writes /etc/resolv.conf
+# directly, no systemd-resolved or actual resolvconf service needed, which is all a
+# plain container can offer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wireguard-tools \
+        openresolv \
         iproute2 \
         procps \
     && rm -rf /var/lib/apt/lists/*

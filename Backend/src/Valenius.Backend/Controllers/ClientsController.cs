@@ -11,7 +11,7 @@ namespace Valenius.Backend.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [ServiceFilter(typeof(ApiKeyFilter))]
-public class ClientsController(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker wgTunnels, ILicenseEnforcement enforcement, IMfaSessionService mfa, IMfaChallengeService challenge, ISidecarService sidecar, ApiKeyStore apiKeyStore) : ControllerBase
+public class ClientsController(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker wgTunnels, ILicenseEnforcement enforcement, IMfaSessionService mfa, IMfaChallengeService challenge, ISidecarService sidecar, ApiKeyStore apiKeyStore, HeartbeatSettingsStore heartbeatSettings, IManagementEventLog eventLog) : ControllerBase
 {
     /// <summary>LogEvent EventTypes that are client-side repair outcomes routed to ClientAlerts
     /// (Admin/Alerts) instead of ConnectionLogs. Kept as a set so LogEvent's dispatch and dedupe
@@ -199,7 +199,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         var heartbeatInterval = client.Customer?.HeartbeatIntervalMinutes is >= 1 and <= 60
             ? client.Customer.HeartbeatIntervalMinutes.Value
-            : 5;
+            : heartbeatSettings.DefaultIntervalMinutes;
 
         var serverProfileName = client.Customer?.ServerMode == "Valenius"
             ? WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name)
@@ -230,6 +230,24 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         var gatewayProfiles = new List<GatewayProfileEntry>();
 
+        // Port-443 fallback (docs/design/port-443-fallback.md). Advertised per profile, and ONLY
+        // when the serving sidecar has confirmed on /info that the redirect really is installed
+        // (cached in FallbackPortActive). Advertising an unconfirmed fallback would make every
+        // client waste its fallback window on a dead port at every connect, turning a failed
+        // optional feature into a fleet-wide connect slowdown.
+        //
+        // This is deliberately limited to profiles the backend provisions — the native sidecar
+        // profile and foreign ones. An External customer's profiles are manually-uploaded .conf
+        // files whose names the backend never learns (serverProfileName is null for them), so
+        // there is no per-profile key to attach a fallback to even if their own server did
+        // answer on an alternate port.
+        var fallbackEndpoints = new List<FallbackEndpointEntry>();
+
+        static (int Port, int TriggerSeconds)? FallbackPortFor(bool enabled, bool active, int port, int triggerSeconds)
+            => enabled && active && port is >= 1 and <= 65535
+                ? (port, triggerSeconds is >= 1 and <= 300 ? triggerSeconds : 20)
+                : null;
+
         string? serverHealthUrl = null;
         string? serverVpnIp    = null;
         if (client.Customer?.ServerMode == "Valenius"
@@ -255,6 +273,17 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 if (serverProfileName != null)
                     gatewayProfiles.Add(new GatewayProfileEntry(serverProfileName, client.Customer.SidecarVpnIp!, healthPort));
             }
+        }
+
+        // Native profile's fallback. Evaluated outside the block above because it is independent
+        // of the gateway probe: a customer with a conflicting transit subnet gets no gateway
+        // target but can still have a working fallback port.
+        if (serverProfileName != null && client.Customer is not null
+            && FallbackPortFor(client.Customer.FallbackPortEnabled, client.Customer.FallbackPortActive,
+                               client.Customer.FallbackPort, client.Customer.FallbackTriggerSeconds) is var nativeFb
+            && nativeFb is not null)
+        {
+            fallbackEndpoints.Add(new FallbackEndpointEntry(serverProfileName, nativeFb.Value.Port, nativeFb.Value.TriggerSeconds));
         }
 
         // When the license blocks activation (expired, limit reached), report IsActive=false
@@ -330,12 +359,24 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 p.SourceCustomer.SidecarVpnIp,
                 p.SourceCustomer.SidecarVpnSubnet,
                 p.SourceCustomer.SidecarHealthPort,
-                p.SourceCustomer.SidecarLanCidrs
+                p.SourceCustomer.SidecarLanCidrs,
+                p.SourceCustomer.FallbackPortEnabled,
+                p.SourceCustomer.FallbackPort,
+                p.SourceCustomer.FallbackPortActive,
+                p.SourceCustomer.FallbackTriggerSeconds
             })
             .ToListAsync();
         foreach (var fr in foreignGatewayRows)
         {
-            if (string.IsNullOrEmpty(fr.SidecarVpnIp) || string.IsNullOrEmpty(fr.ProfileName)) continue;
+            if (string.IsNullOrEmpty(fr.ProfileName)) continue;
+
+            // A foreign profile's fallback comes from its OWN source customer's server, not
+            // from this client's customer — same per-profile scoping as the gateway entry below.
+            if (FallbackPortFor(fr.FallbackPortEnabled, fr.FallbackPortActive, fr.FallbackPort, fr.FallbackTriggerSeconds) is var foreignFb
+                && foreignFb is not null)
+                fallbackEndpoints.Add(new FallbackEndpointEntry(fr.ProfileName!, foreignFb.Value.Port, foreignFb.Value.TriggerSeconds));
+
+            if (string.IsNullOrEmpty(fr.SidecarVpnIp)) continue;
             if (!TransitUnique(fr.SourceId, fr.SidecarVpnSubnet)) continue;
             var hp = fr.SidecarHealthPort > 0 ? fr.SidecarHealthPort : 9004;
             gatewayProfiles.Add(new GatewayProfileEntry(fr.ProfileName!, fr.SidecarVpnIp!, hp));
@@ -429,7 +470,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             rotatedApiKey,
             remoteLanCidrsByProfile,
             pendingConfigRepair,
-            deviceTunnelEnabled);
+            deviceTunnelEnabled,
+            fallbackEndpoints.Count > 0 ? fallbackEndpoints.ToArray() : null);
     }
 
     [HttpPost("event")]
@@ -466,6 +508,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                     CreatedAt = DateTime.UtcNow,
                 });
                 await db.SaveChangesAsync();
+                _ = eventLog.RecordAsync(ManagementEventType.ClientAlert, client.Id, client.CustomerId,
+                    $"{request.EventType}: {request.Detail}");
             }
             return Ok();
         }
@@ -499,6 +543,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 expectsGatewayVerification = WireGuardHelper.IsTransitUnique(client.Customer.SidecarVpnSubnet, otherSubnets);
             }
             wgTunnels.MarkConnected(client.ClientKey, client.WgPublicKey, expectsGatewayVerification);
+            _ = eventLog.RecordAsync(ManagementEventType.ClientConnected, client.Id, client.CustomerId, client.Hostname);
 
             // A prior "Kill Tunnel" removed this peer from the sidecar. Now that the client
             // is actively reconnecting, transparently re-add it — a kick, not a ban.
@@ -524,6 +569,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         else if (string.Equals(request.EventType, "Disconnect", StringComparison.OrdinalIgnoreCase))
         {
             wgTunnels.MarkDisconnected(client.ClientKey);
+            _ = eventLog.RecordAsync(ManagementEventType.ClientDisconnected, client.Id, client.CustomerId, client.Hostname);
 
             // PerConnection MFA: an explicit disconnect revokes the active session immediately
             // so the next connect re-authenticates. (No-op in OSS / for ungated peers.)
@@ -543,6 +589,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             EventType  = request.EventType,
             LanIp      = request.LanIp,
             WanIp      = request.WanIp,
+            Detail     = request.Detail ?? "",
             OccurredAt = DateTime.UtcNow
         });
         await db.SaveChangesAsync();
@@ -896,7 +943,7 @@ public record StatusResponse(
     TrustedNetworkDto[]? TrustedNetworks = null,
     string? PendingDeleteProfileName = null,
     bool PendingConnect = false,
-    int HeartbeatIntervalMinutes = 5,
+    int HeartbeatIntervalMinutes = 1,
     string? ServerProfileName = null,
     /// <summary>Full URL for pre-connect and post-connect health probes.
     /// e.g. https://vpn.company.com:8443/health</summary>
@@ -979,10 +1026,22 @@ public record StatusResponse(
     /// policy as the generic auto-connect feature. Effective value already resolved server-side
     /// (per-client override, else the customer default) and already gated on a native profile
     /// actually existing (ServerProfileName != null) — see BuildStatusResponseAsync.</summary>
-    bool DeviceTunnelEnabled = false);
+    bool DeviceTunnelEnabled = false,
+    /// <summary>
+    /// Per-profile alternate UDP port (typically 443) the client may retry a profile's
+    /// <c>Endpoint</c> on when the primary port appears blocked — see
+    /// <c>docs/design/port-443-fallback.md</c>. Scoped per profile like
+    /// <see cref="GatewayProfiles"/>: the native profile takes its own customer's setting, each
+    /// foreign profile its OWN source customer's. A profile absent from this list simply never
+    /// falls back. Only listed once the serving side is confirmed (sidecar reports the redirect
+    /// installed; External customers are taken at the admin's word), so a client never wastes a
+    /// connect attempt on a port nothing answers.
+    /// </summary>
+    FallbackEndpointEntry[]? FallbackEndpoints = null);
 public record MfaApprovalEntry(int ChallengeId, string RequesterName, string? RequesterIp, int[] Choices, DateTime ExpiresAt);
 public record PendingConfigResponse(string FileName, string Content);
 public record PendingForeignConfigEntry(string FileName, string Content);
 public record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
+public record FallbackEndpointEntry(string ProfileName, int Port, int TriggerSeconds);
 public record LanCidrProfileEntry(string ProfileName, string[] Cidrs);
 public record ArchiveProfileRequest(string ClientKey, string ProfileName, string Content);

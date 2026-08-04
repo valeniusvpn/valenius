@@ -37,4 +37,33 @@ void main() {
       'AllowedIPs = ::/0, fd00::1/64',
     );
   });
+
+  test('rewriteEndpointPort swaps the port, keeps the host, leaves the rest alone', () {
+    const config = '[Interface]\n'
+        'Address = 172.16.0.7/32\n'
+        '\n'
+        '[Peer]\n'
+        'Endpoint = vpn.example.com:51820\n'
+        'AllowedIPs = 0.0.0.0/0\n'
+        'PersistentKeepalive = 25\n';
+
+    final out = rewriteEndpointPort(config, 443);
+
+    expect(out, contains('Endpoint = vpn.example.com:443'));
+    expect(out, isNot(contains(':51820')));
+    expect(out, contains('AllowedIPs = 0.0.0.0/0'));
+    expect(out, contains('PersistentKeepalive = 25'));
+  });
+
+  test('rewriteEndpointPort works with an IPv4 endpoint host', () {
+    expect(
+      rewriteEndpointPort('Endpoint = 203.0.113.5:51820', 443),
+      'Endpoint = 203.0.113.5:443',
+    );
+  });
+
+  test('rewriteEndpointPort is a no-op when there is no Endpoint line', () {
+    const config = '[Interface]\nAddress = 172.16.0.7/32\n';
+    expect(rewriteEndpointPort(config, 443), config);
+  });
 }

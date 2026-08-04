@@ -50,6 +50,43 @@ public class Customer
     /// </summary>
     public int SidecarHealthPort { get; set; } = 9004;
 
+    /// <summary>
+    /// Whether this customer's server should additionally answer WireGuard handshakes on
+    /// <see cref="FallbackPort"/>, for clients whose network blocks the primary UDP port.
+    /// This is the admin's *intent* — the heartbeat only advertises the fallback to clients
+    /// once the sidecar confirms the redirect is really installed (see
+    /// <c>docs/design/port-443-fallback.md</c> §4.4), otherwise a customer whose preflight
+    /// failed would have every client waste its fallback window on a dead port at every
+    /// connect. Customer-level only: the underlying redirect is server-wide, so a per-client
+    /// override could not mean anything.
+    /// </summary>
+    public bool FallbackPortEnabled { get; set; } = false;
+
+    /// <summary>
+    /// The alternate UDP port, default 443 (open on many networks because QUIC / HTTP-3 uses
+    /// it). Configurable rather than hardcoded so an admin whose host already serves UDP 443
+    /// can pick another commonly-open port without a code change.
+    /// </summary>
+    public int FallbackPort { get; set; } = 443;
+
+    /// <summary>
+    /// Whether the sidecar last confirmed the redirect is really installed — the observed
+    /// counterpart to <see cref="FallbackPortEnabled"/>, cached from /info by
+    /// <c>SidecarService.CacheSidecarInfoAsync</c> so the heartbeat can gate on it without an
+    /// /info round-trip per request. Always false for External customers, which have no
+    /// sidecar to confirm anything (their admin asserts reachability instead).
+    /// </summary>
+    public bool FallbackPortActive { get; set; } = false;
+
+    /// <summary>
+    /// How long (seconds) a client should see no successful verification on the primary port
+    /// before it tries the fallback once. Admin-configurable per customer alongside the port
+    /// itself — a slow/high-latency link may want longer than the 20s default before giving up
+    /// on the primary port. Sent to clients via <c>FallbackEndpointEntry.TriggerSeconds</c>;
+    /// clamped server-side to 1-300s (<c>ClientsController.FallbackPortFor</c>).
+    /// </summary>
+    public int FallbackTriggerSeconds { get; set; } = 20;
+
     /// <summary>Builds the full mTLS base URL from host + port, e.g. https://10.0.1.2:8443</summary>
     [System.ComponentModel.DataAnnotations.Schema.NotMapped]
     public string SidecarBaseUrl =>

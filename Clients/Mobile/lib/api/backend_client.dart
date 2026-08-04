@@ -52,7 +52,9 @@ abstract interface class BackendApi {
   /// Connect/Disconnect/gateway-Verified. Drives the admin client list's presence/connected
   /// indicators (WgTunnelTracker) — without this, the app was invisible to that tracking
   /// entirely. Best-effort; failures are swallowed by the caller, matching the other clients.
-  Future<void> logEvent(String eventType, String tunnelName);
+  /// [detail] carries free-text context for non-connect/disconnect event types (e.g.
+  /// "PortFallback" — see docs/design/port-443-fallback.md §5.4); null/unused otherwise.
+  Future<void> logEvent(String eventType, String tunnelName, {String? detail});
 
   /// GET /api/version — side-effect-free reachability probe for the "Backend check"
   /// menu item (the same public endpoint the Windows tray's About check uses).
@@ -241,7 +243,7 @@ class BackendClient implements BackendApi {
   }
 
   @override
-  Future<void> logEvent(String eventType, String tunnelName) async {
+  Future<void> logEvent(String eventType, String tunnelName, {String? detail}) async {
     await _http.post(
       Uri.parse('$baseUrl/api/clients/event'),
       headers: _jsonHeaders,
@@ -252,6 +254,7 @@ class BackendClient implements BackendApi {
         'tunnelName': tunnelName,
         'lanIp': '',
         'wanIp': '',
+        'detail': detail ?? '',
       }),
     ).timeout(_timeout);
   }

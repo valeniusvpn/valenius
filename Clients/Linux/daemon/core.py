@@ -29,8 +29,26 @@ log = logging.getLogger(__name__)
 _REVERIFY_SETTLE_S = 5
 _REVERIFY_BUDGET_S = 15
 
+# Post-connect verification retry loop (mirrors Windows TunnelVerifier): retry every
+# _VERIFY_FAST_INTERVAL_S for the first _VERIFY_FAST_WINDOW_S; if nothing has succeeded by
+# then, mark the tunnel's confirmation as failed (tray shows an amber tag) but keep retrying
+# every _VERIFY_SLOW_INTERVAL_S for as long as the tunnel stays connected, instead of giving
+# up permanently after a fixed budget.
+_VERIFY_ATTEMPT_BUDGET_S = 4
+_VERIFY_FAST_INTERVAL_S = 5
+_VERIFY_FAST_WINDOW_S = 60
+_VERIFY_SLOW_INTERVAL_S = 20
+
 # Minimum gap between auto-connect actions, to prevent flapping (mirrors Windows).
 _ACTION_COOLDOWN = timedelta(seconds=60)
+
+# Startup auto-connect retry (mirrors Windows AutoConnectService.RunStartupCheckAsync): a
+# single attempt right after boot can lose a race with the network stack settling
+# (DHCP/default route/DNS), so retry a few times before falling back to the NetworkMonitor's
+# periodic poll / real network-change events.
+_STARTUP_INITIAL_DELAY_S = 15
+_STARTUP_RETRY_INTERVAL_S = 10
+_STARTUP_RETRY_ATTEMPTS = 6  # ~1 minute total, then fall into the normal triggers.
 
 
 def _health_port_from_url(url: Optional[str]) -> int:
@@ -189,39 +207,73 @@ class DaemonCore:
         return _ok()
 
     async def _verify_after_connect(self, tunnel_name: str) -> None:
-        """Post-connect verification (mirrors Windows' RunPhase2Async, called right
-        after PipeServer's Connect handler): a sidecar profile with a gateway target
-        probes /health through the tunnel; anything else falls back to a handshake
-        check. Without this, IsVerified never becomes true until the next network
-        change triggers a re-verify — so a freshly-connected tunnel would show as
-        plain "Connected" indefinitely instead of getting the "Verified" badge."""
+        """Post-connect verification retry loop (mirrors Windows' TunnelVerifier, run right
+        after PipeServer's Connect handler / cmd_connect): a sidecar profile with a gateway
+        target probes /health through the tunnel, falling back to a handshake check; anything
+        else goes straight to the handshake check.
+
+        Retries every _VERIFY_FAST_INTERVAL_S for the first _VERIFY_FAST_WINDOW_S. If nothing
+        has succeeded by then, marks the tunnel verification-failed (tray shows an amber
+        "Confirmation failed" tag) but keeps retrying every _VERIFY_SLOW_INTERVAL_S for as long
+        as the tunnel stays connected, rather than giving up permanently after a fixed budget --
+        a real customer network was observed needing well over a minute for the WireGuard
+        handshake to complete even though the same sidecar confirmed in seconds for other
+        clients on the same network (a per-connection timing issue, not a server-side one). A
+        later success still clears the failed flag and promotes to "Verified", no reconnect
+        needed. Before this loop existed, IsVerified never became true until the next network
+        change triggered a re-verify — so a freshly-connected tunnel would show as plain
+        "Connected" indefinitely instead of getting the "Verified" badge."""
         gateway = self.state.get_gateway_probe(tunnel_name)
-        if gateway:
-            ip, port = gateway
-            deadline = datetime.utcnow().timestamp() + _REVERIFY_BUDGET_S
-            if await self._probe_gateway_until(ip, port, deadline):
-                self.state.set_verified(tunnel_name, via_gateway=True)
-                # Mirrors Windows' RunPhase2Async reporting a "Verified" event upstream —
+        start = datetime.utcnow().timestamp()
+        failed_marked = False
+
+        while self.state.is_connected(tunnel_name):
+            ok = False
+            via_gateway = False
+            try:
+                if gateway:
+                    ip, port = gateway
+                    attempt_deadline = datetime.utcnow().timestamp() + _VERIFY_ATTEMPT_BUDGET_S
+                    if await self._probe_gateway_until(ip, port, attempt_deadline):
+                        ok, via_gateway = True, True
+                if not ok:
+                    epoch = await self.wg.latest_handshake(tunnel_name)
+                    now = int(datetime.utcnow().timestamp())
+                    if epoch > 0 and now - epoch < 180:
+                        ok = True
+            except Exception as e:
+                log.debug("Verification attempt failed for tunnel '%s' (retrying): %s", tunnel_name, e)
+
+            if ok:
+                self.state.set_verified(tunnel_name, via_gateway=via_gateway)
+                log.info(
+                    "Verification succeeded for tunnel '%s' (%s)%s.",
+                    tunnel_name, 'gateway' if via_gateway else 'handshake',
+                    ' after a prior confirmation failure' if failed_marked else '',
+                )
+                # Mirrors Windows' TunnelVerifier reporting a "Verified" event upstream —
                 # required so the admin client list's "connected" star (which now demands
                 # actual gateway verification for sidecar clients, not just Connect) ever
                 # lights up for Linux. Deliberately only the gateway-verified branch reports;
-                # a handshake-only pass below does NOT, matching Windows (handshake freshness
-                # isn't a reliable enough signal to gate a display indicator on).
-                asyncio.create_task(
-                    self.backend.log_event(
-                        self.state.get_client_id(), 'Verified', '', tunnel_name,
+                # a handshake-only pass does NOT, matching Windows (handshake freshness isn't
+                # a reliable enough signal to gate a display indicator on).
+                if via_gateway:
+                    asyncio.create_task(
+                        self.backend.log_event(
+                            self.state.get_client_id(), 'Verified', '', tunnel_name,
+                        )
                     )
+                return
+
+            if not failed_marked and datetime.utcnow().timestamp() - start >= _VERIFY_FAST_WINDOW_S:
+                failed_marked = True
+                self.state.set_verification_failed(tunnel_name)
+                log.warning(
+                    "Confirmation failed for tunnel '%s' after %ds — still retrying in the background.",
+                    tunnel_name, _VERIFY_FAST_WINDOW_S,
                 )
-                return
-        for _ in range(5):
-            if not self.state.is_connected(tunnel_name):
-                return
-            epoch = await self.wg.latest_handshake(tunnel_name)
-            now = int(datetime.utcnow().timestamp())
-            if epoch > 0 and now - epoch < 180:
-                self.state.set_verified(tunnel_name)
-                return
-            await asyncio.sleep(2)
+
+            await asyncio.sleep(_VERIFY_SLOW_INTERVAL_S if failed_marked else _VERIFY_FAST_INTERVAL_S)
 
     async def cmd_disconnect(self, username: str, profile_name: Optional[str] = None) -> PipeResponse:
         from daemon.ipc_server import _ok, _fail
@@ -514,6 +566,37 @@ class DaemonCore:
                 await asyncio.sleep(15)
 
     # ── Auto-connect triggers ────────────────────────────────────────────────
+
+    async def run_startup_auto_connect_check(self) -> None:
+        """Applies the auto-connect policy shortly after daemon start, retrying if the first
+        attempt doesn't result in a connection. This is the path that reconnects the tunnel
+        after a service restart (a normal boot, or the restart a self-update triggers) --
+        wg-quick tunnels never come back up on their own. A single attempt right after boot
+        can lose a race with the network stack settling (DHCP/default route/DNS); mirrors
+        Windows' AutoConnectService.RunStartupCheckAsync."""
+        await asyncio.sleep(_STARTUP_INITIAL_DELAY_S)
+        for attempt in range(1, _STARTUP_RETRY_ATTEMPTS + 1):
+            await self._handle_network_change()
+            if not self._is_auto_connect_pending():
+                return
+            if attempt < _STARTUP_RETRY_ATTEMPTS:
+                log.debug("Auto-connect startup check attempt %d did not connect -- retrying.", attempt)
+                await asyncio.sleep(_STARTUP_RETRY_INTERVAL_S)
+
+    def _is_auto_connect_pending(self) -> bool:
+        """True if auto-connect still has something to do: enabled, trusted networks
+        configured, current network not trusted, and the target profile not yet connected.
+        Mirrors AutoConnectService.IsAutoConnectPending -- used only to decide whether the
+        startup retry loop should keep going."""
+        if not self.auto_connect.is_enabled():
+            return False
+        networks = self.auto_connect.get_trusted_networks()
+        if not networks:
+            return False
+        if is_in_trusted_network(networks):
+            return False
+        server_profile = self.auto_connect.get_profile_name() or self.state.get_server_profile_name()
+        return not (server_profile and self.state.is_connected(server_profile))
 
     def on_network_change(self) -> None:
         """Called from the NetworkMonitor thread on every network transition."""

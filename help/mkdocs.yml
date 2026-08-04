@@ -93,7 +93,11 @@ nav:
       - Settings: working/settings.md
       - MFA session gating: working/mfa.md
       - Traffic dashboard: working/traffic.md
+      - Testing a server (Pro): working/server-testing.md
       - Audit log: working/audit-log.md
       - Device pairing (QR): working/device-pairing.md
+      - API tokens (Pro): working/api-tokens.md
+      - Connect an AI assistant or automation tool (Pro): working/ai-integrations.md
+      - Monitoring (Zabbix, Prometheus): working/monitoring.md
       - Diagnostic logs: working/diagnostics.md
       - For users: working/for-users.md

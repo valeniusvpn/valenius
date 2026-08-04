@@ -45,6 +45,7 @@ class StatusResponse {
     required this.pendingApprovals,
     required this.logUploadRequested,
     required this.remoteLanCidrsByProfile,
+    this.fallbackEndpoints = const [],
     this.clientApiKey,
     this.pendingDeleteProfileName,
   });
@@ -83,6 +84,10 @@ class StatusResponse {
       remoteLanCidrsByProfile: m
           .list('remoteLanCidrsByProfile')
           .map((e) => LanCidrProfile.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      fallbackEndpoints: m
+          .list('fallbackEndpoints')
+          .map((e) => FallbackEndpoint.fromJson(e as Map<String, dynamic>))
           .toList(),
       clientApiKey: m.string('clientApiKey'),
       pendingDeleteProfileName: m.string('pendingDeleteProfileName'),
@@ -123,6 +128,13 @@ class StatusResponse {
   /// Mirrors [gatewayProfiles]'s per-profile shape — never apply one profile's entry to a
   /// different profile's connect.
   final List<LanCidrProfile> remoteLanCidrsByProfile;
+
+  /// Per-profile UDP fallback port + trigger window (`FallbackEndpointEntry`), advertised
+  /// only once the customer has opted in and the sidecar confirmed the redirect is active
+  /// (see docs/design/port-443-fallback.md). Mirrors [gatewayProfiles]'s per-profile shape —
+  /// the native profile carries its own customer's setting, each foreign profile its own
+  /// source customer's. Empty when no fallback is offered for any held profile.
+  final List<FallbackEndpoint> fallbackEndpoints;
 
   /// New client API key sent during a backend key rotation (only while this device is
   /// still on the previous key). The app persists it to secure storage and uses it for
@@ -186,6 +198,29 @@ class GatewayProfile {
   final String profileName;
   final String gatewayIp;
   final int healthPort;
+}
+
+/// Per-profile UDP fallback port + trigger window (`FallbackEndpointEntry`; Pro,
+/// customer opt-in, advertised only once the sidecar confirms the redirect is active).
+class FallbackEndpoint {
+  FallbackEndpoint({
+    required this.profileName,
+    required this.port,
+    required this.triggerSeconds,
+  });
+
+  factory FallbackEndpoint.fromJson(Map<String, dynamic> json) {
+    final m = CiMap(json);
+    return FallbackEndpoint(
+      profileName: m.string('profileName') ?? '',
+      port: m.integer('port') ?? 0,
+      triggerSeconds: m.integer('triggerSeconds') ?? 20,
+    );
+  }
+
+  final String profileName;
+  final int port;
+  final int triggerSeconds;
 }
 
 /// Per-profile remote LAN CIDR(s) (`LanCidrProfileEntry`) — the profile's own sidecar's

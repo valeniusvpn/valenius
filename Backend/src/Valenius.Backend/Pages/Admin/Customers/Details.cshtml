@@ -20,6 +20,21 @@
     .customer-hero { border: 1px solid #dee2e6; border-radius: 10px; background: linear-gradient(135deg,#fbfdff 0%,#f4f8fb 100%); }
     .customer-hero .meta { font-size: .82rem; }
     .customer-hero .meta .sep { color: #cdd5dc; margin: 0 .35rem; }
+    /* Read-only "facts read from the server" grid — deliberately not form fields. */
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 1rem 1.75rem; }
+    .status-grid .k { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #8a949c; margin-bottom: .2rem; }
+    .status-grid .v { font-size: .875rem; }
+    .status-grid .v .hint { display: block; font-size: .75rem; color: #8a949c; margin-top: .2rem; }
+    .status-grid .chip { display: inline-block; padding: .15rem .5rem; border-radius: .3rem; font-family: var(--bs-font-monospace); font-size: .82rem; background: rgba(15,78,102,.12); color: #0F4E66; }
+    /* Sub-group divider inside a single settings form. */
+    .field-group { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #8a949c; margin-bottom: .75rem; }
+    .field-group.sep { border-top: 1px solid #e9ecef; padding-top: 1rem; margin-top: .25rem; }
+    .help-i { color: #adb5bd; cursor: help; }
+    /* Firewall port checklist inside the amber alert — inherit its colour, drop the table's own. */
+    .firewall-ports { --bs-table-bg: transparent; --bs-table-color: inherit; font-size: .8rem; }
+    .firewall-ports th { font-weight: 600; text-transform: uppercase; font-size: .68rem; letter-spacing: .04em; opacity: .75; }
+    .firewall-ports > :not(caption) > * > * { padding: .3rem .5rem; border-bottom-color: rgba(0,0,0,.08); }
+    .firewall-ports tbody tr:last-child > * { border-bottom: 0; }
 </style>
 
 <div class="mb-3 d-flex gap-2">
@@ -220,7 +235,7 @@
                                     <span class="text-success">Enrolled</span>
                                     @if (!string.IsNullOrEmpty(Model.SidecarVersion))
                                     {
-                                        <span class="text-muted">· wg-sidecar v@Model.SidecarVersion</span>
+                                        <span class="text-muted">· wg-sidecar v@(Model.SidecarVersion)</span>
                                     }
                                     @if (Model.SidecarListenPort.HasValue)
                                     {
@@ -238,7 +253,7 @@
                         <dd class="col-sm-9">@(string.IsNullOrEmpty(c.ClientPrefix) ? "—" : c.ClientPrefix)</dd>
 
                         <dt class="col-sm-3">Heartbeat interval</dt>
-                        <dd class="col-sm-9">@(c.HeartbeatIntervalMinutes?.ToString() ?? "5 (default)") min</dd>
+                        <dd class="col-sm-9">@(c.HeartbeatIntervalMinutes?.ToString() ?? $"{Model.DefaultHeartbeatIntervalMinutes} (system default)") min</dd>
 
                         @if (!string.IsNullOrEmpty(c.Notes))
                         {
@@ -367,12 +382,17 @@
                             </div>
                             <div class="mb-3">
                                 <label class="form-label small fw-semibold">
-                                    Heartbeat interval <span class="text-muted fw-normal">(minutes, blank = default 5)</span>
+                                    Heartbeat interval <span class="text-muted fw-normal">(minutes, blank = system default of @Model.DefaultHeartbeatIntervalMinutes)</span>
                                 </label>
                                 <input type="number" name="heartbeatIntervalMinutes" class="form-control form-control-sm"
                                        value="@c.HeartbeatIntervalMinutes" min="1" max="60"
-                                       placeholder="5" />
-                                <div class="form-text">How often clients check in with the backend (1-60 min).</div>
+                                       placeholder="@Model.DefaultHeartbeatIntervalMinutes" />
+                                <div class="form-text">
+                                    How often clients check in with the backend (1-60 min). Admin-triggered actions
+                                    (Connect, config push, etc.) reach the client independently via long-poll, typically
+                                    within a minute, regardless of this value. Change the system-wide default under
+                                    Admin &rarr; Settings &rarr; Client connectivity.
+                                </div>
                             </div>
                             <div class="mb-3">
                                 <label class="form-label small fw-semibold">Notes</label>
@@ -488,309 +508,715 @@
 
             @if (_isWt)
             {
-                <div class="row g-3">
-                    <!-- Left column — configuration (settings) -->
-                    <div class="col-lg-6">
+                var _healthPort = c.SidecarHealthPort > 0 ? c.SidecarHealthPort : 9004;
 
-                        <!-- Sidecar configuration -->
-                        <div class="card card-brand mb-3">
-                            <div class="card-header"><i class="bi bi-hdd-network me-2"></i>Sidecar configuration</div>
-                            <div class="card-body">
+                // Badge colour per port-check verdict. Warn is used both for "open but not
+                // answering" and for the UDP "no rejection" case, which deliberately never
+                // reaches green — see DetailsModel.UdpVerdict.
+                string _stateCss(Valenius.Backend.Pages.Admin.Customers.DetailsModel.PortState s) => s switch
+                {
+                    Valenius.Backend.Pages.Admin.Customers.DetailsModel.PortState.Ok   => "bg-success",
+                    Valenius.Backend.Pages.Admin.Customers.DetailsModel.PortState.Warn => "bg-warning text-dark",
+                    Valenius.Backend.Pages.Admin.Customers.DetailsModel.PortState.Fail => "bg-danger",
+                    _                                                                  => "bg-secondary",
+                };
+                var _gatewayOk  = Model.TransitConflicts.Count == 0 && !string.IsNullOrEmpty(Model.SidecarInterfaceAddress);
+                var _sidecarUp  = Model.HasActiveSidecarCert && Model.SidecarListenPort.HasValue;
 
-                                @if (Model.TransitConflicts.Count > 0)
-                                {
-                                    <div class="alert alert-danger py-2 mb-3" role="alert">
-                                        <i class="bi bi-exclamation-triangle me-1"></i>
-                                        <strong>VPN transit subnet conflict.</strong>
-                                        This sidecar's VPN network overlaps:
-                                        @string.Join(", ", Model.TransitConflicts.Select(c => $"{c.Name} ({c.Subnet})")).
-                                        Transit subnets must be globally unique. Until you renumber one sidecar's WireGuard
-                                        interface, the fast gateway connectivity check is disabled for these customers and
-                                        clients fall back to the handshake check.
-                                    </div>
-                                }
-
-                                @if (Model.SidecarTestMessage is not null)
-                                {
-                                    <div class="alert @(Model.SidecarTestSuccess ? "alert-success" : "alert-danger") alert-dismissible fade show py-2 mb-2" role="alert">
-                                        <i class="bi @(Model.SidecarTestSuccess ? "bi-check-circle" : "bi-x-circle") me-1"></i>@Model.SidecarTestMessage
-                                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                                    </div>
-                                    @if (Model.UdpCheckedPort.HasValue)
-                                    {
-                                        var udpOk = Model.UdpPortReachable;
-                                        <div class="alert @(udpOk == true ? "alert-success" : udpOk == false ? "alert-danger" : "alert-warning") py-2 mb-3" role="alert">
-                                            <i class="bi @(udpOk == true ? "bi-check-circle" : udpOk == false ? "bi-x-circle" : "bi-question-circle") me-1"></i>
-                                            WireGuard® UDP <code>@Model.UdpCheckedHost:@Model.UdpCheckedPort</code> —
-                                            @if (udpOk == true)
-                                            {
-                                                <text>reachable (no ICMP port unreachable received)</text>
-                                            }
-                                            else if (udpOk == false)
-                                            {
-                                                <text>unreachable — ICMP port unreachable (nothing listening on this port)</text>
-                                            }
-                                            else
-                                            {
-                                                <text>check inconclusive (DNS or network error)</text>
-                                            }
-                                        </div>
-                                    }
-                                }
-
-                                <form method="post" asp-page-handler="SaveServer" id="serverForm">
-                                    <input type="hidden" name="id" value="@c.Id" />
-
-                                    <div class="row g-2 mb-3">
-                                        <div class="col">
-                                            <label class="form-label small fw-semibold">Server address</label>
-                                            <input type="text" name="sidecarUrl" class="form-control form-control-sm" id="sidecarUrlInput"
-                                                   value="@c.SidecarUrl" placeholder="host.docker.internal" />
-                                            <div class="form-text">
-                                                Hostname or IP of the sidecar, reachable from the backend.<br>
-                                                Same host: <code>host.docker.internal</code> &nbsp;·&nbsp; Separate host: <code>10.0.1.2</code>
-                                            </div>
-                                        </div>
-                                        <div class="col-auto">
-                                            <label class="form-label small fw-semibold">Management port <span class="text-muted fw-normal">(MANAGEMENT_PORT)</span></label>
-                                            <input type="number" name="sidecarManagementPort" class="form-control form-control-sm" id="sidecarPortInput"
-                                                   value="@c.SidecarManagementPort" min="1" max="65535" placeholder="9003" style="width:110px;" />
-                                            <div class="form-text">Default 9003. mTLS, backend only.</div>
-                                        </div>
-                                        <div class="col-auto">
-                                            <label class="form-label small fw-semibold">Health port <span class="text-muted fw-normal">(HEALTH_PORT)</span></label>
-                                            <input type="number" name="sidecarHealthPort" class="form-control form-control-sm"
-                                                   value="@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : null)" min="1" max="65535" placeholder="9004" style="width:135px;" />
-                                            <div class="form-text">Default 9004. VPN clients probe this port.</div>
-                                        </div>
-                                    </div>
-
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">Server endpoint <span class="text-muted fw-normal">(public hostname or IP)</span></label>
-                                        <input type="text" name="serverEndpoint" class="form-control form-control-sm"
-                                               value="@c.ServerEndpoint" placeholder="vpn.example.com" />
-                                        <div class="form-text">Public hostname or IP of the WireGuard® server. Port is read from the server configuration automatically.</div>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">WireGuard® listen port</label>
-                                        <div class="d-flex align-items-center gap-2 mt-1 flex-wrap">
-                                            @if (Model.SidecarListenPort.HasValue)
-                                            {
-                                                <span class="badge bg-success px-2 py-1" style="font-size:.85rem;font-family:monospace;">@Model.SidecarListenPort</span>
-                                                <span class="small text-muted">
-                                                    Detected — client configs will use
-                                                    <code>Endpoint = @(c.ServerEndpoint ?? "..."):@Model.SidecarListenPort</code>
-                                                </span>
-                                                @if (!string.IsNullOrEmpty(Model.SidecarVersion))
-                                                {
-                                                    <span class="badge fw-normal ms-auto"
-                                                          style="background:rgba(108,117,125,.1);color:#6c757d;">
-                                                        <i class="bi bi-box me-1"></i>wg-sidecar v@Model.SidecarVersion
-                                                    </span>
-                                                }
-                                            }
-                                            else
-                                            {
-                                                <span class="badge bg-secondary px-2 py-1">-</span>
-                                                <span class="small text-muted">Not available — sidecar unreachable or not yet configured.</span>
-                                            }
-                                        </div>
-                                        @if (Model.SidecarListenPort.HasValue)
-                                        {
-                                            <div class="alert alert-warning py-2 px-3 small mt-2 mb-0 d-flex align-items-start gap-2">
-                                                <i class="bi bi-firewall mt-1"></i>
-                                                <div>
-                                                    <strong>Open UDP port @Model.SidecarListenPort</strong> inbound on this sidecar
-                                                    host's firewall / cloud security group (read live from the sidecar's own
-                                                    <code>/info</code> endpoint, not a fixed default — it changes if the host was
-                                                    prepared with a non-default <code>--port</code>). Without this, clients can
-                                                    reach the management API but WireGuard&reg; handshakes will never complete.
-                                                </div>
-                                            </div>
-                                        }
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">VPN subnet</label>
-                                        <div class="d-flex align-items-center gap-2 mt-1">
-                                            @if (!string.IsNullOrEmpty(Model.SidecarInterfaceAddress))
-                                            {
-                                                <span class="badge px-2 py-1 font-monospace"
-                                                      style="background:rgba(15,78,102,.12);color:#0F4E66;font-size:.85rem;">@Model.SidecarInterfaceAddress</span>
-                                                <span class="small text-muted">Read from server — .1 is the gateway, clients start at .2</span>
-                                            }
-                                            else
-                                            {
-                                                <span class="badge bg-secondary px-2 py-1">-</span>
-                                                <span class="small text-muted">Not available — sidecar unreachable or not yet configured.</span>
-                                            }
-                                        </div>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">Detected LAN</label>
-                                        <div class="d-flex flex-wrap align-items-center gap-2 mt-1">
-                                            @if (Model.DetectedLanCidrs.Count > 0)
-                                            {
-                                                @foreach (var cidr in Model.DetectedLanCidrs)
-                                                {
-                                                    <span class="badge px-2 py-1 font-monospace"
-                                                          style="background:rgba(15,78,102,.12);color:#0F4E66;font-size:.85rem;">@cidr</span>
-                                                }
-                                                <span class="small text-muted">The physical network(s) behind the sidecar host itself — not the VPN subnet above. Sent to clients so a full-tunnel (0.0.0.0/0) profile can still detect a conflict with the client's own local network.</span>
-                                            }
-                                            else
-                                            {
-                                                <span class="badge bg-secondary px-2 py-1">-</span>
-                                                <span class="small text-muted">Not available — sidecar unreachable, or running an older build that doesn't report this yet.</span>
-                                            }
-                                        </div>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">VPN prefix <span class="text-muted fw-normal">(letters only)</span></label>
-                                        <div class="input-group input-group-sm">
-                                            <input type="text" name="vpnPrefix" class="form-control form-control-sm"
-                                                   value="@c.VpnPrefix" placeholder="MyCompany"
-                                                   pattern="^[A-Za-z]*$" maxlength="50"
-                                                   title="Letters only -- no numbers or special characters" />
-                                            <span class="input-group-text text-muted">-VPN</span>
-                                        </div>
-                                        <div class="form-text">Profile name on the client, e.g. <code>MyCompany-VPN</code>. Leave blank to use the customer name.</div>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">DNS server <span class="text-muted fw-normal">(optional)</span></label>
-                                        <input type="text" name="dnsServer" class="form-control form-control-sm"
-                                               value="@c.DnsServer" placeholder="10.100.0.1"
-                                               pattern="^(\d{1,3}\.){3}\d{1,3}$"
-                                               title="IPv4 address, e.g. 10.100.0.1" />
-                                        <div class="form-text">Written as <code>DNS =</code> in client configs. Can be overridden per client.</div>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">DNS search domains <span class="text-muted fw-normal">(optional)</span></label>
-                                        <input type="text" name="dnsSearchDomains" class="form-control form-control-sm"
-                                               value="@c.DnsSearchDomains" placeholder="corp.internal, lan"
-                                               pattern="^[A-Za-z0-9][A-Za-z0-9.\-]*(\s*,\s*[A-Za-z0-9][A-Za-z0-9.\-]*)*$"
-                                               title="Comma-separated domains, e.g. corp.internal, lan" />
-                                        <div class="form-text">
-                                            Appended to <code>DNS =</code> as split-DNS (NRPT) rules so only these domains
-                                            resolve through this tunnel — lets clients run several VPNs at once, each with its
-                                            own DNS. Requires a DNS server above. Can be overridden per client.
-                                        </div>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">Allowed IPs <span class="text-muted fw-normal">(default for all clients)</span></label>
-                                        <input type="text" name="allowedIPs" class="form-control form-control-sm"
-                                               value="@c.AllowedIPs" placeholder="0.0.0.0/0, ::/0"
-                                               pattern="((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})(,\s*((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3}))*"
-                                               title="Comma-separated CIDRs, e.g. 0.0.0.0/0, ::/0 or 10.0.0.0/8" />
-                                        <div class="form-text">
-                                            Written as <code>AllowedIPs =</code> in client configs.
-                                            Leave blank for full tunnel (<code>0.0.0.0/0, ::/0</code>).
-                                            Use CIDR for split tunnel, e.g. <code>10.100.0.0/24</code>.
-                                            Can be overridden per client.
-                                        </div>
-                                    </div>
-                                    <div class="d-flex gap-2 mb-3">
-                                        <button type="button" class="btn btn-outline-secondary btn-sm"
-                                                onclick="document.getElementById('testSidecarHost').value=document.getElementById('sidecarUrlInput').value;document.getElementById('testSidecarPort').value=document.getElementById('sidecarPortInput').value;document.getElementById('testForm').submit();">
-                                            <i class="bi bi-broadcast me-1"></i>Test mTLS connection
-                                        </button>
-                                    </div>
-
-                                    <button type="submit" class="btn btn-primary btn-sm">
-                                        <i class="bi bi-floppy me-1"></i>Save
-                                    </button>
-                                </form>
-
-                                <form method="post" asp-page-handler="TestSidecar" id="testForm" style="display:none;">
-                                    <input type="hidden" name="id" value="@c.Id" />
-                                    <input type="hidden" name="sidecarHost" id="testSidecarHost" value="" />
-                                    <input type="hidden" name="sidecarManagementPort" id="testSidecarPort" value="" />
-                                </form>
-                            </div>
-                        </div>
-
-                        @if (Model.HasActiveSidecarCert && Model.SidecarListenPort.HasValue)
+                <!-- ── Server status — read-only facts read live from the sidecar ──────── -->
+                <div class="card card-brand mb-3">
+                    <div class="card-header d-flex align-items-center">
+                        <i class="bi bi-activity me-2"></i>Server status
+                        @if (!string.IsNullOrEmpty(Model.SidecarVersion))
                         {
-                        <!-- Session MFA defaults -->
-                        <div class="card card-brand mb-3">
-                            <div class="card-header"><i class="bi bi-shield-lock-fill me-2"></i>Session MFA defaults</div>
-                            <div class="card-body">
-                                <p class="small text-muted mb-3">
-                                    Default policy for this customer's <strong>User</strong> peers. Machine peers are never gated.
-                                    Override per client on the client's Details page.
-                                </p>
-                                @if (!Model.MfaEditable)
-                                {
-                                    <div class="alert alert-warning py-2 small mb-3">
-                                        <i class="bi bi-lock-fill me-1"></i>
-                                        Editing is locked — the Pro license is inactive or expired. Enforcement continues.
-                                    </div>
-                                }
-                                <form method="post" asp-page-handler="SaveMfaDefaults">
-                                    <fieldset disabled="@(Model.MfaEditable ? null : "disabled")">
-                                    <input type="hidden" name="id" value="@c.Id" />
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">Default MFA policy</label>
-                                        <select name="defaultMfaPolicy" class="form-select form-select-sm">
-                                            <option value="Disabled" selected="@(c.DefaultMfaPolicy == MfaPolicy.Disabled ? "selected" : null)">Disabled</option>
-                                            <option value="PerConnection" selected="@(c.DefaultMfaPolicy == MfaPolicy.PerConnection ? "selected" : null)">Per connection (re-auth each connect)</option>
-                                            <option value="Interval" selected="@(c.DefaultMfaPolicy == MfaPolicy.Interval ? "selected" : null)">Interval (fixed lifetime)</option>
-                                        </select>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-semibold">Session lifetime / cap (hours)</label>
-                                        <input type="number" name="mfaSessionLifetimeHours" min="1" max="720"
-                                               class="form-control form-control-sm" value="@c.MfaSessionLifetimeHours" />
-                                    </div>
-                                    <button type="submit" class="btn btn-primary btn-sm">
-                                        <i class="bi bi-floppy me-1"></i>Save MFA defaults
-                                    </button>
-                                    </fieldset>
-                                </form>
+                            <span class="badge fw-normal ms-auto" style="background:rgba(108,117,125,.1);color:#6c757d;">
+                                <i class="bi bi-box me-1"></i>wg-sidecar v@(Model.SidecarVersion)
+                            </span>
+                        }
+                    </div>
+                    <div class="card-body">
+
+                        @if (Model.SidecarTestMessage is not null)
+                        {
+                            <div class="alert @(Model.SidecarTestSuccess ? "alert-success" : "alert-danger") alert-dismissible fade show py-2 mb-2" role="alert">
+                                <i class="bi @(Model.SidecarTestSuccess ? "bi-check-circle" : "bi-x-circle") me-1"></i>@Model.SidecarTestMessage
+                                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                             </div>
-                        </div>
+                            @if (Model.UdpCheckedPort.HasValue)
+                            {
+                                var udpOk = Model.UdpPortReachable;
+                                <div class="alert @(udpOk == true ? "alert-success" : udpOk == false ? "alert-danger" : "alert-warning") py-2 mb-3" role="alert">
+                                    <i class="bi @(udpOk == true ? "bi-check-circle" : udpOk == false ? "bi-x-circle" : "bi-question-circle") me-1"></i>
+                                    WireGuard&reg; UDP <code>@Model.UdpCheckedHost:@Model.UdpCheckedPort</code> &mdash;
+                                    @if (udpOk == true)
+                                    {
+                                        <text>reachable (no ICMP port unreachable received)</text>
+                                    }
+                                    else if (udpOk == false)
+                                    {
+                                        <text>unreachable &mdash; ICMP port unreachable (nothing listening on this port)</text>
+                                    }
+                                    else
+                                    {
+                                        <text>check inconclusive (DNS or network error)</text>
+                                    }
+                                </div>
+                            }
                         }
 
-                        <!-- Device tunnel default -->
-                        <div class="card mb-3">
-                            <div class="card-header"><i class="bi bi-laptop me-2"></i>Device tunnel</div>
+                        <div class="status-grid">
+
+                            <div>
+                                <div class="k">Enrollment</div>
+                                <div class="v">
+                                    @if (Model.HasActiveSidecarCert)
+                                    {
+                                        <span class="badge bg-success"><i class="bi bi-patch-check me-1"></i>Certificate issued</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary">Not yet enrolled</span>
+                                    }
+                                    @if (Model.EnrollmentTokenIsSet)
+                                    {
+                                        <span class="badge bg-warning text-dark ms-1"><i class="bi bi-key me-1"></i>Token pending</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="k">
+                                    WireGuard&reg; listen port
+                                    <i class="bi bi-question-circle help-i" title="Read live from the sidecar's own /info endpoint, not a fixed default - it changes if the host was prepared with a non-default --port."></i>
+                                </div>
+                                <div class="v">
+                                    @if (Model.SidecarListenPort.HasValue)
+                                    {
+                                        <span class="chip">@Model.SidecarListenPort/udp</span>
+                                        <span class="hint">Clients use <code>Endpoint = @(string.IsNullOrEmpty(c.ServerEndpoint) ? "..." : c.ServerEndpoint):@Model.SidecarListenPort</code></span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">&mdash;</span>
+                                        <span class="hint">Sidecar unreachable or not yet configured.</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="k">
+                                    VPN subnet
+                                    <i class="bi bi-question-circle help-i" title="The tunnel's own transit network, read from the sidecar. Must be globally unique across all customers for the fast gateway check to work."></i>
+                                </div>
+                                <div class="v">
+                                    @if (!string.IsNullOrEmpty(Model.SidecarInterfaceAddress))
+                                    {
+                                        <span class="chip">@Model.SidecarInterfaceAddress</span>
+                                        <span class="hint">.1 is the gateway, clients start at .2</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">&mdash;</span>
+                                        <span class="hint">Sidecar unreachable or not yet configured.</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="k">
+                                    Detected LAN
+                                    <i class="bi bi-question-circle help-i" title="The physical network(s) behind the sidecar host itself - not the VPN subnet. Sent to clients so a full-tunnel (0.0.0.0/0) profile can still detect a conflict with the client's own local network."></i>
+                                </div>
+                                <div class="v">
+                                    @if (Model.DetectedLanCidrs.Count > 0)
+                                    {
+                                        @foreach (var cidr in Model.DetectedLanCidrs)
+                                        {
+                                            <span class="chip me-1">@cidr</span>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">&mdash;</span>
+                                        <span class="hint">Sidecar unreachable, or an older build that doesn't report this.</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="k">
+                                    Connectivity check
+                                    <i class="bi bi-question-circle help-i" title="How clients confirm a tunnel really works: a gateway /health probe through the tunnel (fast) or the WireGuard handshake (fallback)."></i>
+                                </div>
+                                <div class="v">
+                                    @if (_gatewayOk)
+                                    {
+                                        <span class="badge bg-success">Gateway probe</span>
+                                        <span class="hint">via health port @_healthPort</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary">Handshake fallback</span>
+                                        <span class="hint">@(Model.TransitConflicts.Count > 0 ? "Transit subnet is not unique." : "VPN subnet unknown.")</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="k">
+                                    Port fallback
+                                    <i class="bi bi-question-circle help-i" title="Also answers WireGuard on a second UDP port (default 443) for clients whose network blocks the primary port. Clients only try it once the server confirms the redirect is installed."></i>
+                                </div>
+                                <div class="v">
+                                    @if (!c.FallbackPortEnabled)
+                                    {
+                                        <span class="badge bg-secondary">Off</span>
+                                    }
+                                    else if (Model.FallbackActive)
+                                    {
+                                        <span class="chip">udp/@c.FallbackPort</span>
+                                        <span class="hint">Active &mdash; clients may retry on this port</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-warning text-dark">Not active</span>
+                                        <span class="hint">@(string.IsNullOrEmpty(Model.FallbackError)
+                                            ? "The server has not confirmed the redirect — clients are not being offered it."
+                                            : Model.FallbackError)</span>
+                                    }
+                                </div>
+                            </div>
+
+                        </div>
+
+                        @if (Model.TransitConflicts.Count > 0)
+                        {
+                            <div class="alert alert-danger py-2 mt-3 mb-0" role="alert">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                <strong>VPN transit subnet conflict.</strong>
+                                This sidecar's VPN network overlaps:
+                                @string.Join(", ", Model.TransitConflicts.Select(tc => $"{tc.Name} ({tc.Subnet})")).
+                                Transit subnets must be globally unique. Until you renumber one sidecar's WireGuard
+                                interface, the fast gateway connectivity check is disabled for these customers and
+                                clients fall back to the handshake check.
+                            </div>
+                        }
+
+                        <div class="alert alert-warning py-2 px-3 small mt-3 mb-0">
+                            <div class="d-flex align-items-start gap-2 mb-2">
+                                <i class="bi bi-firewall mt-1"></i>
+                                <div>
+                                    <strong>Inbound ports to open</strong> on this sidecar host's firewall / cloud
+                                    security group (and to forward, if the host is behind NAT):
+                                </div>
+                                <button type="submit" form="checkPortsForm" class="btn btn-sm btn-outline-secondary ms-auto flex-shrink-0">
+                                    <i class="bi bi-search me-1"></i>@(Model.PortChecks is null ? "Check ports" : "Re-check")
+                                </button>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-0 align-middle firewall-ports">
+                                    <thead>
+                                        <tr>
+                                            <th>Port</th><th>Proto</th><th>Reachable from</th>
+                                            @if (Model.PortChecks is not null)
+                                            {
+                                                <th>Status</th>
+                                            }
+                                            <th>Purpose</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td class="font-monospace">
+                                                @if (Model.SidecarListenPort.HasValue)
+                                                {
+                                                    @Model.SidecarListenPort
+                                                }
+                                                else
+                                                {
+                                                    <span class="text-muted">unknown</span>
+                                                }
+                                            </td>
+                                            <td>UDP</td>
+                                            <td>VPN clients (public)</td>
+                                            @if (Model.PortChecks is not null)
+                                            {
+                                                var pc = Model.PortCheckFor("wg");
+                                                <td>
+                                                    @if (pc is not null)
+                                                    {
+                                                        <span class="badge @_stateCss(pc.State)" title="@pc.Detail">@pc.Label</span>
+                                                    }
+                                                </td>
+                                            }
+                                            <td>
+                                                WireGuard&reg; tunnel.
+                                                @if (!Model.SidecarListenPort.HasValue)
+                                                {
+                                                    <span class="text-muted">Read live from the sidecar &mdash; connect to it first to see the real port.</span>
+                                                }
+                                            </td>
+                                        </tr>
+                                        @if (c.FallbackPortEnabled)
+                                        {
+                                            <tr>
+                                                <td class="font-monospace">@c.FallbackPort</td>
+                                                <td>UDP</td>
+                                                <td>VPN clients (public)</td>
+                                                @if (Model.PortChecks is not null)
+                                                {
+                                                    var pc = Model.PortCheckFor("fallback");
+                                                    <td>
+                                                        @if (pc is not null)
+                                                        {
+                                                            <span class="badge @_stateCss(pc.State)" title="@pc.Detail">@pc.Label</span>
+                                                        }
+                                                    </td>
+                                                }
+                                                <td>
+                                                    Port fallback &mdash; redirected to the WireGuard&reg; port.
+                                                    @if (!Model.FallbackActive)
+                                                    {
+                                                        <span class="text-muted">Not active yet, but required once it is.</span>
+                                                    }
+                                                </td>
+                                            </tr>
+                                        }
+                                        <tr>
+                                            <td class="font-monospace">@_healthPort</td>
+                                            <td>TCP</td>
+                                            <td>VPN clients (public)</td>
+                                            @if (Model.PortChecks is not null)
+                                            {
+                                                var pc = Model.PortCheckFor("health");
+                                                <td>
+                                                    @if (pc is not null)
+                                                    {
+                                                        <span class="badge @_stateCss(pc.State)" title="@pc.Detail">@pc.Label</span>
+                                                    }
+                                                </td>
+                                            }
+                                            <td>Health check clients run <em>before</em> connecting, to avoid entering a broken tunnel.</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="font-monospace">@c.SidecarManagementPort</td>
+                                            <td>TCP</td>
+                                            <td class="fw-semibold">
+                                                @if (!string.IsNullOrEmpty(Model.BackendPublicIp))
+                                                {
+                                                    <span class="font-monospace">@Model.BackendPublicIp/32</span>
+                                                    <span class="d-block text-muted" style="font-size:.72rem;">this backend only</span>
+                                                }
+                                                else
+                                                {
+                                                    <text>The Valenius backend only</text>
+                                                }
+                                            </td>
+                                            @if (Model.PortChecks is not null)
+                                            {
+                                                var pc = Model.PortCheckFor("mgmt");
+                                                <td>
+                                                    @if (pc is not null)
+                                                    {
+                                                        <span class="badge @_stateCss(pc.State)" title="@pc.Detail">@pc.Label</span>
+                                                    }
+                                                </td>
+                                            }
+                                            <td>
+                                                mTLS management API. Never expose it to the internet at large &mdash;
+                                                restrict it to the single source address, or reach it over a
+                                                site-to-site VPN and open nothing.
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            @if (Model.PortChecks is not null)
+                            {
+                                <div class="mt-2 pt-2 border-top small">
+                                    <i class="bi bi-info-circle me-1"></i>
+                                    Checked from <strong>this backend</strong>@(string.IsNullOrEmpty(Model.PortChecksHost) ? "" : $" against {Model.PortChecksHost}") &mdash;
+                                    not from a VPN client's network, so a pass here doesn't prove the fleet can connect.
+                                    @if (Model.UdpConfirmedByHandshake)
+                                    {
+                                        <text>
+                                            The UDP rows were confirmed with a real WireGuard&reg; handshake using a
+                                            throwaway peer that was removed afterwards, so they are definitive rather
+                                            than inferred.
+                                        </text>
+                                    }
+                                    else
+                                    {
+                                        <text>
+                                            The UDP rows fall back to an ICMP probe here, which can only ever disprove:
+                                            no rejection looks the same as a firewall dropping packets silently. Connect
+                                            the sidecar to get a definitive handshake-based result instead.
+                                        </text>
+                                    }
+                                </div>
+                            }
+
+                            @if (Model.SidecarUnreachable)
+                            {
+                                <div class="mt-2 pt-2 border-top">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    @if (Model.SidecarEnrolledButUnreachable)
+                                    {
+                                        <strong>This sidecar enrolled but the backend cannot reach it back.</strong>
+                                        <text>
+                                            Enrollment runs <em>outbound</em> from the sidecar, the management API runs
+                                            <em>inbound</em> to it &mdash; so the outbound path works and the inbound one
+                                            is blocked. Unless there is a site-to-site VPN between them,
+                                        </text>
+                                    }
+                                    else
+                                    {
+                                        <strong>The backend cannot reach this sidecar.</strong>
+                                        <text>
+                                            Check the server address above and that the container is running. If both are
+                                            right and there is no site-to-site VPN between them,
+                                        </text>
+                                    }
+                                    open TCP @c.SidecarManagementPort inbound
+                                    @if (!string.IsNullOrEmpty(Model.BackendPublicIp))
+                                    {
+                                        <text>from <code>@Model.BackendPublicIp/32</code> only</text>
+                                    }
+                                    else
+                                    {
+                                        <text>from this backend's public IP only (it could not be determined automatically &mdash; set <code>Valenius:BackendPublicIp</code> to show it here)</text>
+                                    }
+                                    on the sidecar host.
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── Server settings — one form, two field groups ────────────────────── -->
+                <div class="card card-brand mb-3">
+                    <div class="card-header d-flex align-items-center">
+                        <i class="bi bi-sliders me-2"></i>Server settings
+                        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto"
+                                onclick="document.getElementById('testSidecarHost').value=document.getElementById('sidecarUrlInput').value;document.getElementById('testSidecarPort').value=document.getElementById('sidecarPortInput').value;document.getElementById('testForm').submit();">
+                            <i class="bi bi-broadcast me-1"></i>Test connection
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <form method="post" asp-page-handler="SaveServer" id="serverForm">
+                            <input type="hidden" name="id" value="@c.Id" />
+
+                            <div class="field-group">Connection &mdash; how the backend reaches the sidecar</div>
+                            <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-semibold">Server address</label>
+                                    <input type="text" name="sidecarUrl" class="form-control form-control-sm" id="sidecarUrlInput"
+                                           value="@c.SidecarUrl" placeholder="host.docker.internal" />
+                                    <div class="form-text">Same host: <code>host.docker.internal</code> &middot; separate host: <code>10.0.1.2</code></div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-semibold">
+                                        Management port
+                                        <i class="bi bi-question-circle help-i" title="MANAGEMENT_PORT on the sidecar. mTLS, backend only."></i>
+                                    </label>
+                                    <input type="number" name="sidecarManagementPort" class="form-control form-control-sm" id="sidecarPortInput"
+                                           value="@c.SidecarManagementPort" min="1" max="65535" placeholder="9003" />
+                                    <div class="form-text">Default 9003.</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-semibold">
+                                        Health port
+                                        <i class="bi bi-question-circle help-i" title="HEALTH_PORT on the sidecar. VPN clients probe this port through the tunnel to confirm connectivity."></i>
+                                    </label>
+                                    <input type="number" name="sidecarHealthPort" class="form-control form-control-sm"
+                                           value="@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : null)" min="1" max="65535" placeholder="9004" />
+                                    <div class="form-text">Default 9004.</div>
+                                </div>
+                            </div>
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-md-6">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" role="switch"
+                                               id="fallbackPortEnabled" name="fallbackPortEnabled" value="true"
+                                               @(c.FallbackPortEnabled ? "checked" : "") />
+                                        <label class="form-check-label small fw-semibold" for="fallbackPortEnabled">
+                                            Answer on a fallback UDP port
+                                            <i class="bi bi-question-circle help-i" title="Adds a redirect so the WireGuard server also answers on the port below, for clients whose network blocks the primary UDP port. Both ports stay live. This is UDP 443, not the TCP 443 used by HTTPS - it helps on networks that filter by port number, not on networks that block all UDP."></i>
+                                        </label>
+                                    </div>
+                                    <div class="form-text">Clients only try it once the server confirms the redirect is installed.</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-semibold">Fallback port</label>
+                                    <input type="number" name="fallbackPort" class="form-control form-control-sm"
+                                           value="@c.FallbackPort" min="1" max="65535" placeholder="443" />
+                                    <div class="form-text">Default 443.</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-semibold">
+                                        Trigger after (seconds)
+                                        <i class="bi bi-question-circle help-i" title="How long a client waits with no successful verification on the primary port before it retries once on the fallback port. Client-side timing only, no sidecar push."></i>
+                                    </label>
+                                    <input type="number" name="fallbackTriggerSeconds" class="form-control form-control-sm"
+                                           value="@c.FallbackTriggerSeconds" min="1" max="300" placeholder="20" />
+                                    <div class="form-text">Default 20s.</div>
+                                </div>
+                            </div>
+
+                            <div class="field-group sep">Client profile defaults &mdash; what goes into each client's .conf</div>
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-semibold">Server endpoint</label>
+                                    <input type="text" name="serverEndpoint" class="form-control form-control-sm"
+                                           value="@c.ServerEndpoint" placeholder="vpn.example.com" />
+                                    <div class="form-text">Public hostname or IP. Port is read from the server automatically.</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-semibold">VPN prefix <span class="text-muted fw-normal">(letters only)</span></label>
+                                    <div class="input-group input-group-sm">
+                                        <input type="text" name="vpnPrefix" class="form-control form-control-sm"
+                                               value="@c.VpnPrefix" placeholder="MyCompany"
+                                               pattern="^[A-Za-z]*$" maxlength="50"
+                                               title="Letters only -- no numbers or special characters" />
+                                        <span class="input-group-text text-muted">-VPN</span>
+                                    </div>
+                                    <div class="form-text">Profile name on the client. Blank uses the customer name.</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small fw-semibold">DNS server <span class="text-muted fw-normal">(optional)</span></label>
+                                    <input type="text" name="dnsServer" class="form-control form-control-sm"
+                                           value="@c.DnsServer" placeholder="10.100.0.1"
+                                           pattern="^(\d{1,3}\.){3}\d{1,3}$"
+                                           title="IPv4 address, e.g. 10.100.0.1" />
+                                    <div class="form-text">Written as <code>DNS =</code>. Overridable per client.</div>
+                                </div>
+                                <div class="col-md-8">
+                                    <label class="form-label small fw-semibold">
+                                        DNS search domains <span class="text-muted fw-normal">(optional)</span>
+                                        <i class="bi bi-question-circle help-i" title="Appended to DNS = as split-DNS (NRPT) rules so only these domains resolve through this tunnel - lets clients run several VPNs at once, each with its own DNS. Requires a DNS server."></i>
+                                    </label>
+                                    <input type="text" name="dnsSearchDomains" class="form-control form-control-sm"
+                                           value="@c.DnsSearchDomains" placeholder="corp.internal, lan"
+                                           pattern="^[A-Za-z0-9][A-Za-z0-9.\-]*(\s*,\s*[A-Za-z0-9][A-Za-z0-9.\-]*)*$"
+                                           title="Comma-separated domains, e.g. corp.internal, lan" />
+                                    <div class="form-text">Split-DNS rules. Requires a DNS server. Overridable per client.</div>
+                                </div>
+                                <div class="col-md-8">
+                                    <label class="form-label small fw-semibold">
+                                        Allowed IPs
+                                        <i class="bi bi-question-circle help-i" title="Written as AllowedIPs = in client configs. Blank means full tunnel (0.0.0.0/0, ::/0); use CIDR for a split tunnel, e.g. 10.100.0.0/24."></i>
+                                    </label>
+                                    <input type="text" name="allowedIPs" class="form-control form-control-sm"
+                                           value="@c.AllowedIPs" placeholder="0.0.0.0/0, ::/0"
+                                           pattern="((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3})(,\s*((\d{1,3}\.){3}\d{1,3}/\d{1,2}|[0-9a-fA-F:]+/\d{1,3}))*"
+                                           title="Comma-separated CIDRs, e.g. 0.0.0.0/0, ::/0 or 10.0.0.0/8" />
+                                    <div class="form-text">Blank = full tunnel. Overridable per client.</div>
+                                </div>
+                            </div>
+
+                            <div class="d-flex justify-content-end mt-4">
+                                <button type="submit" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-floppy me-1"></i>Save changes
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <form method="post" asp-page-handler="TestSidecar" id="testForm" style="display:none;">
+                    <input type="hidden" name="id" value="@c.Id" />
+                    <input type="hidden" name="sidecarHost" id="testSidecarHost" value="" />
+                    <input type="hidden" name="sidecarManagementPort" id="testSidecarPort" value="" />
+                </form>
+
+                <!-- Submitted by the "Check ports" button inside the firewall panel (via form=),
+                     which sits in a card body that is not itself a form. -->
+                <form method="post" asp-page-handler="CheckPorts" id="checkPortsForm" style="display:none;">
+                    <input type="hidden" name="id" value="@c.Id" />
+                </form>
+                <form method="post" asp-page-handler="FullTest" id="fullTestForm" style="display:none;">
+                    <input type="hidden" name="id" value="@c.Id" />
+                </form>
+
+                <!-- ── Full configuration test ─────────────────────────────────────── -->
+                <div class="card card-brand mb-3">
+                    <div class="card-header d-flex align-items-center">
+                        <i class="bi bi-clipboard2-check me-2"></i>Full configuration test
+                        <button type="submit" form="fullTestForm" class="btn btn-sm btn-outline-secondary ms-auto">
+                            <i class="bi bi-play-circle me-1"></i>@(Model.SelfTest is null && Model.HandshakeChecks is null ? "Run test" : "Run again")
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        @if (Model.SelfTest is null && Model.HandshakeChecks is null)
+                        {
+                            <p class="small text-muted mb-0">
+                                Asks the server to check itself (IP forwarding, NAT, routing, config drift), then
+                                performs a <strong>real WireGuard&reg; handshake</strong> against it from this backend
+                                using a throwaway peer that is removed afterwards. Together these cover both halves of
+                                "is this server actually going to work": the handshake proves the port is reachable,
+                                the server's key is right and peer provisioning takes effect; the self-check proves
+                                the host will forward what arrives. Nothing is changed permanently.
+                                <br />
+                                The handshake half works against <em>any</em> sidecar version; the self-check half
+                                needs a recent sidecar image and reports plainly when it is missing.
+                            </p>
+                        }
+                        else
+                        {
+                            @if (Model.TestPeerLeak is not null)
+                            {
+                                <div class="alert alert-danger py-2 small">
+                                    <i class="bi bi-exclamation-octagon me-1"></i>
+                                    The temporary test peer could not be removed. Delete it on the server manually:
+                                    <code>@Model.TestPeerLeak</code>
+                                </div>
+                            }
+
+                            <div class="field-group">Reachability &mdash; tested from this backend</div>
+                            @if (Model.HandshakeChecks is null)
+                            {
+                                <p class="small text-muted">Not run &mdash; the sidecar could not be reached.</p>
+                            }
+                            else
+                            {
+                                <ul class="list-unstyled small mb-3">
+                                    @foreach (var hc in Model.HandshakeChecks)
+                                    {
+                                        <li class="mb-2 d-flex gap-2">
+                                            <span class="badge @_stateCss(hc.State) flex-shrink-0">@hc.Label</span>
+                                            <span class="text-muted">@hc.Detail</span>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+
+                            <div class="field-group sep">Server self-check &mdash; reported by the sidecar</div>
+                            @if (Model.SelfTest is null)
+                            {
+                                @* Amber, not muted grey: this half of the test did not run, and the green
+                                   handshake results directly above would otherwise read as a clean bill of
+                                   health for a server whose forwarding and NAT were never checked. *@
+                                <div class="alert alert-warning py-2 small mb-0">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    <strong>Not checked &mdash; this test was only half completed.</strong>
+                                    @if (Model.SidecarUnreachable)
+                                    {
+                                        <text>The sidecar could not be reached.</text>
+                                    }
+                                    else
+                                    {
+                                        <text>
+                                            This sidecar@(string.IsNullOrEmpty(Model.SidecarVersion) ? "" : $" (v{Model.SidecarVersion})")
+                                            predates the self-check endpoint. Update the sidecar image to enable it.
+                                        </text>
+                                    }
+                                    The reachability results above are still valid &mdash; they need nothing new from
+                                    the sidecar &mdash; but IP forwarding, NAT, routing and config drift were
+                                    <strong>not</strong> verified. Those are exactly the faults where a tunnel connects
+                                    normally and then carries no traffic.
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="table-responsive">
+                                    <table class="table table-sm mb-0 align-middle firewall-ports">
+                                        <tbody>
+                                            @foreach (var chk in Model.SelfTest.Checks)
+                                            {
+                                                var css = chk.Status == "pass" ? "bg-success"
+                                                        : chk.Status == "warn" ? "bg-warning text-dark" : "bg-danger";
+                                                <tr>
+                                                    <td style="width:1%"><span class="badge @css text-uppercase" style="font-size:.62rem;">@chk.Status</span></td>
+                                                    <td style="width:1%" class="text-nowrap fw-semibold">@chk.Name</td>
+                                                    <td class="text-muted">@chk.Detail</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                        }
+                    </div>
+                </div>
+
+                <div class="row g-3">
+
+                    <!-- Policies — per-customer defaults, all overridable per client -->
+                    <div class="col-lg-6">
+                        <div class="card card-brand h-100">
+                            <div class="card-header"><i class="bi bi-shield-lock-fill me-2"></i>Policies</div>
                             <div class="card-body">
                                 <p class="small text-muted mb-3">
-                                    When enabled, this customer's clients connect their own integrated-server
-                                    profile automatically at boot, before any user logs on — so domain GPOs and
-                                    login scripts work correctly off the office network. Uses the same
-                                    trusted-network policy as Auto Connect (never connects while already on a
-                                    trusted network). Override per client on the client's Details page.
+                                    Defaults for this customer. Override per client on the client's Details page.
                                 </p>
-                                <form method="post" asp-page-handler="SaveDeviceTunnelDefault">
+                                <form method="post" asp-page-handler="SavePolicies">
                                     <input type="hidden" name="id" value="@c.Id" />
-                                    <div class="form-check form-switch mb-3">
+
+                                    @if (_sidecarUp)
+                                    {
+                                        @if (!Model.MfaEditable)
+                                        {
+                                            <div class="alert alert-warning py-2 small mb-3">
+                                                <i class="bi bi-lock-fill me-1"></i>
+                                                MFA editing is locked &mdash; the Pro license is inactive or expired. Enforcement continues.
+                                            </div>
+                                        }
+                                        <fieldset disabled="@(Model.MfaEditable ? null : "disabled")">
+                                            <div class="row g-3 mb-3">
+                                                <div class="col-sm-7">
+                                                    <label class="form-label small fw-semibold">
+                                                        Session MFA policy
+                                                        <i class="bi bi-question-circle help-i" title="Applies to User peers only. Machine peers are never gated."></i>
+                                                    </label>
+                                                    <select name="defaultMfaPolicy" class="form-select form-select-sm">
+                                                        <option value="Disabled" selected="@(c.DefaultMfaPolicy == MfaPolicy.Disabled ? "selected" : null)">Disabled</option>
+                                                        <option value="PerConnection" selected="@(c.DefaultMfaPolicy == MfaPolicy.PerConnection ? "selected" : null)">Per connection</option>
+                                                        <option value="Interval" selected="@(c.DefaultMfaPolicy == MfaPolicy.Interval ? "selected" : null)">Interval (fixed lifetime)</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-sm-5">
+                                                    <label class="form-label small fw-semibold">Lifetime / cap</label>
+                                                    <div class="input-group input-group-sm">
+                                                        <input type="number" name="mfaSessionLifetimeHours" min="1" max="720"
+                                                               class="form-control form-control-sm" value="@c.MfaSessionLifetimeHours" />
+                                                        <span class="input-group-text text-muted">hours</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </fieldset>
+                                    }
+
+                                    <div class="form-check form-switch mb-1">
                                         <input type="checkbox" class="form-check-input" id="deviceTunnelDefaultEnabled"
                                                name="deviceTunnelDefaultEnabled" value="true"
                                                @(c.DeviceTunnelDefaultEnabled ? "checked" : "") />
-                                        <label class="form-check-label small" for="deviceTunnelDefaultEnabled">
-                                            Connect automatically before login by default
+                                        <label class="form-check-label small fw-semibold" for="deviceTunnelDefaultEnabled">
+                                            Device tunnel &mdash; connect before login
+                                            <i class="bi bi-question-circle help-i" title="Clients connect their integrated-server profile at boot, before any user logs on, so domain GPOs and login scripts work off the office network. Uses the same trusted-network policy as Auto Connect."></i>
                                         </label>
                                     </div>
-                                    <button type="submit" class="btn btn-primary btn-sm">
-                                        <i class="bi bi-floppy me-1"></i>Save
-                                    </button>
+
+                                    <div class="d-flex justify-content-end mt-3">
+                                        <button type="submit" class="btn btn-primary btn-sm">
+                                            <i class="bi bi-floppy me-1"></i>Save policies
+                                        </button>
+                                    </div>
                                 </form>
                             </div>
                         </div>
-
                     </div>
 
-                    <!-- Right column — enrollment & operations (actions) -->
+                    <!-- Enrollment & maintenance — one-shot operations -->
                     <div class="col-lg-6">
-
-                        <!-- mTLS enrollment -->
-                        <div class="card card-brand mb-3">
+                        <div class="card card-brand h-100">
                             <div class="card-header d-flex align-items-center">
-                                <i class="bi bi-shield-lock me-2"></i>mTLS enrollment
+                                <i class="bi bi-shield-lock me-2"></i>Enrollment &amp; maintenance
                                 <button type="button" class="btn btn-sm btn-outline-secondary ms-auto"
                                         data-bs-toggle="modal" data-bs-target="#modalSidecarSetup"
                                         title="Step-by-step server install instructions for this customer">
-                                    <i class="bi bi-info-circle me-1"></i>How to install the server
+                                    <i class="bi bi-info-circle me-1"></i>How to install
                                 </button>
                             </div>
                             <div class="card-body">
@@ -812,8 +1238,8 @@
                                             <pre class="mt-1 mb-0 p-2 border rounded bg-light small">ENROLLMENT_TOKEN=@newToken
 BACKEND_URL=@Model.BackendUrl
 MANAGEMENT_PORT=@c.SidecarManagementPort
-HEALTH_PORT=@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : 9004)</pre>
-                                            After enrollment, set <strong>Server address</strong> to your sidecar host and click Save.
+HEALTH_PORT=@_healthPort</pre>
+                                            After enrollment, set <strong>Server address</strong> above and click Save.
                                         </div>
                                         <div class="mt-2">
                                             <a asp-page-handler="DownloadEnv" asp-route-id="@c.Id"
@@ -824,29 +1250,12 @@ HEALTH_PORT=@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : 9004)</pre>
                                     </div>
                                 }
 
-                                <div class="d-flex align-items-center gap-3 mb-3">
-                                    <div>
-                                        @if (Model.HasActiveSidecarCert)
-                                        {
-                                            <span class="badge bg-success"><i class="bi bi-patch-check me-1"></i>Certificate issued</span>
-                                        }
-                                        else
-                                        {
-                                            <span class="badge bg-secondary">Not yet enrolled</span>
-                                        }
-                                        @if (Model.EnrollmentTokenIsSet)
-                                        {
-                                            <span class="badge bg-warning text-dark ms-2"><i class="bi bi-key me-1"></i>Token pending use</span>
-                                        }
-                                    </div>
-                                </div>
-
-                                <div class="d-flex gap-2">
+                                <div class="d-flex flex-wrap gap-2">
                                     <form method="post" asp-page-handler="GenerateEnrollmentToken">
                                         <input type="hidden" name="id" value="@c.Id" />
                                         <button type="submit" class="btn btn-outline-primary btn-sm"
                                                 onclick="return !@Model.HasActiveSidecarCert.ToString().ToLower() || confirm('This will revoke the existing certificate when the sidecar next enrolls. Continue?');">
-                                            <i class="bi bi-key me-1"></i>@(Model.HasActiveSidecarCert ? "Re-enroll (generate new token)" : "Generate enrollment token")
+                                            <i class="bi bi-key me-1"></i>@(Model.HasActiveSidecarCert ? "Re-enroll (new token)" : "Generate enrollment token")
                                         </button>
                                     </form>
                                     @if (Model.EnrollmentTokenIsSet)
@@ -864,81 +1273,92 @@ HEALTH_PORT=@(c.SidecarHealthPort > 0 ? c.SidecarHealthPort : 9004)</pre>
                                     }
                                 </div>
                                 <p class="small text-muted mt-2 mb-0">
-                                    The token is single-use and consumed on first sidecar boot. After enrollment, the sidecar's certificate is renewed automatically from the volume.
+                                    The token is single-use and consumed on first sidecar boot. After enrollment, the
+                                    sidecar's certificate is renewed automatically from the volume.
                                 </p>
+
+                                @if (_sidecarUp)
+                                {
+                                    <hr class="my-3" />
+                                    <form method="post" asp-page-handler="Resync">
+                                        <input type="hidden" name="id" value="@c.Id" />
+                                        <button type="submit" class="btn btn-outline-warning btn-sm"
+                                                onclick="return confirm('This will remove ALL peers from the WireGuard® server and re-register them from the database.\nActive VPN sessions will be briefly interrupted.\n\nContinue?');">
+                                            <i class="bi bi-arrow-repeat me-1"></i>Re-sync all peers
+                                        </button>
+                                        <p class="small text-muted mt-2 mb-0">
+                                            Clears every peer on the WireGuard&reg; server and re-registers all active clients
+                                            from the database; updated configs are pushed on the next check-in. Use after a
+                                            sidecar reinstall or when the peer list drifts. Also runs automatically 10 seconds
+                                            after enrollment.
+                                        </p>
+                                    </form>
+                                }
                             </div>
                         </div>
-
-                        @if (Model.HasActiveSidecarCert && Model.SidecarListenPort.HasValue)
-                        {
-                        <!-- Peer re-sync (only when sidecar is enrolled and reachable) -->
-                        <div class="card card-brand mb-3">
-                            <div class="card-header"><i class="bi bi-arrow-repeat me-2"></i>Peer re-sync</div>
-                            <div class="card-body">
-                                <p class="small text-muted mb-3">
-                                    Clears all peers on the WireGuard® server and re-registers every active client from the database.
-                                    Updated configs are pushed to all affected clients on their next check-in.<br>
-                                    Use after a sidecar reinstall or whenever the server peer list gets out of sync.
-                                    This also runs automatically 10 seconds after enrollment.
-                                </p>
-                                <form method="post" asp-page-handler="Resync">
-                                    <input type="hidden" name="id" value="@c.Id" />
-                                    <button type="submit" class="btn btn-outline-warning btn-sm"
-                                            onclick="return confirm('This will remove ALL peers from the WireGuard® server and re-register them from the database.\nActive VPN sessions will be briefly interrupted.\n\nContinue?');">
-                                        <i class="bi bi-arrow-repeat me-1"></i>Re-sync all peers
-                                    </button>
-                                </form>
-                            </div>
-                        </div>
-                        }
-
                     </div>
                 </div>
             }
 
-            <!-- Cross-customer sharing — visible for all Pro customers -->
-            <div class="section-heading section-heading-brand mt-3">
-                <i class="bi bi-share me-1"></i>Cross-customer sharing
-            </div>
-            <div class="card card-brand mb-3">
-                <div class="card-header"><i class="bi bi-share me-2"></i>Cross-customer sidecar sharing</div>
-                <div class="card-body">
-                    <p class="small text-muted mb-3">
-                        Control whether this customer participates in cross-customer profile provisioning.
-                        Both the source and target customer must opt in before an admin can create a cross-customer assignment.
-                    </p>
-                    <form method="post" asp-page-handler="SaveSharing">
-                        <input type="hidden" name="id" value="@c.Id" />
-                        <div class="mb-3">
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" role="switch"
-                                       id="allowShareSidecar" name="allowShareSidecar" value="true"
-                                       @(c.AllowShareSidecar ? "checked" : "") />
-                                <label class="form-check-label fw-semibold" for="allowShareSidecar">
-                                    Allow other customers' clients to use this sidecar
-                                </label>
+            <!-- Cross-customer sharing — applies to all Pro customers; collapsed unless in use -->
+            var _sharingOn = c.AllowShareSidecar || c.AllowReceiveForeignProfiles;
+
+            <div class="card mt-3 mb-0">
+                <div class="card-header d-flex align-items-center" role="button" style="cursor:pointer;"
+                     data-bs-toggle="collapse" data-bs-target="#sharingBody" aria-expanded="@(_sharingOn ? "true" : "false")">
+                    <i class="bi bi-share me-2"></i>Cross-customer sharing
+                    @if (_sharingOn)
+                    {
+                        <span class="badge bg-success ms-2 fw-normal">In use</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-secondary ms-2 fw-normal">Off</span>
+                    }
+                    <i class="bi bi-chevron-down ms-auto text-muted"></i>
+                </div>
+                <div class="collapse @(_sharingOn ? "show" : "")" id="sharingBody">
+                    <div class="card-body">
+                        <p class="small text-muted mb-3">
+                            Controls whether this customer participates in cross-customer profile provisioning.
+                            Both the source and target customer must opt in before an admin can create a cross-customer assignment.
+                        </p>
+                        <form method="post" asp-page-handler="SaveSharing">
+                            <input type="hidden" name="id" value="@c.Id" />
+                            <div class="mb-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" role="switch"
+                                           id="allowShareSidecar" name="allowShareSidecar" value="true"
+                                           @(c.AllowShareSidecar ? "checked" : "") />
+                                    <label class="form-check-label fw-semibold small" for="allowShareSidecar">
+                                        Allow other customers' clients to use this sidecar
+                                    </label>
+                                </div>
+                                <div class="form-text ms-4">
+                                    Admins can provision clients from other customers onto this customer's WireGuard sidecar.
+                                    Only relevant when the Valenius WireGuard server is enabled.
+                                </div>
                             </div>
-                            <div class="form-text ms-4">
-                                Admins can provision clients from other customers onto this customer's WireGuard sidecar. Only relevant when the Valenius WireGuard server is enabled.
+                            <div class="mb-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" role="switch"
+                                           id="allowReceiveForeignProfiles" name="allowReceiveForeignProfiles" value="true"
+                                           @(c.AllowReceiveForeignProfiles ? "checked" : "") />
+                                    <label class="form-check-label fw-semibold small" for="allowReceiveForeignProfiles">
+                                        Allow this customer's clients to receive foreign sidecar profiles
+                                    </label>
+                                </div>
+                                <div class="form-text ms-4">
+                                    Admins can assign profiles from other customers' sidecars to this customer's clients.
+                                </div>
                             </div>
-                        </div>
-                        <div class="mb-3">
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" role="switch"
-                                       id="allowReceiveForeignProfiles" name="allowReceiveForeignProfiles" value="true"
-                                       @(c.AllowReceiveForeignProfiles ? "checked" : "") />
-                                <label class="form-check-label fw-semibold" for="allowReceiveForeignProfiles">
-                                    Allow this customer's clients to receive foreign sidecar profiles
-                                </label>
+                            <div class="d-flex justify-content-end">
+                                <button type="submit" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-floppy me-1"></i>Save sharing settings
+                                </button>
                             </div>
-                            <div class="form-text ms-4">
-                                Admins can assign profiles from other customers' sidecars to this customer's clients.
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-sm">
-                            <i class="bi bi-floppy me-1"></i>Save sharing settings
-                        </button>
-                    </form>
+                        </form>
+                    </div>
                 </div>
             </div>
         }

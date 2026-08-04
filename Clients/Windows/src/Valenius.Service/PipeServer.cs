@@ -126,7 +126,16 @@ public class PipeServer : BackgroundService
                 if (command is null)
                     return;
 
-                _logger.LogInformation("Command {Cmd} from {User}", command.Command, callerUsername);
+                // Status is polled every ~5 s by the tray's popup-closed timer; logging it at
+                // Information level floods the Windows Event Log (hundreds of entries/hour) and
+                // evicts genuinely diagnostic entries (AutoConnect decisions, TunnelVerifier
+                // retries, network-change reverification) within well under an hour on an active
+                // machine — exactly the entries a "Send logs" diagnostic bundle needs. Debug-log
+                // it instead; every other command (state-changing or rare) stays at Information.
+                if (command.Command == CommandType.Status)
+                    _logger.LogDebug("Command {Cmd} from {User}", command.Command, callerUsername);
+                else
+                    _logger.LogInformation("Command {Cmd} from {User}", command.Command, callerUsername);
 
                 var response = await ProcessAsync(command, callerUsername, callerUserSid, ct);
                 var responseJson = JsonSerializer.Serialize(response, ValeniusJsonContext.Default.PipeResponse);
@@ -225,7 +234,11 @@ public class PipeServer : BackgroundService
 
             case CommandType.Connect:
             {
-                if (!await _registration.IsAllowedToConnectAsync())
+                // Standalone (no backend configured at all): skip the authorization gate entirely
+                // — there is nothing to authorize against. The moment a backend URL is set
+                // (CommandType.SetBackendUrl), _backendUrl.IsConfigured flips true and normal
+                // authorization applies from then on, same as any brand-new client.
+                if (_backendUrl.IsConfigured && !await _registration.IsAllowedToConnectAsync())
                 {
                     // Cache is stale or missing — do a live backend check before rejecting.
                     // This lets a just-activated machine connect without waiting for the
@@ -238,7 +251,7 @@ public class PipeServer : BackgroundService
                             ? $"A client named '{Environment.MachineName}' already exists. Ask your administrator to reassign it to this machine."
                             : liveError is not null
                                 ? $"Not authorized (live check failed: {liveError})"
-                                : $"Not authorized — activate key {clientId:D} in the admin panel.");
+                                : $"Not authorized yet — waiting for an admin to activate this device (key {clientId:D}) in the admin panel.");
                     }
                 }
 
@@ -468,6 +481,14 @@ public class PipeServer : BackgroundService
                 return new PipeResponse { Success = true, Error = warning };
             }
 
+            case CommandType.SetStandaloneMode:
+            {
+                // First-run "Use standalone" choice: no backend contacted, just remember the
+                // decision so the tray stops prompting and shows the normal popup.
+                await _registration.SetStandaloneModeAsync(true);
+                return Ok();
+            }
+
             default:
                 return Fail($"Unknown command: {cmd.Command}");
         }
@@ -498,6 +519,7 @@ public class PipeServer : BackgroundService
             IsConnected          = primary is not null,
             IsVerified           = primary?.IsVerified ?? false,
             VerificationFailed   = primary?.VerificationFailed ?? false,
+            FallbackPortUsed     = primary?.FallbackPortUsed ?? 0,
             TunnelName           = primary?.Name,
             ConnectedUser        = primary?.ConnectedUser,
             ConnectedSince       = primary?.ConnectedSince,
@@ -505,6 +527,7 @@ public class PipeServer : BackgroundService
             HasStagedConfig      = _configs.HasStagedConfig(),
             UpdateAvailable      = _updater.GetCachedResult()?.UpdateAvailable ?? false,
             BackendUnconfigured  = !_backendUrl.IsConfigured,
+            StandaloneMode       = _registration.GetStandaloneModeChosen(),
             AvailableProfiles    = OrderProfiles(_configs.GetProfiles(username), serverProfile),
             DeletableProfiles    = _configs.GetDeletableProfiles(username),
             AutoConnectEnabled   = _autoConnect.IsEnabled()

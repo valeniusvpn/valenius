@@ -29,6 +29,8 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<PairingToken>           PairingTokens         => Set<PairingToken>();
     public DbSet<MfaChallenge>           MfaChallenges         => Set<MfaChallenge>();
     public DbSet<ClientTrafficSample>    ClientTrafficSamples  => Set<ClientTrafficSample>();
+    public DbSet<ApiToken>               ApiTokens             => Set<ApiToken>();
+    public DbSet<ManagementEvent>        ManagementEvents      => Set<ManagementEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -136,5 +138,16 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
 
         modelBuilder.Entity<ClientRelease>()
             .HasIndex(r => new { r.Os, r.UploadedAt });
+
+        modelBuilder.Entity<ApiToken>()
+            .HasIndex(t => t.TokenId)
+            .IsUnique();
+        // ON DELETE CASCADE is deliberate, unlike Clients (SET NULL): a customer-bound
+        // management token must die with its customer, never silently widen to fleet-wide.
+        modelBuilder.Entity<ApiToken>()
+            .HasOne(t => t.Customer)
+            .WithMany()
+            .HasForeignKey(t => t.CustomerId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }

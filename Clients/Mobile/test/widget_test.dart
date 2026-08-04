@@ -110,7 +110,7 @@ class _FakeApi implements BackendApi {
   Future<void> reportOffline() async {}
 
   @override
-  Future<void> logEvent(String eventType, String tunnelName) async {}
+  Future<void> logEvent(String eventType, String tunnelName, {String? detail}) async {}
 
   @override
   Future<BackendCheckResult> checkBackend() async =>

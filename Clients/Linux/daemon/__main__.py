@@ -59,6 +59,7 @@ async def _main() -> None:
     monitor = NetworkMonitor(core.on_network_change)
     monitor.start()
     core._net_monitor = monitor
+    startup_autoconnect_task = asyncio.create_task(core.run_startup_auto_connect_check())
 
     # ── IPC server ───────────────────────────────────────────────────────────
     ipc = IpcServer(core)
@@ -91,6 +92,7 @@ async def _main() -> None:
         pass
     heartbeat_task.cancel()
     poll_task.cancel()
+    startup_autoconnect_task.cancel()
     monitor.stop()
     await ipc.stop()
     reg_mod.save(state)

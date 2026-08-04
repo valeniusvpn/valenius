@@ -14,6 +14,7 @@ class ProfileRow extends StatelessWidget {
     required this.verified,
     required this.mfaGated,
     required this.deletable,
+    this.fallbackPort = 0,
     this.onTap,
   });
 
@@ -22,6 +23,11 @@ class ProfileRow extends StatelessWidget {
   final bool verified;
   final bool mfaGated;
   final bool deletable;
+
+  /// The UDP port this connection switched to (typically 443) after the primary port
+  /// produced no successful verification, or 0 if it's still on the primary port
+  /// (docs/design/port-443-fallback.md). Appended to the "Verified"/"Connected" tag.
+  final int fallbackPort;
   final VoidCallback? onTap;
 
   @override
@@ -80,6 +86,7 @@ class ProfileRow extends StatelessWidget {
   }
 
   Widget _tag() {
+    final suffix = fallbackPort > 0 ? ' · $fallbackPort' : '';
     if (verified) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -87,9 +94,9 @@ class ProfileRow extends StatelessWidget {
           color: ValeniusColors.verifiedPill,
           borderRadius: BorderRadius.circular(10),
         ),
-        child: const Text(
-          'Verified',
-          style: TextStyle(
+        child: Text(
+          'Verified$suffix',
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 11,
             fontWeight: FontWeight.w600,
@@ -98,9 +105,9 @@ class ProfileRow extends StatelessWidget {
       );
     }
     if (connected) {
-      return const Text(
-        'Connected',
-        style: TextStyle(color: ValeniusColors.connectedTag, fontSize: 12),
+      return Text(
+        'Connected$suffix',
+        style: const TextStyle(color: ValeniusColors.connectedTag, fontSize: 12),
       );
     }
     return const SizedBox.shrink();

@@ -29,6 +29,9 @@ internal sealed class TrayPopupForm : Form
         public bool    Connected;
         public bool    Verified;
         public bool    VerificationFailed;
+        /// <summary>UDP port this tunnel switched to after the primary port produced no successful
+        /// verification (docs/design/port-443-fallback.md), or 0 if it's still on the primary port.</summary>
+        public int     FallbackPort;
         public string? ProfileName;
         public bool    Enabled   = true;
         public bool    Checked;
@@ -328,6 +331,7 @@ internal sealed class TrayPopupForm : Form
                     Connected          = isActive && !mfaLocked,
                     Verified           = isVerified && !mfaLocked,
                     VerificationFailed = verificationFailed && !isVerified && !mfaLocked,
+                    FallbackPort       = mfaLocked ? 0 : (connectedInfo?.FallbackPortUsed ?? 0),
                     ProfileName = p,
                     MfaLocked   = mfaLocked,
                     Enabled     = !mfaLocked,
@@ -530,10 +534,16 @@ internal sealed class TrayPopupForm : Form
             textX = _padLeft + dotD + Sc(10);
         }
 
-        // reserve space on the right for the verified pill / connected / confirmation-failed tag
-        int tagReserve = r.Verified ? Sc(78)
-                       : r.VerificationFailed ? TextRenderer.MeasureText(TagConfirmationFailed, _fTag).Width + Sc(16)
-                       : (r.Connected ? Sc(72) : 0);
+        // reserve space on the right for the verified pill / connected / confirmation-failed tag.
+        // A tunnel that switched to the UDP fallback port gets " · <port>" appended to whichever
+        // tag it would otherwise show, so the fixed-width estimate no longer applies and the width
+        // is measured instead (docs/design/port-443-fallback.md).
+        var verifiedLabel  = r.FallbackPort > 0 ? $"Verified · {r.FallbackPort}" : "Verified";
+        var connectedLabel = r.FallbackPort > 0 ? $"Connected · {r.FallbackPort}" : "Connected";
+        var failedLabel    = r.FallbackPort > 0 ? $"{TagConfirmationFailed} · {r.FallbackPort}" : TagConfirmationFailed;
+        int tagReserve = r.Verified ? (r.FallbackPort > 0 ? TextRenderer.MeasureText(verifiedLabel, _fTag).Width + Sc(22) : Sc(78))
+                       : r.VerificationFailed ? TextRenderer.MeasureText(failedLabel, _fTag).Width + Sc(16)
+                       : (r.Connected ? (r.FallbackPort > 0 ? TextRenderer.MeasureText(connectedLabel, _fTag).Width + Sc(16) : Sc(72)) : 0);
 
         // name
         var nameColor = r.Enabled ? CProfileText : CDimText;
@@ -544,9 +554,8 @@ internal sealed class TrayPopupForm : Form
 
         if (r.Verified)
         {
-            // green "Verified" pill, right-aligned
-            const string label = "Verified";
-            var ts    = TextRenderer.MeasureText(label, _fTag);
+            // green "Verified" pill, right-aligned (" · <port>" appended if on the fallback port)
+            var ts    = TextRenderer.MeasureText(verifiedLabel, _fTag);
             int pillW = ts.Width + Sc(14);
             int pillH = Sc(18);
             int pillX = _w - _padLeft - pillW;
@@ -559,7 +568,7 @@ internal sealed class TrayPopupForm : Form
 
             using var tb  = new SolidBrush(CVerifiedText);
             using var tsf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            g.DrawString(label, _fTag, tb, pill, tsf);
+            g.DrawString(verifiedLabel, _fTag, tb, pill, tsf);
         }
         else if (r.VerificationFailed)
         {
@@ -567,7 +576,7 @@ internal sealed class TrayPopupForm : Form
             // retrying in the background and this clears on a later success.
             using var tb  = new SolidBrush(CLockAmber);
             using var tsf = new StringFormat { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Far };
-            g.DrawString(TagConfirmationFailed, _fTag, tb,
+            g.DrawString(failedLabel, _fTag, tb,
                 new RectangleF(textX, r.Bounds.Top, _w - textX - _padLeft, r.Bounds.Height), tsf);
         }
         else if (r.Connected)
@@ -575,7 +584,7 @@ internal sealed class TrayPopupForm : Form
             // plain "Connected" tag (green text)
             using var tb  = new SolidBrush(CConnectedTag);
             using var tsf = new StringFormat { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Far };
-            g.DrawString("Connected", _fTag, tb,
+            g.DrawString(connectedLabel, _fTag, tb,
                 new RectangleF(textX, r.Bounds.Top, _w - textX - _padLeft, r.Bounds.Height), tsf);
         }
 
