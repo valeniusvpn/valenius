@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.4
+
+- Fixed the add-on always showing **offline** in the backend even while connected and
+  running. `TrayRunning` (which the backend's presence tracker keys off) could never
+  become true because it's normally set by the tray dispatching an IPC command to the
+  daemon — this add-on has no tray. It now always reports itself online while the
+  daemon is alive.
+- Fixed the backend always showing the vendored source-tree default version (`1.0.0`)
+  for this client, regardless of the installed add-on version. The client now reports
+  the actual add-on version.
+
+## 1.0.3
+
+- Fixed every install of this add-on registering with the backend under the same
+  container hostname, which the backend flagged as a name-collision duplicate on every
+  install after the first. The client now registers as `display_name` (if set) or a
+  generated name unique to that install, instead of the Supervisor-assigned container
+  hostname.
+
 ## 1.0.2
 
 - Fixed `wg-quick up` failing every attempt with `resolvconf: command not found`,

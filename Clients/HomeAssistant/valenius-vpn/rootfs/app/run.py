@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 from pathlib import Path
 
@@ -41,6 +42,14 @@ log = logging.getLogger(__name__)
 # every daemon API that takes a username (ConnectedUser attribution, per-user profile
 # directories) gets this constant instead of a real OS account name.
 USERNAME = 'homeassistant'
+
+# Must be bumped alongside config.yaml's `version:` on every release. There is no
+# build-time stamping step for this add-on the way packaging/build-deb.sh sed-patches
+# daemon/backend.py's VERSION constant for the Linux .deb -- left unpatched, the backend
+# always sees that vendored file's hardcoded source-tree default ('1.0.0') no matter what
+# actually shipped, which makes Admin -> Clients useless for telling installs apart by
+# version. See _install_version_override below for how this gets applied.
+ADDON_VERSION = '1.0.4'
 
 DATA_ROOT = Path('/data')
 CHECK_INTERVAL_S = 20
@@ -72,6 +81,53 @@ def _ensure_persistent_data_dir() -> None:
         return
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(target)
+
+
+def _install_hostname_override(client_id: str, display_name: str | None) -> None:
+    """daemon/core.py (reused verbatim) identifies this client to the backend via
+    socket.gethostname() -- same call the desktop Linux client uses, where it's a
+    meaningful per-machine name. Inside a Home Assistant add-on container it's
+    Supervisor-assigned and IDENTICAL across every physical install of this add-on
+    (e.g. every Pi reports "local-valenius_vpn"), so the backend's Admin -> Clients
+    list can't tell installs apart and flags every one after the first as a name
+    collision (IsDuplicatePending in ClientsController.Register). Fix it here, by
+    monkeypatching the stdlib call, rather than touching the vendored core.py: Python
+    resolves `socket.gethostname` as a fresh attribute lookup on the module object at
+    each call site, so replacing it here reaches core.py's calls too without it ever
+    importing anything from this file.
+
+    Falls back to a name derived from the persisted per-install ClientId (stable
+    across restarts, unique by construction) when no display_name option is set, so
+    two installs never collide even if both are left at defaults.
+    """
+    name = (display_name or '').strip() or f"valenius-ha-{client_id[:8]}"
+    socket.gethostname = lambda: name
+
+
+def _install_version_override(version: str) -> None:
+    """daemon/backend.py's register()/User-Agent code reads the bare name VERSION from
+    its own module globals at call time (same mechanism the hostname override above
+    relies on), so assigning the attribute on the imported module reaches it with no
+    further wiring -- see ADDON_VERSION above for why this is needed at all."""
+    from daemon import backend as backend_mod
+    backend_mod.VERSION = version
+
+
+def _install_always_online_override(state) -> None:
+    """core.py's heartbeat_once/poll_loop send TrayRunning=state.is_tray_running(), which
+    the backend's ClientPresenceTracker uses to decide online/offline (root CLAUDE.md ->
+    "Online presence tracking"). On the desktop Linux client that's a real proxy for "is
+    the interactive tray UI open" -- state.is_tray_running() only flips true once
+    ipc_server.py dispatches a command, which never happens here (this add-on never
+    instantiates IpcServer, see the module docstring). Left alone, is_tray_running()
+    always returns False, so the backend calls MarkOffline on literally every heartbeat
+    and this always-on, headless add-on shows offline no matter what. There is no
+    separate "UI" here to be closed while the daemon runs, so the daemon's own liveness
+    IS the online signal -- honor it unconditionally instead of chasing IPC recency that
+    can never happen. If a heartbeat/poll fails outright, nothing gets sent at all and
+    the backend's own 7-minute presence timeout still catches a genuinely dead instance.
+    """
+    state.is_tray_running = lambda: True
 
 
 def _mqtt_settings(options: dict) -> dict | None:
@@ -140,6 +196,9 @@ async def _main() -> None:
 
     state = DaemonState()
     reg_mod.load(state)
+    _install_hostname_override(str(state.get_client_id()), options.get('display_name'))
+    _install_version_override(ADDON_VERSION)
+    _install_always_online_override(state)
 
     loop = asyncio.get_running_loop()
     backend_url = options.get('backend_url', '')

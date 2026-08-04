@@ -1,5 +1,5 @@
 name: "Valenius VPN"
-version: "1.0.2"
+version: "1.0.4"
 slug: "valenius_vpn"
 description: "Keeps a Valenius WireGuard VPN connected at all times"
 url: "https://github.com/valeniusvpn/valenius/tree/main/Clients/HomeAssistant/valenius-vpn"
