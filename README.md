@@ -5,7 +5,7 @@ Community Edition lets administrators distribute VPN configurations while users 
 **Windows, Linux, macOS, or Android**. After the Windows client is installed, users do not need
 local administrator privileges to connect. Valenius is designed for business and MSP environments.
 
-<img src="Images/valeniusScreenshot1.png" alt="Valenius client showing connected VPN profiles" width="420">
+<img src="https://www.valenius.com/images/screenshots/dashboard-full.webp" alt="Valenius admin dashboard" width="800">
 
 ## Quick Start
 
