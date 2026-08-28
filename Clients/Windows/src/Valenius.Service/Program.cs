@@ -75,6 +75,7 @@ IHost host = Host.CreateDefaultBuilder(args)
         // PendingConnect alike — see TunnelVerifier's doc comment for why this must be one
         // implementation, not one per connect path.
         services.AddSingleton<TunnelVerifier>();
+        services.AddSingleton<ServiceRestarter>();
         services.AddSingleton<ClientRegistrationService>();
 
         // Registered FIRST so its StartAsync runs before any other hosted service — repairs the

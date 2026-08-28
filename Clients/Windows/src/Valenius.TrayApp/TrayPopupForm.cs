@@ -269,7 +269,9 @@ internal sealed class TrayPopupForm : Form
 
         _rows.Add(new Row { Kind = RowKind.Header, Text = "Valenius" });
 
-        if (status.RegistrationIsActive != true)
+        // Standalone has no backend to register against — RegistrationIsActive is always
+        // false/null there, so it must be excluded here or "Register Client" shows permanently.
+        if (status.RegistrationIsActive != true && !status.StandaloneMode)
             _rows.Add(new Row
             {
                 Kind    = RowKind.Action,
@@ -376,13 +378,17 @@ internal sealed class TrayPopupForm : Form
             OnClick = () => UploadConfigRequested?.Invoke()
         });
 
-        _rows.Add(new Row
-        {
-            Kind    = RowKind.Action,
-            Text    = "Auto Connect",
-            Checked = status.AutoConnectEnabled,
-            OnClick = () => AutoConnectToggled?.Invoke()
-        });
+        // Standalone has no backend to supply an auto-connect profile or trusted networks
+        // (both only ever arrive via AutoConnectManager.UpdateFromBackendAsync, on a heartbeat
+        // standalone never sends) — the toggle would do nothing, so don't offer it.
+        if (!status.StandaloneMode)
+            _rows.Add(new Row
+            {
+                Kind    = RowKind.Action,
+                Text    = "Auto Connect",
+                Checked = status.AutoConnectEnabled,
+                OnClick = () => AutoConnectToggled?.Invoke()
+            });
 
         if (status.UpdateAvailable)
             _rows.Add(new Row

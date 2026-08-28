@@ -39,6 +39,8 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             .HasIndex(c => c.ClientKey)
             .IsUnique()
             .HasFilter("\"ClientKey\" <> ''");
+        modelBuilder.Entity<Client>()
+            .HasIndex(c => c.DeviceId);
         modelBuilder.Entity<ConnectionLog>()
             .HasOne(l => l.Client)
             .WithMany()

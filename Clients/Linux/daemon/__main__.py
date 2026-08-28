@@ -51,7 +51,7 @@ async def _main() -> None:
     from daemon.config_manager import AUTOCONNECT_FILE
     auto_connect = AutoConnectConfig.load(AUTOCONNECT_FILE) or AutoConnectConfig()
 
-    updater = Updater(backend, loop)
+    updater = Updater(backend, loop, state)
     core = DaemonCore(backend, state, wg, auto_connect, updater, loop)
     await core.reconcile_active_tunnels()
 

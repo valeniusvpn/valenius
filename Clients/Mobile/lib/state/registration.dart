@@ -87,16 +87,16 @@ final backendUrlControllerProvider =
 
 /// Backend base URL consumed by the registration controller / backend client. Empty string when
 /// unconfigured (the root gate shows the setup screen instead of mounting the home screen then).
-final backendBaseUrlProvider =
-    Provider<String>((ref) => ref.watch(backendUrlControllerProvider).url ?? '');
+final backendBaseUrlProvider = Provider<String>(
+    (ref) => ref.watch(backendUrlControllerProvider).url ?? '');
 
 final deviceInfoProvider =
     Provider<DeviceInfoSource>((_) => PlatformDeviceInfo());
 
 final pushTokensProvider = Provider<PushTokens>((_) => FcmPushTokens());
 
-final configStoreProvider =
-    Provider<ConfigStore>((ref) => SecureConfigStore(ref.watch(keyStoreProvider)));
+final configStoreProvider = Provider<ConfigStore>(
+    (ref) => SecureConfigStore(ref.watch(keyStoreProvider)));
 
 /// Heartbeat interval. Null disables polling (used by tests so no timer leaks).
 final registrationPollIntervalProvider =
@@ -343,6 +343,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
 
   BackendApi? _api;
   String? _hostname;
+  String? _deviceId;
   Timer? _timer;
   Future<void>? _inFlightRefresh;
   bool _mfaPending = false;
@@ -380,25 +381,30 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   /// a no-op before `start()` has set [_api] (there's no clientKey to report against yet), and
   /// failures are swallowed — the underlying connect/disconnect/verify already succeeded or
   /// failed on its own regardless of whether this report lands.
-  Future<void> logEvent(String eventType, String tunnelName, {String? detail}) async {
+  Future<void> logEvent(String eventType, String tunnelName,
+      {String? detail}) async {
     final api = _api;
     if (api == null) return;
     try {
       await api.logEvent(eventType, tunnelName, detail: detail);
     } catch (e) {
-      DiagnosticsLog.instance.add('logEvent($eventType, $tunnelName) failed: $e');
+      DiagnosticsLog.instance
+          .add('logEvent($eventType, $tunnelName) failed: $e');
     }
   }
 
   Future<void> start() async {
     final identity = await ClientIdentity.ensure(keyStore);
     _hostname = await deviceInfo.deviceName();
+    _deviceId = await deviceInfo.deviceId();
     state = state.copyWith(clientKey: identity.clientKey);
     final api = backendFactory(baseUrl, identity.clientKey);
     // Adopt a previously-rotated API key (persisted) so it survives an app restart; a fresh
     // install has none and uses the built-in key.
     final storedApiKey = await keyStore.read(_apiKeyStorageKey);
-    if (storedApiKey != null && storedApiKey.isNotEmpty) api.setApiKey(storedApiKey);
+    if (storedApiKey != null && storedApiKey.isNotEmpty) {
+      api.setApiKey(storedApiKey);
+    }
     _api = api;
     await Future<void>.delayed(_initialCheckDelay);
     await refresh();
@@ -433,7 +439,11 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     if (api == null) return;
     // Pairing returns the installation's API key — adopt + persist it so all later calls (and the
     // next app launch) authenticate. A keyless device would otherwise stay unauthenticated.
-    final key = await api.redeemPairing(token, hostname: _hostname);
+    final key = await api.redeemPairing(
+      token,
+      hostname: _hostname,
+      deviceId: _deviceId,
+    );
     if (key != null && key.isNotEmpty) {
       api.setApiKey(key);
       await keyStore.write(_apiKeyStorageKey, key);
@@ -497,7 +507,8 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   Future<void> refresh() {
     final existing = _inFlightRefresh;
     if (existing != null) return existing;
-    final future = _refreshWithRetry().whenComplete(() => _inFlightRefresh = null);
+    final future =
+        _refreshWithRetry().whenComplete(() => _inFlightRefresh = null);
     _inFlightRefresh = future;
     return future;
   }
@@ -505,13 +516,14 @@ class RegistrationController extends StateNotifier<RegistrationState> {
   Future<void> _refreshWithRetry() async {
     final api = _api;
     if (api == null) return;
-    for (var attempt = 0; ; attempt++) {
+    for (var attempt = 0;; attempt++) {
       try {
         final knownProfiles =
             (await configStore.list()).map((p) => p.name).toList();
         final resp = await api.register(
           trayRunning: true,
           hostname: _hostname,
+          deviceId: _deviceId,
           profiles: knownProfiles,
         );
         // Backend key rotation: adopt + persist the new key so subsequent requests (and the
@@ -536,7 +548,8 @@ class RegistrationController extends StateNotifier<RegistrationState> {
         });
         onRemoteLanCidrs({
           for (final e in resp.remoteLanCidrsByProfile)
-            if (e.profileName.isNotEmpty && e.cidrs.isNotEmpty) e.profileName: e.cidrs,
+            if (e.profileName.isNotEmpty && e.cidrs.isNotEmpty)
+              e.profileName: e.cidrs,
         });
         _mfaPending = resp.mfaRequired || resp.mfaEnrollmentOpen;
         onMfaState(MfaState(
@@ -614,8 +627,7 @@ class RegistrationController extends StateNotifier<RegistrationState> {
     // Snapshot before any writes below, so a config that's both added and later
     // re-provisioned within the same batch still classifies against what the
     // device actually had before this heartbeat started.
-    final existingNames =
-        (await configStore.list()).map((p) => p.name).toSet();
+    final existingNames = (await configStore.list()).map((p) => p.name).toSet();
 
     for (final c in resp.pendingForeignConfigs) {
       if (await _store(c.fileName, c.content, existingNames)) changed = true;
@@ -633,7 +645,8 @@ class RegistrationController extends StateNotifier<RegistrationState> {
       await configStore.delete(deleteName);
       changed = true;
       onProfileDeleted(deleteName);
-      onProfileChange(ProfileChangeEvent(deleteName, ProfileChangeKind.deleted));
+      onProfileChange(
+          ProfileChangeEvent(deleteName, ProfileChangeKind.deleted));
     }
 
     if (changed) onConfigsChanged();

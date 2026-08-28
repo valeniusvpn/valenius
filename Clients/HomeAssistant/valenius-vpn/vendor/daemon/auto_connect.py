@@ -19,7 +19,6 @@ from typing import Callable, Optional
 log = logging.getLogger(__name__)
 
 _ACTION_COOLDOWN = timedelta(seconds=60)
-_INITIAL_DELAY_S = 15
 _FALLBACK_POLL_S = 300
 
 
@@ -173,6 +172,11 @@ class NetworkMonitor:
     re-verify active tunnels (always) and apply the auto-connect policy (only
     when enabled). Trusted-network evaluation lives in the daemon for the same
     reason.
+
+    Deliberately has no initial startup check of its own — DaemonCore.run_startup_auto_connect_check
+    owns that (it needs auto-connect state to decide whether to retry, which this dumb trigger
+    doesn't have). This monitor only provides the real D-Bus event trigger and the periodic
+    fallback for later, once the daemon is already running.
     """
 
     def __init__(
@@ -223,20 +227,13 @@ class NetworkMonitor:
             bus_name='org.freedesktop.NetworkManager',
         )
 
-        def _initial():
-            self._check()
-            return False
-
         def _periodic():
             self._check()
             return not self._stop.is_set()
 
-        GLib.timeout_add_seconds(_INITIAL_DELAY_S, _initial)
         GLib.timeout_add_seconds(_FALLBACK_POLL_S, _periodic)
         loop.run()
 
     def _run_poll(self) -> None:
-        import time
-        time.sleep(_INITIAL_DELAY_S)
         while not self._stop.wait(timeout=_FALLBACK_POLL_S):
             self._check()

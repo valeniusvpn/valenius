@@ -149,6 +149,10 @@ class IpcServer:
                     # First-run: the user provides the backend DNS (the daemon prepends https://).
                     return await d.cmd_set_backend_url(cmd.BackendDns)
 
+                case CommandType.SetStandaloneMode:
+                    # First-run: the user chose "Use standalone" instead of a backend URL.
+                    return await d.cmd_set_standalone_mode()
+
                 case CommandType.SyncStatus:
                     try:
                         await asyncio.wait_for(

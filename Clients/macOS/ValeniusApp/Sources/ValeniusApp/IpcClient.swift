@@ -83,6 +83,12 @@ enum IpcClient {
         try send(PipeCommand(command: .setBackendUrl, backendDns: dns))
     }
 
+    /// First-run: opt out of ever configuring a backend (local .conf profiles only). Mirrors
+    /// Windows CommandType.SetStandaloneMode.
+    static func setStandaloneMode() throws {
+        try expectOk(send(PipeCommand(command: .setStandaloneMode)))
+    }
+
     /// Best-effort: tells the daemon the app is closing so the backend shows offline promptly.
     static func notifyOffline() {
         _ = try? send(PipeCommand(command: .notifyOffline), timeout: 2)

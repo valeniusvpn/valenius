@@ -21,11 +21,10 @@
     string   periodLabel(string p) => p switch { "1h"=>"Last hour","24h"=>"Last 24 h","7d"=>"Last 7 days","30d"=>"Last 30 days",_=>"All time" };
 }
 
-<div class="d-flex align-items-center gap-2 mb-4">
-    <i class="bi bi-journal-text text-primary" style="font-size:1.4rem;"></i>
-    <h1 class="page-title mb-0">Audit Log</h1>
-    <span class="badge bg-secondary ms-1">@Model.TotalCount entries</span>
-</div>
+<header class="page-header"><div class="page-header-copy">
+    <div class="page-kicker">Governance</div><h1 class="page-title">Audit log <span class="badge bg-secondary align-middle">@Model.TotalCount</span></h1>
+    <p class="page-description density-comfort-only">Trace administrative actions, authentication events and system changes.</p>
+</div></header>
 
 @if (TempData["Success"] is string ok)
 {

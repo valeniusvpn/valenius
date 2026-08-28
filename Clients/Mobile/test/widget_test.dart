@@ -22,6 +22,9 @@ class _MemKeyStore implements KeyStore {
 
 class _FakeDeviceInfo implements DeviceInfoSource {
   @override
+  Future<String?> deviceId() async => 'test-android-id';
+
+  @override
   Future<String> deviceName() async => 'Test Device';
 }
 
@@ -39,7 +42,8 @@ class _FakeConfigStore implements ConfigStore {
   @override
   Future<String?> read(String name) async => '[Interface]\n';
   @override
-  Future<void> save(String name, String config, {bool deletable = false}) async {}
+  Future<void> save(String name, String config,
+      {bool deletable = false}) async {}
   @override
   Future<void> delete(String name) async {}
 }
@@ -60,6 +64,7 @@ class _FakeApi implements BackendApi {
     required bool trayRunning,
     required List<String> profiles,
     String? hostname,
+    String? deviceId,
   }) async =>
       StatusResponse(
         isActive: true,
@@ -98,7 +103,12 @@ class _FakeApi implements BackendApi {
   void setApiKey(String apiKey) {}
 
   @override
-  Future<String?> redeemPairing(String token, {String? hostname}) async => null;
+  Future<String?> redeemPairing(
+    String token, {
+    String? hostname,
+    String? deviceId,
+  }) async =>
+      null;
 
   @override
   Future<bool> confirmMfaEnrollment(String code) async => true;
@@ -110,7 +120,8 @@ class _FakeApi implements BackendApi {
   Future<void> reportOffline() async {}
 
   @override
-  Future<void> logEvent(String eventType, String tunnelName, {String? detail}) async {}
+  Future<void> logEvent(String eventType, String tunnelName,
+      {String? detail}) async {}
 
   @override
   Future<BackendCheckResult> checkBackend() async =>
@@ -197,8 +208,8 @@ void main() {
           deviceInfoProvider.overrideWithValue(_FakeDeviceInfo()),
           pushTokensProvider.overrideWithValue(_FakePushTokens()),
           configStoreProvider.overrideWithValue(_FakeConfigStore()),
-          backendFactoryProvider.overrideWithValue((_, __) =>
-              _FakeApi(pendingDeleteProfileName: 'HomeNet-VPN')),
+          backendFactoryProvider.overrideWithValue(
+              (_, __) => _FakeApi(pendingDeleteProfileName: 'HomeNet-VPN')),
           registrationPollIntervalProvider.overrideWithValue(null),
           connectivityChangesProvider.overrideWithValue(null),
         ],

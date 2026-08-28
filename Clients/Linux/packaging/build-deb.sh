@@ -30,6 +30,10 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 cp -r "$ROOT/shared"  "$DEST${INSTALL_DIR}/"
 cp -r "$ROOT/daemon"  "$DEST${INSTALL_DIR}/"
 cp -r "$ROOT/tray"    "$DEST${INSTALL_DIR}/"
+# __pycache__ is git-ignored, so a stray one from local `python3 -m` runs is invisible in
+# git status but still gets swept up by the cp -r above -- strip it so the package never
+# ships stale/wrong-interpreter-version bytecode.
+find "$DEST${INSTALL_DIR}" -name '__pycache__' -type d -exec rm -rf {} +
 cp    "$ROOT/appsettings.json.example" "$DEST${INSTALL_DIR}/"
 cp    "$SCRIPT_DIR/valenius-tray.desktop" "$DEST${INSTALL_DIR}/"
 cp    "$SCRIPT_DIR/valenius-tray.desktop" "$DEST/usr/share/applications/valenius.desktop"

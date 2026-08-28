@@ -18,9 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var aboutWindow: NSWindow?      // single-instance About (Windows invariant)
     private var mfaEnrollWindow: NSWindow?  // single-instance enrollment dialog
     private var backendUrlWindow: NSWindow? // single-instance first-run server-address dialog
-    /// Set once the backend-URL prompt has auto-shown, so the background poll doesn't keep
+    private var setupChoiceWindow: NSWindow? // single-instance first-run "connect vs standalone" dialog
+    /// Set once the setup-choice prompt has auto-shown, so the background poll doesn't keep
     /// reopening it if the user cancels (mirrors Windows TrayApplicationContext._backendPromptAutoShown).
-    private var backendUrlAutoShown = false
+    private var setupChoiceAutoShown = false
     private var cancellables = Set<AnyCancellable>()
 
     private static let pollInterval: TimeInterval = 5
@@ -53,19 +54,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        // Auto-present the first-run server-address dialog once (fresh install/dev-run with no
-        // BackendUrl configured), and dismiss it once a URL is saved. Mirrors Windows
-        // TrayApplicationContext.UpdateUi's BackendUnconfigured handling.
+        // Auto-present the first-run setup-choice dialog once (fresh install/dev-run with no
+        // BackendUrl configured and standalone mode not yet chosen), and dismiss it once
+        // either path resolves the "unconfigured" state. Mirrors Windows
+        // TrayApplicationContext.UpdateUi's BackendUnconfigured/StandaloneMode handling.
+        state.$status
+            .map { $0.backendUnconfigured && !$0.standaloneMode }
+            .removeDuplicates()
+            .sink { [weak self] needsChoice in
+                guard let self else { return }
+                if needsChoice {
+                    if !self.setupChoiceAutoShown { self.showSetupChoice() }
+                } else {
+                    self.closeSetupChoice()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Safety net: close the backend-URL dialog (reached via the setup choice or About's
+        // "Connect to a server") the moment BackendUnconfigured actually clears, regardless of
+        // which path got it there.
         state.$status
             .map(\.backendUnconfigured)
             .removeDuplicates()
             .sink { [weak self] unconfigured in
-                guard let self else { return }
-                if unconfigured {
-                    if !self.backendUrlAutoShown { self.showBackendUrl() }
-                } else {
-                    self.closeBackendUrl()
-                }
+                if !unconfigured { self?.closeBackendUrl() }
             }
             .store(in: &cancellables)
 
@@ -118,10 +131,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePopover(_ sender: Any?) {
         guard let button = statusItem.button else { return }
-        // Not configured yet: the status item's job is to collect the server address, so
-        // prompt for it instead of showing the (empty) popover. Mirrors Windows ShowPopupAsync.
-        if state.status.backendUnconfigured {
-            showBackendUrl()
+        // Not configured yet and standalone hasn't been chosen: the status item's job is to
+        // collect a setup choice, so prompt for it instead of showing the (empty) popover.
+        // A standalone client stays "unconfigured" forever by design, so it falls through to
+        // the normal popover below. Mirrors Windows ShowPopupAsync.
+        if state.status.backendUnconfigured && !state.status.standaloneMode {
+            showSetupChoice()
             return
         }
         if popover.isShown {
@@ -156,9 +171,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let backend = state.status.backendUrl ?? "—"
         let reachable = state.status.backendReachable
+        let standalone = state.status.standaloneMode
         let hosting = NSHostingController(rootView: AboutView(
-            version: appVersion, backendUrl: backend, reachable: reachable,
-            onSendLogs: { [weak self] in self?.state.sendLogs() }
+            version: appVersion, backendUrl: backend, reachable: reachable, standaloneMode: standalone,
+            onSendLogs: { [weak self] in self?.state.sendLogs() },
+            onConnectToServer: { [weak self] in
+                self?.aboutWindow?.close()
+                self?.aboutWindow = nil
+                self?.showBackendUrl()
+            }
         ))
         let window = NSWindow(contentViewController: hosting)
         window.title = "About Valenius"
@@ -208,10 +229,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mfaEnrollWindow = nil
     }
 
+    // MARK: First-run setup choice
+
+    private func showSetupChoice() {
+        setupChoiceAutoShown = true // stop the background poll from queuing more auto-shows
+        if let existing = setupChoiceWindow {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        popover.performClose(nil)
+        let hosting = NSHostingController(rootView: SetupChoiceView(
+            state: state,
+            onConnectToServer: { [weak self] in
+                self?.closeSetupChoice()
+                self?.showBackendUrl()
+            },
+            onStandalone: { [weak self] in
+                self?.closeSetupChoice()
+            }
+        ))
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Set up Valenius"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        setupChoiceWindow = window
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setupChoiceWindow = nil }
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func closeSetupChoice() {
+        setupChoiceWindow?.close()
+        setupChoiceWindow = nil
+    }
+
     // MARK: First-run backend URL setup
 
     private func showBackendUrl() {
-        backendUrlAutoShown = true // stop the background poll from queuing more auto-shows
         if let existing = backendUrlWindow {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

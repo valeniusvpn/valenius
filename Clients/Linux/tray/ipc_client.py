@@ -145,3 +145,10 @@ def set_backend_url(dns: str) -> Optional[str]:
     if not resp.Success:
         raise IpcError(resp.Error or "Could not save the server address.")
     return resp.Error
+
+
+def set_standalone_mode() -> None:
+    """First-run: the user chose "Use standalone" instead of a backend URL."""
+    resp = _send(PipeCommand(Command=CommandType.SetStandaloneMode))
+    if not resp.Success:
+        raise IpcError(resp.Error or "Could not enable standalone mode.")

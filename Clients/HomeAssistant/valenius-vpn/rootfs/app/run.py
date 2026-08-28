@@ -113,6 +113,23 @@ def _install_version_override(version: str) -> None:
     backend_mod.VERSION = version
 
 
+def _install_platform_override() -> None:
+    """Same monkeypatch mechanism as _install_version_override, for backend.py's
+    PLATFORM constant. Left unpatched, this add-on reports the vendored default
+    'Linux' -- indistinguishable server-side from the desktop Linux client -- which
+    breaks two things: Admin -> Clients shows the generic Ubuntu icon instead of
+    PlatformIcon's dedicated 'homeassistant' case (Client.cs), and worse,
+    Details.cshtml.cs's ReleaseOsForPlatform compares this add-on's own
+    Supervisor-managed version number against the unrelated Linux .deb release
+    stream's published version, which is a permanent false "update available" (the
+    two products' version numbers were never meant to be comparable). Home Assistant
+    Supervisor owns this add-on's updates via config.yaml's version tag -- see
+    ADDON_VERSION above -- so it must report a platform with no release-stream entry
+    at all, same as the store-updated mobile platforms."""
+    from daemon import backend as backend_mod
+    backend_mod.PLATFORM = 'homeassistant'
+
+
 def _install_always_online_override(state) -> None:
     """core.py's heartbeat_once/poll_loop send TrayRunning=state.is_tray_running(), which
     the backend's ClientPresenceTracker uses to decide online/offline (root CLAUDE.md ->
@@ -198,6 +215,7 @@ async def _main() -> None:
     reg_mod.load(state)
     _install_hostname_override(str(state.get_client_id()), options.get('display_name'))
     _install_version_override(ADDON_VERSION)
+    _install_platform_override()
     _install_always_online_override(state)
 
     loop = asyncio.get_running_loop()

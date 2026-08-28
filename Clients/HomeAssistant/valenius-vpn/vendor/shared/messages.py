@@ -25,6 +25,11 @@ class CommandType(IntEnum):
     MfaEnrollConfirm = 11
     SendLogs = 12
     SetBackendUrl = 13
+    # First-run "Use standalone" choice: no payload — the daemon just persists that the
+    # user opted out of backend setup, so the tray stops prompting and shows the normal
+    # popup (local profiles, no backend contacted) instead of the setup-required block.
+    # Mirrors Windows CommandType.SetStandaloneMode.
+    SetStandaloneMode = 14
 
 
 @dataclass
@@ -98,15 +103,22 @@ class PipeResponse:
 class ConnectedTunnelInfo:
     Name: str = ""
     IsVerified: bool = False
+    VerificationFailed: bool = False
     ConnectedUser: Optional[str] = None
     ConnectedSince: Optional[str] = None
+    # UDP port-443 fallback (docs/design/port-443-fallback.md §5.4): sticky for the life of
+    # the connection once a switch succeeds, 0 if the tunnel is still on its primary port.
+    # Mirrors Windows ConnectedTunnelInfo.FallbackPortUsed.
+    FallbackPortUsed: int = 0
 
     def to_dict(self) -> dict:
         return {
             'Name': self.Name,
             'IsVerified': self.IsVerified,
+            'VerificationFailed': self.VerificationFailed,
             'ConnectedUser': self.ConnectedUser,
             'ConnectedSince': self.ConnectedSince,
+            'FallbackPortUsed': self.FallbackPortUsed,
         }
 
     @staticmethod
@@ -114,8 +126,10 @@ class ConnectedTunnelInfo:
         return ConnectedTunnelInfo(
             Name=d.get('Name', ''),
             IsVerified=d.get('IsVerified', False),
+            VerificationFailed=d.get('VerificationFailed', False),
             ConnectedUser=d.get('ConnectedUser'),
             ConnectedSince=d.get('ConnectedSince'),
+            FallbackPortUsed=d.get('FallbackPortUsed', 0),
         )
 
 
@@ -143,6 +157,10 @@ class TunnelStatus:
     BackendReachable: Optional[bool] = None
     DaemonVersion: Optional[str] = None
     BackendUnconfigured: bool = False
+    # True once the user explicitly chose "Use standalone" at first run. Default false
+    # preserves today's behavior for an old daemon/tray that doesn't know this field yet —
+    # same reasoning as BackendUnconfigured. Mirrors Windows TunnelStatus.StandaloneMode.
+    StandaloneMode: bool = False
 
     def to_json(self) -> str:
         return json.dumps({
@@ -168,6 +186,7 @@ class TunnelStatus:
             'BackendReachable': self.BackendReachable,
             'DaemonVersion': self.DaemonVersion,
             'BackendUnconfigured': self.BackendUnconfigured,
+            'StandaloneMode': self.StandaloneMode,
         })
 
     @staticmethod
@@ -197,6 +216,7 @@ class TunnelStatus:
             BackendReachable=d.get('BackendReachable'),
             DaemonVersion=d.get('DaemonVersion'),
             BackendUnconfigured=d.get('BackendUnconfigured', False),
+            StandaloneMode=d.get('StandaloneMode', False),
         )
 
 

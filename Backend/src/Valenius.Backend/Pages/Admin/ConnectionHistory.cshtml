@@ -11,10 +11,10 @@
     .group-header { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #6c757d; padding: .5rem 0 .3rem; border-bottom: 1px solid #dee2e6; margin-bottom: .5rem; }
 </style>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h1 class="page-title mb-0">Connection History</h1>
-    <small class="text-muted">Latest 500 events</small>
-</div>
+<header class="page-header"><div class="page-header-copy">
+    <div class="page-kicker">Diagnostics</div><h1 class="page-title">Connection history</h1>
+    <p class="page-description density-comfort-only">Investigate the latest 500 connect, disconnect and fallback events across the fleet.</p>
+</div><span class="badge bg-secondary">Latest 500</span></header>
 
 @if (!Model.Logs.Any())
 {

@@ -23,11 +23,13 @@ abstract interface class BackendApi {
     required bool trayRunning,
     required List<String> profiles,
     String? hostname,
+    String? deviceId,
   });
 
   /// POST /api/clients/pairing/redeem — activate + join a customer via a QR code. Returns the
   /// installation's API key (the caller persists it), or null if the backend didn't send one.
-  Future<String?> redeemPairing(String token, {String? hostname});
+  Future<String?> redeemPairing(String token,
+      {String? hostname, String? deviceId});
 
   /// GET /api/clients/pending-config — one-shot fetch of a staged config;
   /// null when none is pending. (The backend clears it on read.)
@@ -97,7 +99,8 @@ class BackendClient implements BackendApi {
 
   final String baseUrl;
   final String clientKey;
-  String apiKey; // mutable so a backend key rotation takes effect without rebuilding the client
+  String
+      apiKey; // mutable so a backend key rotation takes effect without rebuilding the client
   final http.Client _http;
 
   @override
@@ -117,6 +120,7 @@ class BackendClient implements BackendApi {
     required bool trayRunning,
     required List<String> profiles,
     String? hostname,
+    String? deviceId,
   }) async {
     // The app version shown in the admin panel ("Client ver") — every other client sends this
     // on every register call (Windows/Linux/macOS all populate RegisterRequest.Version), but the
@@ -125,24 +129,27 @@ class BackendClient implements BackendApi {
     // APK/IPA's own version, so this always reflects what's really running, same as the About
     // dialog (about_dialog.dart) — not a build-time constant that could go stale.
     final appVersion = (await PackageInfo.fromPlatform()).version;
-    final res = await _http.post(
-      Uri.parse('$baseUrl/api/clients/register'),
-      headers: _jsonHeaders,
-      // HostSid/Username/UserSid are non-nullable on the backend RegisterRequest,
-      // so [ApiController] treats them as required — send empty strings (mobile
-      // has no Windows SID/user concept) or the endpoint returns HTTP 400.
-      body: jsonEncode({
-        'clientKey': clientKey,
-        'hostname': hostname ?? '',
-        'hostSid': '',
-        'username': '',
-        'userSid': '',
-        'trayRunning': trayRunning,
-        'platform': _clientPlatform,
-        'version': appVersion,
-        'profiles': profiles,
-      }),
-    ).timeout(_timeout);
+    final res = await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/register'),
+          headers: _jsonHeaders,
+          // HostSid/Username/UserSid are non-nullable on the backend RegisterRequest,
+          // so [ApiController] treats them as required — send empty strings (mobile
+          // has no Windows SID/user concept) or the endpoint returns HTTP 400.
+          body: jsonEncode({
+            'clientKey': clientKey,
+            'hostname': hostname ?? '',
+            'deviceId': deviceId,
+            'hostSid': '',
+            'username': '',
+            'userSid': '',
+            'trayRunning': trayRunning,
+            'platform': _clientPlatform,
+            'version': appVersion,
+            'profiles': profiles,
+          }),
+        )
+        .timeout(_timeout);
     if (res.statusCode != 200) {
       throw BackendException('register failed: HTTP ${res.statusCode}');
     }
@@ -152,23 +159,29 @@ class BackendClient implements BackendApi {
   }
 
   @override
-  Future<String?> redeemPairing(String token, {String? hostname}) async {
-    final res = await _http.post(
-      Uri.parse('$baseUrl/api/clients/pairing/redeem'),
-      headers: _jsonHeaders,
-      body: jsonEncode({
-        'token': token,
-        'clientKey': clientKey,
-        'hostname': hostname ?? '',
-        'platform': _clientPlatform,
-      }),
-    ).timeout(_timeout);
+  Future<String?> redeemPairing(String token,
+      {String? hostname, String? deviceId}) async {
+    final res = await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/pairing/redeem'),
+          headers: _jsonHeaders,
+          body: jsonEncode({
+            'token': token,
+            'clientKey': clientKey,
+            'hostname': hostname ?? '',
+            'deviceId': deviceId,
+            'platform': _clientPlatform,
+          }),
+        )
+        .timeout(_timeout);
     if (res.statusCode != 200) {
       throw BackendException('pairing failed: HTTP ${res.statusCode}');
     }
     // The backend returns the installation's API key so a keyless device adopts it.
     final body = jsonDecode(res.body);
-    final key = (body is Map && body['apiKey'] is String) ? body['apiKey'] as String : null;
+    final key = (body is Map && body['apiKey'] is String)
+        ? body['apiKey'] as String
+        : null;
     return (key != null && key.isNotEmpty) ? key : null;
   }
 
@@ -188,11 +201,13 @@ class BackendClient implements BackendApi {
 
   @override
   Future<void> registerDevice(String fcmToken) async {
-    final res = await _http.post(
-      Uri.parse('$baseUrl/api/clients/device'),
-      headers: _jsonHeaders,
-      body: jsonEncode({'clientKey': clientKey, 'fcmToken': fcmToken}),
-    ).timeout(_timeout);
+    final res = await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/device'),
+          headers: _jsonHeaders,
+          body: jsonEncode({'clientKey': clientKey, 'fcmToken': fcmToken}),
+        )
+        .timeout(_timeout);
     if (res.statusCode != 200) {
       throw BackendException('device register failed: HTTP ${res.statusCode}');
     }
@@ -200,15 +215,17 @@ class BackendClient implements BackendApi {
 
   @override
   Future<void> approveMfa(int challengeId, int matchedNumber) async {
-    final res = await _http.post(
-      Uri.parse('$baseUrl/api/clients/mfa/approve'),
-      headers: _jsonHeaders,
-      body: jsonEncode({
-        'clientKey': clientKey,
-        'challengeId': challengeId,
-        'matchedNumber': matchedNumber,
-      }),
-    ).timeout(_timeout);
+    final res = await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/mfa/approve'),
+          headers: _jsonHeaders,
+          body: jsonEncode({
+            'clientKey': clientKey,
+            'challengeId': challengeId,
+            'matchedNumber': matchedNumber,
+          }),
+        )
+        .timeout(_timeout);
     if (res.statusCode != 200) {
       throw BackendException('approve failed: HTTP ${res.statusCode}');
     }
@@ -216,47 +233,57 @@ class BackendClient implements BackendApi {
 
   @override
   Future<void> denyMfa(int challengeId) async {
-    await _http.post(
-      Uri.parse('$baseUrl/api/clients/mfa/deny'),
-      headers: _jsonHeaders,
-      body: jsonEncode({'clientKey': clientKey, 'challengeId': challengeId}),
-    ).timeout(_timeout);
+    await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/mfa/deny'),
+          headers: _jsonHeaders,
+          body:
+              jsonEncode({'clientKey': clientKey, 'challengeId': challengeId}),
+        )
+        .timeout(_timeout);
   }
 
   @override
   Future<bool> confirmMfaEnrollment(String code) async {
-    final res = await _http.post(
-      Uri.parse('$baseUrl/api/clients/mfa/enroll-confirm'),
-      headers: _jsonHeaders,
-      body: jsonEncode({'clientKey': clientKey, 'code': code}),
-    ).timeout(_timeout);
+    final res = await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/mfa/enroll-confirm'),
+          headers: _jsonHeaders,
+          body: jsonEncode({'clientKey': clientKey, 'code': code}),
+        )
+        .timeout(_timeout);
     return res.statusCode == 200;
   }
 
   @override
   Future<void> reportOffline() async {
-    await _http.post(
-      Uri.parse('$baseUrl/api/clients/offline'),
-      headers: _jsonHeaders,
-      body: jsonEncode({'clientKey': clientKey}),
-    ).timeout(_timeout);
+    await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/offline'),
+          headers: _jsonHeaders,
+          body: jsonEncode({'clientKey': clientKey}),
+        )
+        .timeout(_timeout);
   }
 
   @override
-  Future<void> logEvent(String eventType, String tunnelName, {String? detail}) async {
-    await _http.post(
-      Uri.parse('$baseUrl/api/clients/event'),
-      headers: _jsonHeaders,
-      body: jsonEncode({
-        'clientKey': clientKey,
-        'eventType': eventType,
-        'username': '',
-        'tunnelName': tunnelName,
-        'lanIp': '',
-        'wanIp': '',
-        'detail': detail ?? '',
-      }),
-    ).timeout(_timeout);
+  Future<void> logEvent(String eventType, String tunnelName,
+      {String? detail}) async {
+    await _http
+        .post(
+          Uri.parse('$baseUrl/api/clients/event'),
+          headers: _jsonHeaders,
+          body: jsonEncode({
+            'clientKey': clientKey,
+            'eventType': eventType,
+            'username': '',
+            'tunnelName': tunnelName,
+            'lanIp': '',
+            'wanIp': '',
+            'detail': detail ?? '',
+          }),
+        )
+        .timeout(_timeout);
   }
 
   @override
@@ -264,9 +291,8 @@ class BackendClient implements BackendApi {
     // Mirrors the Windows tray's About-dialog check: any 2xx from the public
     // /api/version endpoint means the backend is reachable. No API key required.
     try {
-      final res = await _http
-          .get(Uri.parse('$baseUrl/api/version'))
-          .timeout(_timeout);
+      final res =
+          await _http.get(Uri.parse('$baseUrl/api/version')).timeout(_timeout);
       if (res.statusCode >= 200 && res.statusCode < 300) {
         return const BackendCheckResult(
             reachable: true, detail: 'Backend reachable.');
@@ -285,13 +311,13 @@ class BackendClient implements BackendApi {
   @override
   Future<bool> uploadLogs(List<int> gzBytes, String trigger) async {
     try {
-      final req = http.MultipartRequest(
-          'POST', Uri.parse('$baseUrl/api/clients/logs'))
-        ..headers['X-Api-Key'] = apiKey
-        ..fields['clientKey'] = clientKey
-        ..fields['trigger'] = trigger
-        ..files.add(http.MultipartFile.fromBytes('file', gzBytes,
-            filename: 'valenius-logs.log.gz'));
+      final req =
+          http.MultipartRequest('POST', Uri.parse('$baseUrl/api/clients/logs'))
+            ..headers['X-Api-Key'] = apiKey
+            ..fields['clientKey'] = clientKey
+            ..fields['trigger'] = trigger
+            ..files.add(http.MultipartFile.fromBytes('file', gzBytes,
+                filename: 'valenius-logs.log.gz'));
       final res = await req.send().timeout(_timeout);
       return res.statusCode == 200;
     } catch (_) {

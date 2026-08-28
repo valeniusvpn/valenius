@@ -129,6 +129,19 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// First-run: opt out of ever configuring a backend (the setup-choice dialog's "Use
+    /// standalone" button). Mirrors Windows RegistrationManager.SetStandaloneModeAsync.
+    func setStandaloneMode() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            ipcQueue.async { [weak self] in
+                do { try IpcClient.setStandaloneMode() }
+                catch { Task { @MainActor in self?.lastError = "\(error)" } }
+                Task { @MainActor in self?.refresh() }
+                cont.resume()
+            }
+        }
+    }
+
     /// Set the backend server address (first-run setup dialog). Returns nil on success — any
     /// non-fatal advisory (e.g. "saved, but unreachable yet") is posted as a notification
     /// rather than blocking the dialog — or an error message for the dialog to show inline so

@@ -18,6 +18,7 @@ public class ClientRegistrationService : BackgroundService
     private readonly UpdateChecker _updater;
     private readonly ApiKeyProvider _apiKeys;
     private readonly BackendUrlProvider _backendUrl;
+    private readonly ServiceRestarter _restarter;
     private readonly ILogger<ClientRegistrationService> _logger;
 
     /// <summary>Last heartbeat interval received from the backend (minutes). Default 5.</summary>
@@ -34,6 +35,7 @@ public class ClientRegistrationService : BackgroundService
         UpdateChecker updater,
         ApiKeyProvider apiKeys,
         BackendUrlProvider backendUrl,
+        ServiceRestarter restarter,
         ILogger<ClientRegistrationService> logger)
     {
         _httpFactory     = httpFactory;
@@ -46,6 +48,7 @@ public class ClientRegistrationService : BackgroundService
         _updater         = updater;
         _apiKeys         = apiKeys;
         _backendUrl      = backendUrl;
+        _restarter       = restarter;
         _logger          = logger;
     }
 
@@ -523,6 +526,16 @@ public class ClientRegistrationService : BackgroundService
                 // trigger cleanup.
                 _updater.CleanupStaleInstallers();
             }, ct);
+        }
+
+        // Last, and deliberately so: this tears the process down, so anything queued above must
+        // have been started first. The flag is already cleared server-side (one-shot), and the
+        // scheduled task waits a few seconds before stopping us, so this response finishes
+        // processing normally rather than being cut off mid-way.
+        if (result.ServiceRestartRequested)
+        {
+            _logger.LogInformation("Service restart requested by admin — scheduling a restart of the Valenius service.");
+            _restarter.RequestRestart();
         }
     }
 

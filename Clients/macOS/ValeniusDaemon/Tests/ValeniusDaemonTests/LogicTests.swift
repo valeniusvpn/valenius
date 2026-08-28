@@ -92,6 +92,32 @@ final class LogicTests: XCTestCase {
         XCTAssertTrue(uapi.contains("allowed_ip=0.0.0.0/0"))
     }
 
+    // MARK: Port-443 fallback endpoint rewrite
+
+    func testRewriteEndpointPortKeepsHost() {
+        let conf = """
+        [Interface]
+        PrivateKey = aGVsbG8=
+
+        [Peer]
+        PublicKey = d29ybGQ=
+        Endpoint = vpn.example.com:51820
+        AllowedIPs = 0.0.0.0/0
+        """
+        let rewritten = rewriteEndpointPort(conf, port: 443)
+        XCTAssertTrue(rewritten.contains("Endpoint = vpn.example.com:443"))
+        XCTAssertFalse(rewritten.contains("51820"))
+        // Everything else is untouched.
+        XCTAssertTrue(rewritten.contains("PrivateKey = aGVsbG8="))
+        XCTAssertTrue(rewritten.contains("AllowedIPs = 0.0.0.0/0"))
+    }
+
+    func testRewriteEndpointPortHandlesIpv6Host() {
+        let conf = "[Peer]\nEndpoint = [::1]:51820\n"
+        let rewritten = rewriteEndpointPort(conf, port: 443)
+        XCTAssertTrue(rewritten.contains("Endpoint = [::1]:443"))
+    }
+
     func testParseRejectsBadKey() {
         let conf = """
         [Interface]

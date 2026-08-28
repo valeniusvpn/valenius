@@ -393,6 +393,10 @@ public static class OssStartup
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "IsDuplicatePending" BOOLEAN NOT NULL DEFAULT FALSE""");
         await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceId" VARCHAR(128) NULL""");
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_Clients_DeviceId" ON "Clients" ("DeviceId")""");
+        await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DefaultMfaPolicy" INT NOT NULL DEFAULT 0""");
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "MfaSessionLifetimeHours" INT NOT NULL DEFAULT 12""");
@@ -587,6 +591,14 @@ public static class OssStartup
         // service restart. Generic name/column so future client-side repairs can join this same hook.
         await db.Database.ExecuteSqlRawAsync(
             """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingConfigRepair" BOOLEAN NOT NULL DEFAULT FALSE""");
+        // One-shot admin "Restart client service" flag — recovery hatch for a client whose
+        // in-memory tunnel state has gone stale (reports Connected with no tunnel present).
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingServiceRestart" BOOLEAN NOT NULL DEFAULT FALSE""");
+        // Networks reachable behind this client (e.g. a Home Assistant LAN), routed to it via
+        // the sidecar's peer AllowedIPs in addition to its own /32 — see Client.RemoteLanCidrs.
+        await db.Database.ExecuteSqlRawAsync(
+            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "RemoteLanCidrs" VARCHAR(255) NULL""");
         // Client-reported problems it couldn't self-resolve (e.g. the ACL self-heal ran and
         // failed) — surfaced on Admin/Alerts. "Kind" is generic so future failure kinds reuse
         // this same table instead of a new one each time.

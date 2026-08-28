@@ -495,28 +495,29 @@ public class TrayApplicationContext : ApplicationContext
                 return;
             }
 
-            try
+            var content  = await File.ReadAllTextAsync(dialog.FileName);
+            var response = await _pipe.SendAsync(new PipeCommand
             {
-                var content  = await File.ReadAllTextAsync(dialog.FileName);
-                var response = await _pipe.SendAsync(new PipeCommand
-                {
-                    Command           = CommandType.UploadConfig,
-                    ConfigContent     = content,
-                    ProfileName       = profileName,
-                    ShareWithAllUsers = shareAllUsers
-                });
+                Command           = CommandType.UploadConfig,
+                ConfigContent     = content,
+                ProfileName       = profileName,
+                ShareWithAllUsers = shareAllUsers
+            });
 
-                if (!response.Success)
-                    ShowBalloon("Upload failed", response.Error ?? "Unknown error", ToolTipIcon.Error);
-                else if (response.ShareFailed)
-                    ShowBalloon("Valenius", response.Error ?? $"Profile '{profileName}' saved.", ToolTipIcon.Warning);
-                else
-                    ShowBalloon("Valenius", $"Profile '{profileName}' saved.", ToolTipIcon.Info);
-            }
-            catch (Exception ex)
-            {
-                ShowBalloon("Upload failed", ex.Message, ToolTipIcon.Error);
-            }
+            if (!response.Success)
+                ShowBalloon("Upload failed", response.Error ?? "Unknown error", ToolTipIcon.Error);
+            else if (response.ShareFailed)
+                ShowBalloon("Valenius", response.Error ?? $"Profile '{profileName}' saved.", ToolTipIcon.Warning);
+            else
+                ShowBalloon("Valenius", $"Profile '{profileName}' saved.", ToolTipIcon.Info);
+        }
+        catch (Exception ex)
+        {
+            // Was previously caught only around the read/send step -- an exception from the file
+            // dialog, PromptProfileName's Form construction/ShowDialog, or Sanitize/IsValid would
+            // propagate unhandled out of this async void method with no visible balloon and no
+            // caller to observe it, i.e. silently "nothing happens" from the user's perspective.
+            ShowBalloon("Upload failed", ex.Message, ToolTipIcon.Error);
         }
         finally
         {
@@ -695,10 +696,17 @@ public class TrayApplicationContext : ApplicationContext
             AutoScaleMode       = AutoScaleMode.Dpi,
             AutoSize            = true,
             AutoSizeMode        = AutoSizeMode.GrowAndShrink,
+            MinimumSize         = new Size(340, 0),
             AcceptButton        = okBtn,
-            CancelButton        = cancelBtn
+            CancelButton        = cancelBtn,
+            // Shown right after an OpenFileDialog closes; without this it can lose the
+            // foreground/activation to whatever the shell hands focus back to and end up opened
+            // behind other windows -- same reasoning as TrayPopupForm's TopMost, the one dialog in
+            // this app already proven to reliably surface from a tray click.
+            TopMost             = true
         };
         form.Controls.Add(table);
+        form.Load += (_, _) => form.Activate();
         return form.ShowDialog() == DialogResult.OK ? (textBox.Text.Trim(), shareBox.Checked) : null;
     }
 

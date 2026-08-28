@@ -46,6 +46,19 @@ public class UpdateChecker : BackgroundService
             ? $"{backendUrl}/api/version?channel=beta"
             : $"{backendUrl}/api/version";
 
+    /// <summary>
+    /// The base URL to poll for updates: the configured backend when there is one, otherwise
+    /// <see cref="CloudUpdateSource"/> for a client that explicitly chose standalone mode (no
+    /// backend at all — without this fallback such a client would never update). Returns null
+    /// when neither applies (unconfigured and not standalone — mid first-run setup).
+    /// </summary>
+    private string? EffectiveUpdateBaseUrl()
+    {
+        var backendUrl = _backendUrl.Current;
+        if (!string.IsNullOrEmpty(backendUrl)) return backendUrl;
+        return _registration.GetStandaloneModeChosen() ? CloudUpdateSource.BaseUrl : null;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Initial check after a short delay so the service fully starts first
@@ -60,8 +73,8 @@ public class UpdateChecker : BackgroundService
 
     public async Task<VersionCheckResult> CheckAsync(CancellationToken ct = default)
     {
-        var backendUrl = _backendUrl.Current;
-        if (string.IsNullOrEmpty(backendUrl))
+        var backendUrl = EffectiveUpdateBaseUrl();
+        if (backendUrl is null)
             return new VersionCheckResult { CurrentVersion = GetCurrentVersion() };
 
         var manifest = await CreateHttp().GetFromJsonAsync(VersionUrl(backendUrl), ValeniusJsonContext.Default.VersionManifest, ct);
@@ -90,8 +103,8 @@ public class UpdateChecker : BackgroundService
         }
         try
         {
-        var backendUrl = _backendUrl.Current;
-        if (string.IsNullOrEmpty(backendUrl))
+        var backendUrl = EffectiveUpdateBaseUrl();
+        if (backendUrl is null)
             return;
 
         try

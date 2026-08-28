@@ -128,6 +128,28 @@ public static class WireGuardHelper
     }
 
     /// <summary>
+    /// Builds the sidecar-side peer AllowedIPs for a native client: its own tunnel /32 plus
+    /// any networks it fronts (<see cref="Client.RemoteLanCidrs"/>, e.g. a Home Assistant LAN).
+    /// This is the single place that assembles what gets sent to
+    /// <see cref="ISidecarService.AddPeerAsync"/> for a native peer — every call site (initial
+    /// provisioning, re-provisioning, MFA grant issuance) must go through this rather than
+    /// concatenating "{ip}/32" itself, so the three paths can't drift apart. Joined with a bare
+    /// comma (no space) since the value is passed straight through to the sidecar's `wg set
+    /// ... allowed-ips` argument, not parsed as a client .conf line.
+    /// </summary>
+    public static string PeerAllowedIps(string vpnIp, string? remoteLanCidrs)
+    {
+        var parts = new List<string> { $"{vpnIp}/32" };
+        if (!string.IsNullOrWhiteSpace(remoteLanCidrs))
+        {
+            parts.AddRange(remoteLanCidrs
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(p => !parts.Contains(p, StringComparer.OrdinalIgnoreCase)));
+        }
+        return string.Join(",", parts.Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// Ensures the VPN gateway IP is reachable through the tunnel for split-tunnel configs.
     /// When AllowedIPs does NOT cover all IPv4 traffic (i.e. does not contain 0.0.0.0/0),
     /// prepends "gatewayIp/32" so the Phase-2 connectivity probe can reach the server

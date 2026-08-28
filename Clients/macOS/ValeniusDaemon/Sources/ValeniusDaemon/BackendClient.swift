@@ -38,6 +38,12 @@ actor BackendClient {
     private(set) var baseUrl: String
     private var apiKey: String
     private var channel = "stable" // auto-update channel, refreshed from the heartbeat
+    /// True once the user explicitly chose "Use standalone" (no backend at all — see
+    /// `DaemonCore.cmdSetStandaloneMode`). Only ever affects update-checking (`getVersion`,
+    /// `downloadVerified` fall back to `CloudUpdateSource`) — every other request here still
+    /// correctly no-ops against an empty `baseUrl`. Mirrors Windows
+    /// RegistrationManager.GetStandaloneModeChosen.
+    private var standaloneModeChosen = false
     private let session = URLSession(configuration: .ephemeral)
 
     init(baseUrl: String, apiKey: String) {
@@ -101,6 +107,18 @@ actor BackendClient {
 
     func currentApiKey() -> String { apiKey }
 
+    func setStandaloneModeChosen(_ v: Bool) { standaloneModeChosen = v }
+    func getStandaloneModeChosen() -> Bool { standaloneModeChosen }
+
+    /// The base URL to poll for updates: the configured backend when there is one, otherwise
+    /// `CloudUpdateSource` for a client that explicitly chose standalone mode — without this
+    /// fallback such a client would never update. nil when neither applies (unconfigured and
+    /// not standalone — mid first-run setup). Mirrors Windows UpdateChecker.EffectiveUpdateBaseUrl.
+    private var effectiveUpdateBaseUrl: String? {
+        if !baseUrl.isEmpty { return baseUrl }
+        return standaloneModeChosen ? CloudUpdateSource.baseUrl : nil
+    }
+
     func setChannel(_ channel: String?) {
         self.channel = (channel?.lowercased() == "beta") ? "beta" : "stable"
     }
@@ -124,8 +142,12 @@ actor BackendClient {
         }
     }
 
-    private func request(method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 15) async -> [String: Any]? {
-        guard !baseUrl.isEmpty, let url = URL(string: baseUrl + path) else { return nil }
+    private func request(
+        method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 15,
+        baseUrlOverride: String? = nil
+    ) async -> [String: Any]? {
+        let effectiveBase = baseUrlOverride ?? baseUrl
+        guard !effectiveBase.isEmpty, let url = URL(string: effectiveBase + path) else { return nil }
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
@@ -195,18 +217,50 @@ actor BackendClient {
         await request(method: "GET", path: "/api/clients/pending-config?clientKey=\(clientId.uuidString)")
     }
 
+    /// Every profile this Client (i.e. this machine, not a specific OS user) is known to
+    /// have — used only to keep the device-tunnel machine-level config current (see
+    /// `DaemonCore.ensureDeviceTunnelConfig`). Unlike `request`, the response is a JSON
+    /// array, not an object, so this makes its own call. Mirrors Windows
+    /// ClientRegistrationService.EnsureDeviceTunnelConfigAsync.
+    func getProfiles(clientId: UUID) async -> [(fileName: String, content: String)]? {
+        guard !baseUrl.isEmpty,
+              let url = URL(string: baseUrl + "/api/clients/profiles?clientKey=\(clientId.uuidString)") else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "GET"
+        req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
+        req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, response) = try await session.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+            guard let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return nil }
+            return arr.compactMap { dict in
+                let j = JsonObject(dict)
+                guard let fileName = j.string("FileName"), let content = j.string("Content") else { return nil }
+                return (fileName, content)
+            }
+        } catch {
+            log("GET /api/clients/profiles failed: \(error)")
+            return nil
+        }
+    }
+
     /// Per-OS release stream: {version, downloadUrl, sha256, releaseNotes}. macOS is independent
     /// of the Windows/Linux streams. ?channel=beta selects beta (falls back to stable if none).
+    /// Falls back to `CloudUpdateSource` for a standalone client with no backend configured.
     func getVersion() async -> [String: Any]? {
+        guard let base = effectiveUpdateBaseUrl else { return nil }
         var path = "/api/version/macos"
         if channel == "beta" { path += "?channel=beta" }
-        return await request(method: "GET", path: path)
+        return await request(method: "GET", path: path, baseUrlOverride: base)
     }
 
     /// Download `url` to `destination`, verifying its SHA-256 before returning. Throws on
-    /// mismatch (tamper/corruption guard — the update is aborted, never installed).
+    /// mismatch (tamper/corruption guard — the update is aborted, never installed). A relative
+    /// `url` (the normal case — the version manifest's `downloadUrl` is always a path like
+    /// `/api/download/<file>`) resolves against `effectiveUpdateBaseUrl`, so this also works for
+    /// a standalone client's `CloudUpdateSource` fallback.
     func downloadVerified(url: String, expectedSha256: String, to destination: URL) async throws {
-        guard let src = URL(string: url.hasPrefix("http") ? url : baseUrl + url) else {
+        guard let src = URL(string: url.hasPrefix("http") ? url : (effectiveUpdateBaseUrl ?? baseUrl) + url) else {
             throw UpdaterError.badUrl(url)
         }
         var req = URLRequest(url: src, timeoutInterval: 300)

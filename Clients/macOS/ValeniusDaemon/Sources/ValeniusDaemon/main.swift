@@ -23,7 +23,7 @@ try? FileManager.default.createDirectory(
     attributes: [.posixPermissions: 0o700]
 )
 
-let (clientId, wasActive) = RegistrationStore.loadClientId()
+let (clientId, wasActive, wasStandalone) = RegistrationStore.loadClientId()
 let state = DaemonState(clientId: clientId, isActive: wasActive)
 
 let backend = BackendClient(baseUrl: settings.backendUrl, apiKey: settings.apiKey)
@@ -38,6 +38,7 @@ let core = DaemonCore(backend: backend, state: state, configs: configs, engine: 
 // commands, so a Connect can't race reconciliation (matches the Linux ordering). runBlocking
 // keeps main.swift synchronous (no top-level await → no SIGTRAP).
 runBlocking {
+    await backend.setStandaloneModeChosen(wasStandalone)
     await configs.bootstrap()
     await autoConnect.load()
     await core.reconcileActiveTunnels()
@@ -59,6 +60,7 @@ do {
 let heartbeatTask = Task { await core.heartbeatLoop() }
 let pollTask = Task { await core.pollLoop() }
 let updateTask = Task { await core.updateLoop() }
+let autoConnectStartupTask = Task { await core.startupAutoConnectCheck() }
 
 log("Valenius daemon started (ClientId=\(clientId))")
 
@@ -69,6 +71,7 @@ func shutdown() {
     heartbeatTask.cancel()
     pollTask.cancel()
     updateTask.cancel()
+    autoConnectStartupTask.cancel()
     ipc.stop()
     // Best-effort: tell the backend we're going offline so the admin panel updates
     // immediately, instead of waiting for the ~7-minute presence threshold to expire.

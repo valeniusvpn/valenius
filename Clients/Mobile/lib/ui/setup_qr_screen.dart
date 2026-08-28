@@ -33,7 +33,8 @@ class _SetupQrScreenState extends ConsumerState<SetupQrScreen> {
       final decoded = jsonDecode(t);
       if (decoded is Map && decoded['v'] == 1) {
         final url = decoded['url'] is String ? decoded['url'] as String : null;
-        final token = decoded['token'] is String ? decoded['token'] as String : null;
+        final token =
+            decoded['token'] is String ? decoded['token'] as String : null;
         if (url != null || token != null) return (url: url, token: token);
       }
     } catch (_) {
@@ -59,7 +60,9 @@ class _SetupQrScreenState extends ConsumerState<SetupQrScreen> {
       _handled = true;
       setState(() => _status = 'Configuring…');
       try {
-        final url = await ref.read(backendUrlControllerProvider.notifier).set(parsed.url!);
+        final url = await ref
+            .read(backendUrlControllerProvider.notifier)
+            .set(parsed.url!);
         if (url == null) {
           _handled = false;
           setState(() => _status = 'Invalid server address in code');
@@ -73,11 +76,18 @@ class _SetupQrScreenState extends ConsumerState<SetupQrScreen> {
           try {
             final keyStore = ref.read(keyStoreProvider);
             final identity = await ClientIdentity.ensure(keyStore);
-            final hostname = await ref.read(deviceInfoProvider).deviceName();
-            final api = ref.read(backendFactoryProvider)(url, identity.clientKey);
+            final deviceInfo = ref.read(deviceInfoProvider);
+            final hostname = await deviceInfo.deviceName();
+            final deviceId = await deviceInfo.deviceId();
+            final api =
+                ref.read(backendFactoryProvider)(url, identity.clientKey);
             // Pairing returns this installation's API key — persist it so the registration
             // controller (which starts once the home screen mounts) authenticates with it.
-            final apiKey = await api.redeemPairing(parsed.token!, hostname: hostname);
+            final apiKey = await api.redeemPairing(
+              parsed.token!,
+              hostname: hostname,
+              deviceId: deviceId,
+            );
             if (apiKey != null && apiKey.isNotEmpty) {
               await keyStore.write(kClientApiKeyStorageKey, apiKey);
             }
@@ -113,7 +123,8 @@ class _SetupQrScreenState extends ConsumerState<SetupQrScreen> {
             Padding(
               padding: const EdgeInsets.only(bottom: 48),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 decoration: BoxDecoration(
                   color: Colors.black87,
                   borderRadius: BorderRadius.circular(8),

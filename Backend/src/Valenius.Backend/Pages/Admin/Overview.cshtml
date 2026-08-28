@@ -5,7 +5,17 @@
     ViewData["Title"] = "Overview";
 }
 
-<h1 class="page-title">Overview</h1>
+<header class="page-header">
+    <div class="page-header-copy">
+        <div class="page-kicker">Operations</div>
+        <h1 class="page-title">Overview</h1>
+        <p class="page-description density-comfort-only">Fleet health, connectivity and licensing at a glance. Select a metric to jump directly to the affected clients.</p>
+    </div>
+    <div class="page-actions">
+        <a asp-page="Index" class="btn btn-primary"><i class="bi bi-display me-1"></i>Manage clients</a>
+        <a asp-page="ConnectionHistory" class="btn btn-outline-secondary"><i class="bi bi-clock-history me-1"></i>Connection history</a>
+    </div>
+</header>
 
 @if (Model.TotalCustomers == 0)
 {
@@ -64,7 +74,7 @@
     </div>
 
     <div class="col-6 col-md-4 col-xl-3">
-        <div class="card h-100 stat-card">
+        <a asp-page="Index" asp-route-filter="active" class="card h-100 stat-card stat-card-link" aria-label="View active clients">
             <div class="card-body d-flex align-items-center gap-3">
                 <div class="stat-icon-wrap" style="background:rgba(25,135,84,.1);color:#198754;">
                     <i class="bi bi-check-circle-fill"></i>
@@ -74,25 +84,25 @@
                     <div class="stat-label">Active</div>
                 </div>
             </div>
-        </div>
+        </a>
     </div>
 
     <div class="col-6 col-md-4 col-xl-3">
-        <div class="card h-100 stat-card">
+        <a asp-page="Index" asp-route-filter="pending" class="card h-100 stat-card stat-card-link" aria-label="View pending clients">
             <div class="card-body d-flex align-items-center gap-3">
                 <div class="stat-icon-wrap" style="background:rgba(255,193,7,.12);color:#cc9900;">
                     <i class="bi bi-clock-history"></i>
                 </div>
                 <div>
-                    <div class="stat-value" id="stat-pending">@if (Model.PendingClients > 0) {<a asp-page="Index" asp-route-filter="pending" style="color:inherit;text-decoration:none;">@Model.PendingClients</a>} else {@Model.PendingClients}</div>
+                    <div class="stat-value" id="stat-pending">@Model.PendingClients</div>
                     <div class="stat-label">Pending</div>
                 </div>
             </div>
-        </div>
+        </a>
     </div>
 
     <div class="col-6 col-md-4 col-xl-3">
-        <div class="card h-100 stat-card">
+        <a asp-page="Index" asp-route-filter="online" class="card h-100 stat-card stat-card-link" aria-label="View heartbeat-online clients">
             <div class="card-body d-flex align-items-center gap-3">
                 <div class="stat-icon-wrap" style="background:rgba(13,202,240,.1);color:#0dcaf0;">
                     <i class="bi bi-wifi"></i>
@@ -102,11 +112,11 @@
                     <div class="stat-label">Heartbeat online</div>
                 </div>
             </div>
-        </div>
+        </a>
     </div>
 
     <div class="col-6 col-md-4 col-xl-3">
-        <div class="card h-100 stat-card">
+        <a asp-page="Index" asp-route-filter="connected" class="card h-100 stat-card stat-card-link" aria-label="View clients with active WireGuard tunnels">
             <div class="card-body d-flex align-items-center gap-3">
                 <div class="stat-icon-wrap" style="background:rgba(111,66,193,.1);color:#6f42c1;">
                     <i class="bi bi-shield-fill-check"></i>
@@ -116,7 +126,7 @@
                     <div class="stat-label">WG tunnels active</div>
                 </div>
             </div>
-        </div>
+        </a>
     </div>
 
     <div class="col-6 col-md-4 col-xl-3">
@@ -340,25 +350,6 @@
     </div>
 </div>
 
-<!-- Traffic graph -->
-<div class="card mb-4">
-    <div class="card-header d-flex align-items-center gap-2">
-        <i class="bi bi-activity me-1"></i>
-        <span>VPN Traffic</span>
-        <span class="ms-auto d-flex gap-1">
-            <button class="btn btn-sm btn-outline-secondary window-btn active" data-window="60">1 h</button>
-            <button class="btn btn-sm btn-outline-secondary window-btn" data-window="180">3 h</button>
-            <button class="btn btn-sm btn-outline-secondary window-btn" data-window="360">6 h</button>
-        </span>
-    </div>
-    <div class="card-body" style="position:relative;height:280px;">
-        <canvas id="trafficChart"></canvas>
-        <div id="trafficNoData" class="text-muted small text-center d-none" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);">
-            <i class="bi bi-hourglass-split me-1"></i>Collecting data — first reading arrives in ~60 s
-        </div>
-    </div>
-</div>
-
 <style>
     .stat-card { transition: box-shadow .15s; }
     .stat-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.08); }
@@ -371,126 +362,12 @@
     }
     .stat-value { font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
     .stat-label { font-size: .75rem; color: #6c757d; margin-top: .1rem; }
-    .window-btn.active { background: var(--brand-primary); border-color: var(--brand-primary); color: #fff; }
 </style>
 
-<script src="/lib/chart.js/4.4.3/chart.umd.min.js"></script>
 <script>
 (function () {
-    // ── Config ───────────────────────────────────────────────────────────────
-    var STATS_MS      = 15_000;      // how often to refresh stat boxes (cheap DB read)
-    var TRAFFIC_MS    = 60_000;      // how often to poll sidecars for traffic data
-    var windowMinutes = 60;          // default time window (minutes)
-    var MAX_SNAPSHOTS = 400;         // keep enough for 6 h at 1-min intervals
+    var STATS_MS = 15_000;
 
-    // ── Traffic snapshot ring buffer ─────────────────────────────────────────
-    var snapshots = [];   // [{ ts: Date, bytesDown, bytesUp, wgActive }]
-
-    function pushSnapshot(s) {
-        snapshots.push(s);
-        if (snapshots.length > MAX_SNAPSHOTS) snapshots.shift();
-    }
-
-    function snapshotsInWindow() {
-        var cutoff = new Date(Date.now() - windowMinutes * 60_000);
-        return snapshots.filter(function (s) { return s.ts >= cutoff; });
-    }
-
-    // ── Chart setup ──────────────────────────────────────────────────────────
-    var ctx   = document.getElementById('trafficChart').getContext('2d');
-    var noDataEl = document.getElementById('trafficNoData');
-
-    Chart.defaults.font.family = "'Inter', sans-serif";
-    Chart.defaults.font.size   = 11;
-
-    var chart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels:   [],
-            datasets: [
-                {
-                    label:           'Download (KB/s)',
-                    data:            [],
-                    borderColor:     '#0d6efd',
-                    backgroundColor: 'rgba(13,110,253,.07)',
-                    fill:            true,
-                    tension:         0.35,
-                    pointRadius:     2,
-                    borderWidth:     2
-                },
-                {
-                    label:           'Upload (KB/s)',
-                    data:            [],
-                    borderColor:     '#198754',
-                    backgroundColor: 'rgba(25,135,84,.07)',
-                    fill:            true,
-                    tension:         0.35,
-                    pointRadius:     2,
-                    borderWidth:     2
-                }
-            ]
-        },
-        options: {
-            responsive:          true,
-            maintainAspectRatio: false,
-            animation:           { duration: 300 },
-            interaction:         { mode: 'index', intersect: false },
-            plugins: {
-                legend: { position: 'top', labels: { boxWidth: 12, padding: 14 } },
-                tooltip: {
-                    callbacks: {
-                        label: function (ctx) {
-                            return ' ' + ctx.dataset.label.split(' ')[0] + ': ' + ctx.parsed.y.toFixed(2) + ' KB/s';
-                        }
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    ticks: { maxTicksLimit: 8, color: '#6c757d' },
-                    grid:  { color: 'rgba(0,0,0,.04)' }
-                },
-                y: {
-                    beginAtZero: true,
-                    ticks: {
-                        color: '#6c757d',
-                        callback: function (v) { return v.toFixed(1) + ' KB/s'; }
-                    },
-                    grid: { color: 'rgba(0,0,0,.04)' }
-                }
-            }
-        }
-    });
-
-    function rebuildChart() {
-        var win = snapshotsInWindow();
-        if (win.length < 2) {
-            noDataEl.classList.remove('d-none');
-            chart.data.labels   = [];
-            chart.data.datasets[0].data = [];
-            chart.data.datasets[1].data = [];
-            chart.update('none');
-            return;
-        }
-        noDataEl.classList.add('d-none');
-
-        var labels = [], down = [], up = [];
-        for (var i = 1; i < win.length; i++) {
-            var prev = win[i - 1], cur = win[i];
-            var dtSec = (cur.ts - prev.ts) / 1000;
-            if (dtSec <= 0) continue;
-            labels.push(cur.ts.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit', hour12: false }));
-            down.push(((cur.bytesDown - prev.bytesDown) / dtSec / 1024).toFixed(3));
-            up.push(((cur.bytesUp   - prev.bytesUp  ) / dtSec / 1024).toFixed(3));
-        }
-
-        chart.data.labels            = labels;
-        chart.data.datasets[0].data  = down;
-        chart.data.datasets[1].data  = up;
-        chart.update();
-    }
-
-    // ── Stat-box refresh (Stats JSON) ────────────────────────────────────────
     function refreshStats() {
         fetch('@Url.Page("Overview", "StatsJson")')
             .then(function (r) { return r.ok ? r.json() : null; })
@@ -518,67 +395,21 @@
             .catch(function () {});
     }
 
-    // ── Traffic refresh (Traffic JSON) ───────────────────────────────────────
-    function refreshTraffic() {
-        fetch('@Url.Page("Overview", "TrafficJson")')
-            .then(function (r) { return r.ok ? r.json() : null; })
-            .then(function (d) {
-                if (!d) return;
-                pushSnapshot({
-                    ts:        new Date(d.timestampIso),
-                    bytesDown: d.bytesDown,
-                    bytesUp:   d.bytesUp,
-                    wgActive:  d.wgActive
-                });
-                setWgActive(d.wgActive);
-                rebuildChart();
-            })
-            .catch(function () {});
-    }
-
     function setText(id, val) {
         var el = document.getElementById(id);
         if (el) el.textContent = val;
     }
 
     function setPending(val) {
-        var el = document.getElementById('stat-pending');
-        if (!el) return;
-        if (val > 0) {
-            el.innerHTML = '<a href="@Url.Page("Index", new { filter = "pending" })" style="color:inherit;text-decoration:none;">' + val + '</a>';
-        } else {
-            el.textContent = val;
-        }
+        setText('stat-pending', val);
     }
 
     function setWgActive(val) {
-        var el = document.getElementById('stat-wgactive');
-        if (!el) return;
-        if (val > 0) {
-            el.innerHTML = '<a href="@Url.Page("Index", new { filter = "connected" })" style="color:inherit;text-decoration:none;">' + val + '</a>';
-        } else {
-            el.textContent = val;
-        }
+        setText('stat-wgactive', val);
     }
 
-    // ── Time-window buttons ──────────────────────────────────────────────────
-    document.querySelectorAll('.window-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            document.querySelectorAll('.window-btn').forEach(function (b) {
-                b.classList.remove('active');
-            });
-            btn.classList.add('active');
-            windowMinutes = parseInt(btn.dataset.window, 10);
-            rebuildChart();
-        });
-    });
-
-    // ── Initial load + polling ───────────────────────────────────────────────
-    noDataEl.classList.remove('d-none');
     refreshStats();
-    refreshTraffic();
-    setInterval(refreshStats,   STATS_MS);
-    setInterval(refreshTraffic, TRAFFIC_MS);
+    setInterval(refreshStats, STATS_MS);
 
     // ── Hidden: double-click licensee name to trigger an on-demand license check ──
     (function () {

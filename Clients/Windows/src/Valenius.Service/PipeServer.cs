@@ -21,7 +21,6 @@ public class PipeServer : BackgroundService
     private readonly AutoConnectManager _autoConnect;
     private readonly ILogger<PipeServer> _logger;
 
-    private readonly TunnelVerifier _tunnelVerifier;
     private readonly BackendUrlProvider _backendUrl;
 
     public PipeServer(
@@ -32,7 +31,6 @@ public class PipeServer : BackgroundService
         RegistrationManager registration,
         ClientRegistrationService registrationSvc,
         AutoConnectManager autoConnect,
-        TunnelVerifier tunnelVerifier,
         BackendUrlProvider backendUrl,
         ILogger<PipeServer> logger)
     {
@@ -43,7 +41,6 @@ public class PipeServer : BackgroundService
         _registration    = registration;
         _registrationSvc = registrationSvc;
         _autoConnect     = autoConnect;
-        _tunnelVerifier  = tunnelVerifier;
         _backendUrl      = backendUrl;
         _logger          = logger;
     }
@@ -183,6 +180,11 @@ public class PipeServer : BackgroundService
                     {
                         _state.SetConnected(conn.Name, username);
                         _ = _registrationSvc.LogEventAsync("Connect", username, conn.Name, wanIp, ct);
+                        // Same verification as every other connect path — without it a tunnel
+                        // re-established after a config replacement stays unverified (no tray
+                        // check, no backend connected star) until something else re-verifies it.
+                        var reconnected = conn.Name;
+                        _ = Task.Run(() => _registrationSvc.RunPhase2Async(reconnected, ct), ct);
                     }
                 }
 
@@ -305,16 +307,13 @@ public class PipeServer : BackgroundService
                 _state.SetConnected(tunnelName, username);
                 _ = _registrationSvc.LogEventAsync("Connect", username, tunnelName, wanIp, ct);
 
-                // Verification: a sidecar profile with a globally-unique transit network probes
-                // the gateway /health endpoint (falling back to the handshake on failure). Plain
-                // uploaded profiles (and OSS) have no gateway target, so they use the handshake
-                // check only. SkipConnectivityCheck bypasses the gateway probe → handshake.
-                var probe     = _registration.GetGatewayProbe(tunnelName);
-                var skipCheck = _registration.GetSkipConnectivityCheck();
-                if (probe is { } gw && !skipCheck)
-                    _ = Task.Run(() => _tunnelVerifier.RunGatewayVerifyAsync(tunnelName, gw.Ip, gw.Port, ct), ct);
-                else
-                    _ = Task.Run(() => _tunnelVerifier.RunHandshakeVerifyAsync(tunnelName, ct), ct);
+                // Verification runs through the same RunPhase2Async every other connect path uses
+                // (AutoConnect, PendingConnect) — probe selection *and* the upstream "Verified"
+                // report. This used to call TunnelVerifier directly without the report callback,
+                // so a tunnel the user connected from the tray verified locally (green check) but
+                // the backend never learned it and the admin list's connected star stayed off
+                // forever (WgTunnelTracker.IsDisplayConnected). Don't reintroduce a private copy.
+                _ = Task.Run(() => _registrationSvc.RunPhase2Async(tunnelName, ct), ct);
 
                 return Ok();
             }
@@ -349,9 +348,19 @@ public class PipeServer : BackgroundService
                     !string.Equals(connectedUser, username, StringComparison.OrdinalIgnoreCase))
                     return Fail("Not authorized to disconnect another user's tunnel.");
 
+                // "Service does not exist" means the tunnel is already gone — the desired end
+                // state, not a failure. Failing here used to strand the client: if anything
+                // removed the tunnel service behind our back (a failed fallback-port switch,
+                // an external `wireguard.exe /uninstalltunnelservice`, a crashed tunnel service),
+                // TunnelStateManager kept reporting Connected, the tray offered only Disconnect,
+                // and Disconnect kept erroring — leaving no way back to a working tunnel short of
+                // restarting the whole service. Treat it as success and clear the phantom state.
                 var (success, output) = await _wg.DisconnectAsync(tunnelName);
-                if (!success)
+                if (!success && !WireGuardController.IsTunnelAlreadyGone(output))
                     return Fail($"Failed to stop tunnel: {output}");
+                if (!success)
+                    _logger.LogInformation(
+                        "Tunnel '{Tunnel}' was already gone; clearing stale connected state.", tunnelName);
 
                 _state.SetDisconnected(tunnelName);
                 _ = _registrationSvc.LogEventAsync("Disconnect", connectedUser ?? username, tunnelName, ct: ct);

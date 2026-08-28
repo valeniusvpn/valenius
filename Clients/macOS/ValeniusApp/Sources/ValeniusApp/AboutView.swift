@@ -7,7 +7,12 @@ struct AboutView: View {
     let version: String
     let backendUrl: String
     let reachable: Bool?
+    /// True when the user chose "Use standalone" at first run — shows a "Connect to a server"
+    /// action instead of the backend-URL/reachability row. Mirrors Windows AboutForm's
+    /// standalone-mode variant.
+    var standaloneMode: Bool = false
     var onSendLogs: () -> Void
+    var onConnectToServer: () -> Void = {}
 
     @State private var logsSent = false
 
@@ -21,11 +26,23 @@ struct AboutView: View {
                 }
             }
             Divider()
-            HStack(spacing: 8) {
-                Circle().fill(dotColor).frame(width: 9, height: 9)
-                Text(backendUrl).font(.callout).textSelection(.enabled)
+            if standaloneMode {
+                HStack(spacing: 8) {
+                    Image(systemName: "shield.lefthalf.filled").foregroundColor(.secondary)
+                    Text("Running standalone — no server configured").font(.callout)
+                }
+                Button(action: onConnectToServer) {
+                    Label("Connect to a server", systemImage: "server.rack")
+                }
+                Text("Switches to a managed server without losing your local profiles.")
+                    .font(.caption2).foregroundColor(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    Circle().fill(dotColor).frame(width: 9, height: 9)
+                    Text(backendUrl).font(.callout).textSelection(.enabled)
+                }
+                Text(reachableText).font(.caption).foregroundColor(.secondary)
             }
-            Text(reachableText).font(.caption).foregroundColor(.secondary)
             Divider()
             HStack {
                 Button {

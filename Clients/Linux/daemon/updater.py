@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
+from daemon import cloud_update_source
 from daemon.backend import VERSION, BackendClient
+from daemon.state import DaemonState
 
 log = logging.getLogger(__name__)
 
@@ -39,15 +41,32 @@ _UPDATE_DIR = '/var/lib/valenius'
 
 
 class Updater:
-    def __init__(self, backend: BackendClient, loop: asyncio.AbstractEventLoop):
+    def __init__(self, backend: BackendClient, loop: asyncio.AbstractEventLoop, state: DaemonState):
         self._backend = backend
         self._loop = loop
+        self._state = state
         self._applying = False
+
+    def _effective_base_url(self) -> Optional[str]:
+        """Configured backend always wins; falls back to the Stranto-hosted
+        cloud_update_source only when no backend is configured AND the user explicitly
+        chose standalone mode; returns None (skip checking) mid first-run setup, before
+        either choice has been made. Mirrors Windows UpdateChecker.EffectiveUpdateBaseUrl."""
+        if self._backend.is_configured:
+            return self._backend.base_url
+        if self._state.get_standalone_mode_chosen():
+            return cloud_update_source.BASE_URL
+        return None
 
     async def check(self) -> tuple[bool, str, Optional[str], Optional[str]]:
         """Return (update_available, latest_version, url, sha256) from the Linux stream
-        (GET /api/version/linux → {version, downloadUrl, sha256})."""
-        data = await self._backend.get_version()
+        (GET /api/version/linux → {version, downloadUrl, sha256}), against whichever base
+        URL is currently effective (configured backend, or the standalone cloud fallback)."""
+        base = self._effective_base_url()
+        if base is None:
+            return False, VERSION, None, None
+
+        data = await self._backend.get_version_at(base)
         if data is None:
             return False, VERSION, None, None
 
@@ -56,10 +75,10 @@ class Updater:
         sha256 = data.get('sha256') or None
         # The backend returns a root-relative download URL (e.g. "/api/download/foo.deb",
         # see OssStartup.DownloadUrlFor). urllib.urlopen rejects a schemeless URL with
-        # "unknown url type", so resolve it against the backend base first. urljoin
+        # "unknown url type", so resolve it against the effective base first. urljoin
         # leaves an already-absolute URL untouched.
         if url:
-            url = urljoin(self._backend.base_url + '/', url)
+            url = urljoin(base + '/', url)
         available = _version_gt(latest, VERSION) and bool(url) and bool(sha256)
         return available, latest, url, sha256
 

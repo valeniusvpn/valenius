@@ -162,6 +162,27 @@ private func resolveEndpointHost(_ endpoint: String) -> String {
     return "\(String(cString: resolved)):\(portPart)"
 }
 
+/// Rewrites the port in the config's single "Endpoint = host:port" line, keeping the host
+/// unchanged — used only for the port-443 fallback retry (docs/design/port-443-fallback.md):
+/// the in-memory config text handed to `TunnelEngine.up` is never written back to the config
+/// store, so the stored profile keeps its real endpoint and the next connect always starts on
+/// the primary port again. Mirrors the mobile client's `rewriteEndpointPort`
+/// (`Clients/Mobile/lib/config/wg_normalize.dart`).
+func rewriteEndpointPort(_ config: String, port: Int) -> String {
+    var lines = config.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    for i in lines.indices {
+        guard let eq = lines[i].firstIndex(of: "=") else { continue }
+        let key = lines[i][..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+        guard key == "endpoint" else { continue }
+        let value = lines[i][lines[i].index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        guard let colon = value.lastIndex(of: ":") else { continue }
+        let host = value[..<colon]
+        lines[i] = "Endpoint = \(host):\(port)"
+        break
+    }
+    return lines.joined(separator: "\n")
+}
+
 private func base64ToHex(_ b64: String) throws -> String {
     guard let data = Data(base64Encoded: b64), data.count == 32 else {
         throw WireGuardConfig.ParseError.badKey(b64)

@@ -32,6 +32,11 @@ DATA_DIR  = Path('/var/lib/valenius')
 USERS_DIR = DATA_DIR / 'users'
 STAGED_DIR = DATA_DIR / 'staged'
 TEMP_DIR  = DATA_DIR / 'temp'
+# Machine-level (not per-user) config store for the device tunnel — populated whenever the
+# backend enables it, independent of any interactive login. See save_device_tunnel_config /
+# get_device_tunnel_config_path below and DaemonCore._ensure_device_tunnel_config. Mirrors
+# Windows ConfigManager's C:\ProgramData\Valenius\device\.
+DEVICE_DIR = DATA_DIR / 'device'
 AUTOCONNECT_FILE  = DATA_DIR / 'autoconnect.json'
 REGISTRATION_FILE = DATA_DIR / 'registration.json'
 _KEY_FILE  = DATA_DIR / 'master.key'
@@ -90,6 +95,7 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     USERS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     STAGED_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    DEVICE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def init_temp_dir() -> None:
@@ -287,6 +293,38 @@ def get_all_profiles() -> list[str]:
     return sorted(profiles)
 
 
+def _read_stored_content(path: Path) -> str:
+    """Decrypt (or plain-read) a stored config file's content."""
+    if path.name.endswith(_ENC_EXT):
+        return _decrypt(path.read_bytes()).decode('utf-8', 'replace')
+    return path.read_text()
+
+
+def get_all_unmanaged_profiles_with_content() -> list[tuple[str, str, str]]:
+    """(username, profile_name, content) for every locally-stored profile that isn't
+    admin-managed, across all users. Mirrors Windows
+    ConfigManager.GetAllUnmanagedProfilesWithContent -- used by the standalone-mode local-
+    profile transfer (DaemonCore._transfer_local_profiles) when a client that was standalone
+    later configures a backend and activates."""
+    results: list[tuple[str, str, str]] = []
+    if not USERS_DIR.is_dir():
+        return results
+    for user_dir in USERS_DIR.iterdir():
+        if not user_dir.is_dir():
+            continue
+        username = user_dir.name
+        managed = set(_load_managed(username))
+        for p in user_dir.iterdir():
+            name = _profile_name_from_path(p)
+            if not name or name in managed:
+                continue
+            try:
+                results.append((username, name, _read_stored_content(p)))
+            except Exception:
+                pass  # unreadable/corrupt — skip, retried next transfer attempt
+    return results
+
+
 def order_profiles(profiles: list[str], server_profile_name: Optional[str]) -> list[str]:
     """Put the server-preferred profile first (mirrors Windows OrderProfiles)."""
     if not server_profile_name or len(profiles) < 2:
@@ -302,24 +340,45 @@ def order_profiles(profiles: list[str], server_profile_name: Optional[str]) -> l
 
 # ── WireGuard config preparation ──────────────────────────────────────────────
 
-def prepare_config_path(stored_path: Path) -> Path:
+_ENDPOINT_LINE_RE = re.compile(r'^(\s*Endpoint\s*=\s*)([^\s:]+):\d+', re.MULTILINE | re.IGNORECASE)
+
+
+def _rewrite_endpoint_port(content: str, port: int) -> str:
+    return _ENDPOINT_LINE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:{port}", content)
+
+
+def prepare_config_path(stored_path: Path, endpoint_port_override: Optional[int] = None) -> Path:
     """Return a path wg-quick can read. Decrypts to TEMP_DIR if encrypted.
 
     wg-quick reads the config file only during 'up'; the interface stays active
     without it afterward.  Call cleanup_temp_config() after wg-quick up returns.
+
+    endpoint_port_override, when set, rewrites the Endpoint = line's port (host unchanged)
+    in the temp copy only -- the stored file is never touched. Used for the port-443
+    fallback retry (docs/design/port-443-fallback.md §5.1): the canonical config keeps its
+    real endpoint, so reverting is just "connect again normally". Forces a temp copy even
+    for an already-plaintext stored config, since the override must never be persisted.
     """
     if not stored_path.name.endswith(_ENC_EXT):
         # Legacy plain config — still validate before handing it to wg-quick.
-        err = validate_config_content(stored_path.read_text())
+        content = stored_path.read_text()
+        err = validate_config_content(content)
         if err:
             raise ValueError(f"Refusing unsafe config '{stored_path.name}': {err}")
-        return stored_path
-    profile_name = stored_path.name[:-len(_ENC_EXT)]
-    temp_path = TEMP_DIR / (profile_name + _PLAIN_EXT)
-    data = _decrypt(stored_path.read_bytes())
-    err = validate_config_content(data.decode('utf-8', 'replace'))
-    if err:
-        raise ValueError(f"Refusing unsafe config '{profile_name}': {err}")
+        if endpoint_port_override is None:
+            return stored_path
+        profile_name = stored_path.name[:-len(_PLAIN_EXT)] if stored_path.name.endswith(_PLAIN_EXT) else stored_path.stem
+        temp_path = TEMP_DIR / (profile_name + _PLAIN_EXT)
+        data = _rewrite_endpoint_port(content, endpoint_port_override).encode()
+    else:
+        profile_name = stored_path.name[:-len(_ENC_EXT)]
+        temp_path = TEMP_DIR / (profile_name + _PLAIN_EXT)
+        data = _decrypt(stored_path.read_bytes())
+        err = validate_config_content(data.decode('utf-8', 'replace'))
+        if err:
+            raise ValueError(f"Refusing unsafe config '{profile_name}': {err}")
+        if endpoint_port_override is not None:
+            data = _rewrite_endpoint_port(data.decode('utf-8'), endpoint_port_override).encode()
     try:
         if temp_path.exists():
             temp_path.unlink()
@@ -358,6 +417,27 @@ def save_config(username: str, profile_name: str, content: str, managed: bool = 
         existing = _load_managed(username)
         if profile_name not in existing:
             _save_managed(username, existing + [profile_name])
+
+
+def save_device_tunnel_config(profile_name: str, content: str) -> None:
+    """Machine-level (not per-user) encrypted store for the device tunnel — populated from
+    GET /api/clients/profiles whenever the backend enables DeviceTunnelEnabled, independent
+    of any interactive login. Skips the write if content is unchanged. Mirrors Windows
+    ConfigManager.SaveDeviceTunnelConfig."""
+    path = DEVICE_DIR / (profile_name + _ENC_EXT)
+    if path.exists():
+        try:
+            if _decrypt(path.read_bytes()).decode('utf-8', 'replace') == content:
+                return
+        except Exception:
+            pass  # corrupt/unreadable existing copy — fall through and overwrite
+    path.write_bytes(_encrypt(content.encode()))
+    path.chmod(0o600)
+
+
+def get_device_tunnel_config_path(profile_name: str) -> Optional[Path]:
+    path = DEVICE_DIR / (profile_name + _ENC_EXT)
+    return path if path.exists() else None
 
 
 def delete_user_profile(username: str, profile_name: str) -> bool:

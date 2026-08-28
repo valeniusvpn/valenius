@@ -37,6 +37,13 @@ private let verifyBudgetSeconds: TimeInterval = 15
 /// Minimum gap between auto-connect actions, to prevent flapping (mirrors Windows/Linux).
 private let autoActionCooldown: TimeInterval = 60
 
+/// Post-connect verification retry cadence (mirrors Windows TunnelVerifier): probe roughly
+/// every 5s; if nothing succeeds within ~60s, mark VerificationFailed but keep retrying at a
+/// slower cadence for as long as the tunnel stays connected, rather than giving up outright.
+private let verifyFastInterval: TimeInterval = 5
+private let verifyFastWindow: TimeInterval = 60
+private let verifySlowInterval: TimeInterval = 20
+
 actor DaemonCore {
     let backend: BackendClient
     let state: DaemonState
@@ -48,7 +55,10 @@ actor DaemonCore {
     private var netMonitor: NetworkMonitor?
     private var powerMonitor: PowerMonitor?
     private var handlingNetworkChange = false
-    private var lastAutoAction = Date.distantPast
+    /// Per-target auto-connect action cooldown (mirrors Windows AutoConnectService's
+    /// `_lastActionByTarget`) — tracked independently so one target's action never blocks the
+    /// other's in the same check. Keys: "AutoConnect", "DeviceTunnel".
+    private var lastAutoActionByTarget: [String: Date] = [:]
 
     init(backend: BackendClient, state: DaemonState, configs: ConfigManager, engine: TunnelEngine, autoConnect: AutoConnectConfig, updater: Updater) {
         self.backend = backend
@@ -98,6 +108,7 @@ actor DaemonCore {
         var status = await state.buildStatusSnapshot(username: username)
         status.backendUrl = await backend.baseUrl
         status.backendUnconfigured = !(await backend.isConfigured)
+        status.standaloneMode = await backend.getStandaloneModeChosen()
         let serverProfile = await state.getServerProfileName()
         status.availableProfiles = await configs.orderProfiles(configs.profiles(for: username), serverProfileName: serverProfile)
         status.deletableProfiles = await configs.deletableProfiles(for: username)
@@ -116,6 +127,20 @@ actor DaemonCore {
             return .fail("Enter a valid server address, for example vpn.example.com")
         }
         Task { await heartbeatOnce() }
+        return .ok()
+    }
+
+    /// First-run: the user's setup-choice dialog explicitly opts out of ever configuring a
+    /// backend — local `.conf` profiles only (upload/connect/disconnect/delete all work,
+    /// nothing is ever contacted except, optionally, auto-update via `CloudUpdateSource`). No
+    /// payload; persists the choice and stops the app from prompting again. Mirrors Windows
+    /// RegistrationManager.SetStandaloneModeAsync / SetupChoiceForm's "Use standalone".
+    func cmdSetStandaloneMode() async -> PipeResponse {
+        await backend.setStandaloneModeChosen(true)
+        RegistrationStore.save(
+            clientId: await state.clientId, isActive: await state.isRegistrationActive(),
+            standaloneModeChosen: true
+        )
         return .ok()
     }
 
@@ -161,7 +186,10 @@ actor DaemonCore {
     }
 
     func cmdConnect(username: String, profileName: String?) async -> PipeResponse {
-        if !(await state.isAllowedToConnect()) {
+        // No backend configured (standalone, or mid first-run setup) — skip authorization
+        // entirely, there is nothing to authorize against. Mirrors Windows: PipeServer's
+        // Connect handler does the same when `!_backendUrl.IsConfigured`.
+        if await backend.isConfigured, !(await state.isAllowedToConnect()) {
             let (ok, error) = await liveRegister()
             if ok != true {
                 let cid = await state.clientId
@@ -210,18 +238,16 @@ actor DaemonCore {
             return .fail("\(error)")
         }
         let wanIp = await backend.getWanIp()
-        let handle: TunnelHandle
         do {
-            handle = try engine.up(profile: tunnelName, config: content)
+            _ = try engine.up(profile: tunnelName, config: content)
         } catch {
             return .fail("Failed to start tunnel: \(error)")
         }
 
         await state.setConnected(tunnel: tunnelName, user: username)
         let clientId = await state.clientId
-        let iface = handle.iface
         Task { await backend.logEvent(clientId: clientId, eventType: "Connect", username: username, tunnelName: tunnelName, lanIp: getLanIp(), wanIp: wanIp) }
-        Task { await verifyAfterConnect(tunnel: tunnelName, iface: iface) }
+        Task { await verifyAfterConnect(tunnel: tunnelName) }
         return .ok()
     }
 
@@ -295,43 +321,123 @@ actor DaemonCore {
            let cfg = try? WireGuardConfig.parse(content) {
             searchDomains = cfg.searchDomains
         }
-        engine.down(profile: tunnel, iface: nil, searchDomains: searchDomains)
+        // The run marker's iface — without it, engine.down skips teardownNetwork entirely and
+        // the scoped scutil DNS entry (State:/Network/Service/valenius-<iface>/DNS) is orphaned.
+        engine.down(profile: tunnel, iface: engine.iface(for: tunnel), searchDomains: searchDomains)
     }
 
-    /// Post-connect verification (mirrors Linux _verify_after_connect / Windows RunPhase2Async):
+    /// Post-connect verification (mirrors Linux _verify_after_connect / Windows TunnelVerifier):
     /// a sidecar profile with a gateway target probes /health through the tunnel; anything else
     /// (or a failed probe) falls back to a UAPI handshake-age check. `SkipConnectivityCheck`
     /// bypasses the probe and marks verified immediately.
-    private func verifyAfterConnect(tunnel: String, iface: String) async {
+    ///
+    /// Recoverable, not one-shot: probes roughly every 5s; if nothing succeeds within ~60s the
+    /// tunnel is marked `VerificationFailed` (app shows an amber "Confirmation failed" tag) but
+    /// the loop keeps retrying at a slower 20s cadence for as long as the tunnel stays
+    /// connected — a later success still clears the flag and promotes to "Verified". Also owns
+    /// the port-443 fallback retry (docs/design/port-443-fallback.md): once the profile's
+    /// admin-configured trigger window passes with no successful verification and a confirmed
+    /// fallback port is advertised, switches to it once and keeps polling on the same cadence.
+    private func verifyAfterConnect(tunnel: String) async {
         if await state.getSkipConnectivityCheck() {
             await state.setVerified(tunnel: tunnel, viaGateway: false)
             return
         }
-        if let gateway = await state.gatewayProbe(profile: tunnel) {
-            let deadline = Date().addingTimeInterval(verifyBudgetSeconds)
-            if await Verifier.probeGatewayUntil(ip: gateway.ip, port: gateway.port, deadline: deadline) {
-                await state.setVerified(tunnel: tunnel, viaGateway: true)
-                // Mirrors Linux/Windows reporting a "Verified" event upstream — required so the
-                // admin client list's "connected" star (which now demands actual gateway
-                // verification for sidecar clients, not just Connect) ever lights up for macOS.
-                // Deliberately only this gateway-verified branch reports; the handshake fallback
-                // below does not (handshake freshness isn't a reliable enough signal to gate a
-                // display indicator on).
-                let clientId = await state.clientId
-                Task { await backend.logEvent(clientId: clientId, eventType: "Verified", username: "", tunnelName: tunnel) }
+
+        let start = Date()
+        var failedMarked = false
+        var fallbackTried = false
+
+        while await state.isConnected(tunnel: tunnel) {
+            let (ok, viaGateway) = await attemptVerify(tunnel: tunnel)
+            if ok {
+                await state.setVerified(tunnel: tunnel, viaGateway: viaGateway)
+                if viaGateway {
+                    // Mirrors Linux/Windows reporting a "Verified" event upstream — required so
+                    // the admin client list's "connected" star (which now demands actual gateway
+                    // verification for sidecar clients, not just Connect) ever lights up for
+                    // macOS. Deliberately only this branch reports; the handshake fallback does
+                    // not (handshake freshness isn't a reliable enough signal to gate a display
+                    // indicator on).
+                    let clientId = await state.clientId
+                    Task { await backend.logEvent(clientId: clientId, eventType: "Verified", username: "", tunnelName: tunnel) }
+                }
                 return
             }
-        }
-        for _ in 0..<5 {
-            if !(await state.isConnected(tunnel: tunnel)) { return }
-            if let epoch = UapiClient.latestHandshakeEpoch(iface: iface), epoch > 0 {
-                let age = Int(Date().timeIntervalSince1970) - epoch
-                if age < 180 {
-                    await state.setVerified(tunnel: tunnel, viaGateway: false)
-                    return
-                }
+
+            if !fallbackTried, let fb = await state.getFallbackConfig(profile: tunnel),
+               Date().timeIntervalSince(start) >= TimeInterval(fb.triggerSeconds) {
+                fallbackTried = true
+                await trySwitchToFallbackPort(tunnel: tunnel, port: fb.port, triggerSeconds: fb.triggerSeconds)
             }
-            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+
+            if !failedMarked, Date().timeIntervalSince(start) >= verifyFastWindow {
+                failedMarked = true
+                await state.markVerificationFailed(tunnel: tunnel)
+                log("Confirmation failed for tunnel '\(tunnel)' after \(Int(verifyFastWindow))s — still retrying in the background.")
+            }
+
+            try? await Task.sleep(nanoseconds: UInt64(failedMarked ? verifySlowInterval : verifyFastInterval) * 1_000_000_000)
+        }
+    }
+
+    /// Single verification attempt: a gateway target (if this profile has one) probes /health
+    /// once; anything else, or a failed probe, falls back to a single UAPI handshake-age check.
+    /// Returns (ok, viaGateway).
+    private func attemptVerify(tunnel: String) async -> (ok: Bool, viaGateway: Bool) {
+        if let gateway = await state.gatewayProbe(profile: tunnel),
+           await Verifier.probeGatewayHealth(ip: gateway.ip, port: gateway.port) {
+            return (true, true)
+        }
+        return (checkHandshakeFresh(tunnel: tunnel), false)
+    }
+
+    private func checkHandshakeFresh(tunnel: String) -> Bool {
+        guard let iface = engine.iface(for: tunnel),
+              let epoch = UapiClient.latestHandshakeEpoch(iface: iface), epoch > 0 else { return false }
+        return Int(Date().timeIntervalSince1970) - epoch < 180
+    }
+
+    /// Reinstalls `tunnel` against its confirmed UDP fallback port after `triggerSeconds` passed
+    /// with no successful verification. Runs at most once per connect (guarded by the caller's
+    /// `fallbackTried` flag) — a later reconnect always starts back on the primary port. Unlike
+    /// Windows, macOS needs no "wait for the old tunnel service to disappear" step:
+    /// `TunnelEngine` always spawns a fresh utun on `up`, so there's no fixed-name reinstall
+    /// conflict to race. On success, records the switch (app tag) and reports it to the backend
+    /// (best-effort). On failure the tunnel is put back on its primary port — see
+    /// `restorePrimaryPort` — so a failed switch can never cost the client the tunnel it
+    /// already had. Mirrors Windows TunnelVerifier.TrySwitchToFallbackPortAsync.
+    private func trySwitchToFallbackPort(tunnel: String, port: Int, triggerSeconds: Int) async {
+        guard let content = try? await configs.decryptedContentByTunnel(tunnel) else { return }
+        log("No successful verification for tunnel '\(tunnel)' after \(triggerSeconds)s — retrying via UDP fallback port \(port).")
+
+        await tunnelDown(tunnel)
+        let switched = rewriteEndpointPort(content, port: port)
+        do {
+            _ = try engine.up(profile: tunnel, config: switched)
+            await state.markUsedFallbackPort(tunnel: tunnel, port: port)
+            let clientId = await state.clientId
+            Task { await backend.logEvent(clientId: clientId, eventType: "PortFallback", username: "", tunnelName: tunnel) }
+        } catch {
+            logError("Fallback-port reconnect failed for tunnel '\(tunnel)': \(error)")
+            await restorePrimaryPort(tunnel: tunnel, content: content)
+        }
+    }
+
+    /// Puts `tunnel` back on its primary port after a failed fallback-port switch. If even that
+    /// fails, the state is cleared and a Disconnect is reported — a phantom "connected" is worse
+    /// than an honest disconnect, because the app then only offers Disconnect and the user can
+    /// never get back to a working tunnel on their own. Mirrors Windows
+    /// TunnelVerifier.RestorePrimaryPortAsync.
+    private func restorePrimaryPort(tunnel: String, content: String) async {
+        do {
+            _ = try engine.up(profile: tunnel, config: content)
+            log("Restored tunnel '\(tunnel)' on its primary port after the fallback-port attempt failed.")
+        } catch {
+            logError("Could not restore tunnel '\(tunnel)' on its primary port: \(error)")
+            await state.setDisconnected(tunnel: tunnel)
+            let clientId = await state.clientId
+            Task { await backend.logEvent(clientId: clientId, eventType: "Disconnect", username: "ConnectionLost", tunnelName: tunnel) }
         }
     }
 
@@ -393,15 +499,33 @@ actor DaemonCore {
         }
     }
 
-    /// Apply the trusted-network auto-connect/disconnect policy (only when enabled). Targets the
-    /// server/primary tunnel; never tears down manually-connected foreign tunnels.
+    /// Apply the trusted-network auto-connect/disconnect policy to each independently-evaluated
+    /// target (mirrors Windows AutoConnectService.CheckAsync / GetTargets): the generic
+    /// admin-configured profile, and — when the backend's device-tunnel flag is set — the
+    /// customer's own native sidecar profile. Both share the same trusted-network detection;
+    /// neither ever tears down a manually-connected foreign tunnel.
     private func autoConnectAction() async {
-        guard await autoConnect.isEnabled() else { return }
         let networks = await autoConnect.getTrustedNetworks()
         guard !networks.isEmpty else { return }
-        if Date().timeIntervalSince(lastAutoAction) < autoActionCooldown { return }
-
         let inTrusted = TrustedNetworkDetector.isInTrustedNetwork(networks)
+
+        if await autoConnect.isEnabled() {
+            await runGenericAutoConnect(inTrusted: inTrusted)
+        }
+        if await state.getDeviceTunnelEnabled(), let deviceProfile = await state.getServerProfileName() {
+            await runDeviceTunnelAutoConnect(profile: deviceProfile, inTrusted: inTrusted)
+        }
+    }
+
+    /// The original admin-configured auto-connect target: an explicit profile, or (if none is
+    /// configured) the server profile, or (if that's unknown too) "any connected tunnel" /
+    /// "the first available profile" — unchanged from before the device-tunnel target existed.
+    /// The cooldown only advances on a confirmed action, never a failed attempt, so the startup
+    /// retry loop (`startupAutoConnectCheck`) can actually retry rather than self-block.
+    private func runGenericAutoConnect(inTrusted: Bool) async {
+        let label = "AutoConnect"
+        guard Date().timeIntervalSince(lastAutoActionByTarget[label] ?? .distantPast) >= autoActionCooldown else { return }
+
         var serverProfile = await autoConnect.getProfileName()
         if serverProfile == nil { serverProfile = await state.getServerProfileName() }
         let isServerUp: Bool
@@ -413,13 +537,142 @@ actor DaemonCore {
 
         if !isServerUp && !inTrusted {
             log("Auto-connect: outside trusted network, connecting")
-            lastAutoAction = Date()
-            _ = await cmdConnect(username: "AutoConnect", profileName: serverProfile)
+            // Prefer the actual logged-in macOS user (kept fresh by every IPC call — the app
+            // polls Status every 5s) over the "AutoConnect" trigger label — the label isn't
+            // useful on the admin client list's "Last user" column, and it also isn't a real
+            // per-user config directory, so cmdConnect couldn't find the profile without this.
+            let connectedBy = await state.getLastKnownUsername() ?? label
+            if await cmdConnect(username: connectedBy, profileName: serverProfile).success {
+                lastAutoActionByTarget[label] = Date()
+            }
         } else if isServerUp && inTrusted {
             log("Auto-connect: inside trusted network, disconnecting")
-            lastAutoAction = Date()
-            _ = await cmdDisconnect(username: "AutoConnect", profileName: serverProfile)
+            if await cmdDisconnect(username: label, profileName: serverProfile).success {
+                lastAutoActionByTarget[label] = Date()
+            }
         }
+    }
+
+    /// The Windows-parity "device tunnel": the customer's own native sidecar profile
+    /// (`ServerProfileName`), connected automatically before any user ever logs in, gated by
+    /// the backend's `DeviceTunnelEnabled` flag rather than the user-facing AutoConnect toggle.
+    /// Shares the generic target's trusted-network detection above, tracked with its own
+    /// cooldown so one target's action never blocks the other's in the same check. Mirrors
+    /// Windows AutoConnectService's "DeviceTunnel" AutoConnectTarget.
+    private func runDeviceTunnelAutoConnect(profile: String, inTrusted: Bool) async {
+        let label = "DeviceTunnel"
+        guard Date().timeIntervalSince(lastAutoActionByTarget[label] ?? .distantPast) >= autoActionCooldown else { return }
+
+        let isUp = await state.isConnected(tunnel: profile)
+        if !isUp && !inTrusted {
+            log("Device tunnel: outside trusted network, connecting '\(profile)'")
+            if await connectDeviceTunnel(profile: profile) {
+                lastAutoActionByTarget[label] = Date()
+            } else {
+                log("Device tunnel: no stored config for '\(profile)' yet — skipping.")
+            }
+        } else if isUp && inTrusted {
+            log("Device tunnel: inside trusted network, disconnecting '\(profile)'")
+            if await cmdDisconnect(username: label, profileName: profile).success {
+                lastAutoActionByTarget[label] = Date()
+            }
+        }
+    }
+
+    /// Connects the device-tunnel target directly (mirrors Windows
+    /// AutoConnectService.AutoConnectAsync for the DeviceTunnel target): unlike the generic
+    /// auto-connect target above (which reuses `cmdConnect`, gated to a specific OS user's
+    /// config directory), this must work even on a machine nobody has ever logged into, so it
+    /// resolves the config cross-user first (a per-user copy may already exist from a prior
+    /// login / cross-user delivery) and falls back to the machine-level device-tunnel store
+    /// kept current by `ensureDeviceTunnelConfig`. Skips the AllowedIPs/LAN-conflict checks
+    /// `cmdConnect` runs for interactive callers — mirrors Windows, where this path (like
+    /// PendingConnect) is backend/policy-driven, not subject to the interactive guard.
+    private func connectDeviceTunnel(profile: String) async -> Bool {
+        if await state.isConnected(tunnel: profile) { return true }
+
+        let content: String
+        if let crossUser = try? await configs.decryptedContentByTunnel(profile) {
+            content = crossUser
+        } else if let machine = try? await configs.decryptedDeviceTunnelContent(profile: profile) {
+            content = machine
+        } else {
+            return false
+        }
+
+        let wanIp = await backend.getWanIp()
+        do {
+            _ = try engine.up(profile: profile, config: content)
+        } catch {
+            logError("Device tunnel: failed to start tunnel '\(profile)': \(error)")
+            return false
+        }
+
+        let connectedBy = await state.getLastKnownUsername() ?? "DeviceTunnel"
+        await state.setConnected(tunnel: profile, user: connectedBy)
+        let clientId = await state.clientId
+        Task { await backend.logEvent(clientId: clientId, eventType: "Connect", username: connectedBy, tunnelName: profile, lanIp: getLanIp(), wanIp: wanIp) }
+        Task { await verifyAfterConnect(tunnel: profile) }
+        return true
+    }
+
+    /// Keeps the machine-level device-tunnel copy of `profile` current by pulling the same
+    /// authoritative list the admin's per-client "profiles" view uses, and picking out the
+    /// matching entry. Called from every heartbeat/poll while the device tunnel is enabled,
+    /// regardless of whether any OS user is logged in — this is what lets
+    /// `runDeviceTunnelAutoConnect` connect it at boot on a machine that's never been locally
+    /// logged into. Best-effort: does nothing on any failure, leaving the machine copy as it
+    /// was. Mirrors Windows ClientRegistrationService.EnsureDeviceTunnelConfigAsync.
+    private func ensureDeviceTunnelConfig(profile: String) async {
+        let clientId = await state.clientId
+        guard let entries = await backend.getProfiles(clientId: clientId),
+              let match = entries.first(where: { $0.fileName.caseInsensitiveCompare(profile) == .orderedSame })
+        else { return }
+        try? await configs.saveDeviceTunnelConfig(profile: profile, content: match.content)
+    }
+
+    // Retry window for the startup check only (mirrors Windows RunStartupCheckAsync). A network
+    // stack that hasn't fully settled yet (DHCP lease, default route, DNS) right after a boot or
+    // an update-triggered daemon restart can make a single attempt fail transiently — without a
+    // retry here, the only remaining trigger is a genuine network-change event (which won't fire
+    // if the network hasn't actually changed) or the next heartbeat/poll's admin-pushed action,
+    // so an enabled target could sit disconnected for a long time after every restart.
+    private let autoConnectStartupRetryInterval: TimeInterval = 10
+    private let autoConnectStartupAttempts = 6 // ~1 minute total, then fall into the normal reactors.
+
+    /// Retries the auto-connect check for up to ~1 minute right after the daemon starts. Called
+    /// once from `main.swift` as its own Task, in parallel with the heartbeat/poll/update loops.
+    func startupAutoConnectCheck() async {
+        try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
+        for attempt in 1...autoConnectStartupAttempts {
+            await autoConnectAction()
+            guard await isAutoConnectPending() else { return }
+            if attempt < autoConnectStartupAttempts {
+                try? await Task.sleep(nanoseconds: UInt64(autoConnectStartupRetryInterval) * 1_000_000_000)
+            }
+        }
+    }
+
+    /// True if `autoConnectAction` still has something to do for either target — used only to
+    /// decide whether the startup retry loop above should keep going. Mirrors Windows
+    /// IsAutoConnectPending.
+    private func isAutoConnectPending() async -> Bool {
+        let networks = await autoConnect.getTrustedNetworks()
+        guard !networks.isEmpty, !TrustedNetworkDetector.isInTrustedNetwork(networks) else { return false }
+
+        if await autoConnect.isEnabled() {
+            var serverProfile = await autoConnect.getProfileName()
+            if serverProfile == nil { serverProfile = await state.getServerProfileName() }
+            let isUp: Bool
+            if let serverProfile { isUp = await state.isConnected(tunnel: serverProfile) }
+            else { isUp = await state.isConnected() }
+            if !isUp { return true }
+        }
+        if await state.getDeviceTunnelEnabled(), let deviceProfile = await state.getServerProfileName(),
+           !(await state.isConnected(tunnel: deviceProfile)) {
+            return true
+        }
+        return false
     }
 
     /// The utun interface currently backing a tunnel (from the engine's run marker), for
@@ -466,10 +719,21 @@ actor DaemonCore {
         RegistrationStore.save(clientId: await state.clientId, isActive: isActive, lastCheckedUtc: Date())
 
         await state.setHeartbeatInterval(minutes: j.int("HeartbeatIntervalMinutes") ?? 5)
-        await state.setServerProfileName(j.string("ServerProfileName"))
+        let serverProfileName = j.string("ServerProfileName")
+        await state.setServerProfileName(serverProfileName)
         await backend.setChannel(j.string("UpdateChannel"))
         await backend.setApiKey(j.string("ClientApiKey"))
         await state.setSkipConnectivityCheck(j.bool("SkipConnectivityCheck"))
+
+        // Device tunnel (docs/design → root CLAUDE.md "Device tunnel — connect before login"):
+        // gated on the backend flag AND a native profile actually existing. Refresh the
+        // machine-level config copy on every heartbeat/poll, independent of any login, so the
+        // startup auto-connect check can find it even on a machine nobody's logged into yet.
+        let deviceTunnelEnabled = j.bool("DeviceTunnelEnabled") && serverProfileName != nil
+        await state.setDeviceTunnelEnabled(deviceTunnelEnabled)
+        if deviceTunnelEnabled, let serverProfileName {
+            Task { await ensureDeviceTunnelConfig(profile: serverProfileName) }
+        }
 
         // Auto-connect policy (admin value always overwrites `enabled`; user toggle is
         // overwritten next heartbeat). Trusted networks drive the network-change reactor.
@@ -503,6 +767,18 @@ actor DaemonCore {
             }
         await state.setRemoteLanCidrs(lanCidrEntries)
 
+        // Per-profile UDP fallback port + trigger window (docs/design/port-443-fallback.md),
+        // consumed by verifyAfterConnect. Present only once the serving sidecar has confirmed
+        // the redirect is actually active — see DaemonState.setFallbackPorts.
+        let fallbackEntries: [(profileName: String, port: Int, triggerSeconds: Int)] =
+            (j.array("FallbackEndpoints") ?? []).compactMap { raw in
+                guard let dict = raw as? [String: Any] else { return nil }
+                let e = JsonObject(dict)
+                guard let name = e.string("ProfileName"), !name.isEmpty, let port = e.int("Port") else { return nil }
+                return (name, port, e.int("TriggerSeconds") ?? 20)
+            }
+        await state.setFallbackPorts(fallbackEntries)
+
         // MFA state — passed through to the app via buildTunnelStatus; enroll/unlock UI is M5.
         await state.setMfaState(
             required: j.bool("MfaRequired"),
@@ -532,7 +808,12 @@ actor DaemonCore {
         // Backend-initiated connect/disconnect for the server/primary tunnel only.
         if let pendingConnect = j.string("PendingConnect"), !pendingConnect.isEmpty,
            !(await state.isConnected(tunnel: pendingConnect)) {
-            Task { _ = await cmdConnect(username: "PendingConnect", profileName: pendingConnect) }
+            // Same last-known-username preference as auto-connect above — "PendingConnect" is
+            // meaningless on the admin client list and isn't a real per-user config directory.
+            Task {
+                let connectedBy = await state.getLastKnownUsername() ?? "PendingConnect"
+                _ = await cmdConnect(username: connectedBy, profileName: pendingConnect)
+            }
         }
         if let pendingDisconnect = j.string("PendingDisconnect"), !pendingDisconnect.isEmpty,
            await state.isConnected(tunnel: pendingDisconnect) {
@@ -653,6 +934,7 @@ actor DaemonCore {
 
     func dispatch(_ cmd: PipeCommand, username: String) async -> PipeResponse {
         await state.markAppSeen()
+        await state.setLastKnownUsername(username)
         switch cmd.command {
         case .status:
             return .ok(await buildTunnelStatus(username: username))
@@ -713,6 +995,9 @@ actor DaemonCore {
 
         case .setBackendUrl:
             return await cmdSetBackendUrl(dns: cmd.backendDns)
+
+        case .setStandaloneMode:
+            return await cmdSetStandaloneMode()
         }
     }
 

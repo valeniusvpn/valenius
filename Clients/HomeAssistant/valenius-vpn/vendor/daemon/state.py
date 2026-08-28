@@ -33,6 +33,11 @@ class _TunnelEntry:
     since: datetime
     verified: bool = False
     verified_via_gateway: bool = False
+    verification_failed: bool = False
+    # UDP port-443 fallback (docs/design/port-443-fallback.md §5.4): the port a successful
+    # fallback switch reconnected this tunnel on, 0 if still on the primary port. Sticky for
+    # the life of the connection, like Windows' TunnelStateManager.FallbackPortUsed.
+    fallback_port_used: int = 0
 
 
 @dataclass
@@ -72,6 +77,11 @@ class DaemonState:
         # the pre-connect LAN-conflict check to detect the remote network for full-tunnel
         # profiles. Keyed by profile name — see set_remote_lan_cidrs.
         self._remote_lan_cidrs_by_profile: dict[str, list[str]] = {}
+        # Per-profile UDP fallback port + trigger window (seconds), refreshed on every
+        # heartbeat/poll. Present only when the serving sidecar has confirmed the redirect is
+        # actually active (docs/design/port-443-fallback.md §4.4) -- mirrors Windows
+        # RegistrationManager's _fallbackPorts. Keyed by profile name, like remote LAN CIDRs.
+        self._fallback_ports: dict[str, tuple[int, int]] = {}
         self._heartbeat_interval = 5
         self._tray_last_seen: Optional[datetime] = None
         # MFA state — written by heartbeat_once, read by build_tunnel_status
@@ -84,6 +94,18 @@ class DaemonState:
         # None until the first heartbeat/poll/register completes — lets the tray
         # show a neutral "Checking backend..." instead of a false "unreachable".
         self._backend_reachable: Optional[bool] = None
+        # Standalone mode (see registration.py for persistence): once chosen, the tray
+        # stops prompting for a backend URL and hides backend-dependent rows. Loaded
+        # from registration.json at startup, mirrors Windows RegistrationState.
+        self._standalone_mode_chosen = False
+        # One-shot bulk transfer of local unmanaged profiles once a standalone client
+        # later configures a backend and activates. Guards against re-transferring on
+        # every heartbeat once done. Mirrors Windows RegistrationState.ProfilesTransferredToBackend.
+        self._profiles_transferred = False
+        # Device tunnel (see root CLAUDE.md / Windows AutoConnectService): in-memory only,
+        # refreshed on every heartbeat/poll like _server_profile_name — never persisted,
+        # matches Windows RegistrationManager's volatile field.
+        self._device_tunnel_enabled = False
 
     # ── Multi-tunnel state ───────────────────────────────────────────────────
 
@@ -105,6 +127,17 @@ class DaemonState:
             if entry:
                 entry.verified = True
                 entry.verified_via_gateway = via_gateway
+                entry.verification_failed = False
+
+    def set_verification_failed(self, tunnel_name: str) -> None:
+        """Marks that the initial fast verification window elapsed with no success. Not
+        terminal -- verification keeps retrying at a slower cadence afterward (see
+        DaemonCore._verify_after_connect), and a later success still clears this via
+        set_verified. No-op if the tunnel disconnected in the meantime."""
+        with self._lock:
+            entry = self._active.get(tunnel_name)
+            if entry:
+                entry.verification_failed = True
 
     def set_unverified(self, tunnel_name: str) -> None:
         """Clear the verified flag while a network-change re-verify is in flight.
@@ -116,11 +149,20 @@ class DaemonState:
             entry = self._active.get(tunnel_name)
             if entry:
                 entry.verified = False
+                entry.verification_failed = False
 
     def is_verified_via_gateway(self, tunnel_name: str) -> bool:
         with self._lock:
             entry = self._active.get(tunnel_name)
             return bool(entry and entry.verified_via_gateway)
+
+    def mark_used_fallback_port(self, tunnel_name: str, port: int) -> None:
+        """Records that tunnel_name is now connected via its UDP fallback port, for the
+        tray tag (see get_all_connected). No-op if the tunnel disconnected in the meantime."""
+        with self._lock:
+            entry = self._active.get(tunnel_name)
+            if entry:
+                entry.fallback_port_used = port
 
     def is_connected(self, tunnel_name: Optional[str] = None) -> bool:
         with self._lock:
@@ -134,8 +176,10 @@ class DaemonState:
                 ConnectedTunnelInfo(
                     Name=name,
                     IsVerified=entry.verified,
+                    VerificationFailed=entry.verification_failed,
                     ConnectedUser=entry.user,
                     ConnectedSince=entry.since.isoformat(),
+                    FallbackPortUsed=entry.fallback_port_used,
                 )
                 for name, entry in self._active.items()
             ]
@@ -226,6 +270,34 @@ class DaemonState:
         with self._lock:
             return self._backend_reachable
 
+    # ── Standalone mode ──────────────────────────────────────────────────────
+
+    def get_standalone_mode_chosen(self) -> bool:
+        with self._lock:
+            return self._standalone_mode_chosen
+
+    def set_standalone_mode_chosen(self, value: bool) -> None:
+        with self._lock:
+            self._standalone_mode_chosen = value
+
+    def get_profiles_transferred(self) -> bool:
+        with self._lock:
+            return self._profiles_transferred
+
+    def set_profiles_transferred(self, value: bool) -> None:
+        with self._lock:
+            self._profiles_transferred = value
+
+    # ── Device tunnel ────────────────────────────────────────────────────────
+
+    def get_device_tunnel_enabled(self) -> bool:
+        with self._lock:
+            return self._device_tunnel_enabled
+
+    def set_device_tunnel_enabled(self, value: bool) -> None:
+        with self._lock:
+            self._device_tunnel_enabled = value
+
     # ── Tray presence ─────────────────────────────────────────────────────────
 
     def mark_tray_seen(self) -> None:
@@ -294,6 +366,27 @@ class DaemonState:
             if not profile_name:
                 return []
             return list(self._remote_lan_cidrs_by_profile.get(profile_name, []))
+
+    def set_fallback_ports(self, entries: Optional[list[dict]]) -> None:
+        """entries: [{'ProfileName': ..., 'Port': ..., 'TriggerSeconds': ...}] from
+        StatusResponse.FallbackEndpoints. Mirrors Windows RegistrationManager.SetFallbackPorts."""
+        with self._lock:
+            by_profile: dict[str, tuple[int, int]] = {}
+            for entry in entries or []:
+                name = entry.get('ProfileName') or entry.get('profileName')
+                port = entry.get('Port', entry.get('port', 0))
+                trigger = entry.get('TriggerSeconds', entry.get('triggerSeconds', 20))
+                if name and port and port > 0:
+                    by_profile[name] = (port, trigger if trigger and trigger > 0 else 20)
+            self._fallback_ports = by_profile
+
+    def get_fallback_config(self, profile_name: Optional[str]) -> Optional[tuple[int, int]]:
+        """(port, trigger_seconds) advertised for profile_name, or None when no fallback is
+        offered (no customer opt-in, or opted-in but not confirmed active)."""
+        with self._lock:
+            if not profile_name:
+                return None
+            return self._fallback_ports.get(profile_name)
 
     def get_gateway_probe(self, profile: Optional[str]) -> Optional[tuple[str, int]]:
         """Gateway /health target (ip, port) for the server profile, or None.

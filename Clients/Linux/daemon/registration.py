@@ -1,4 +1,4 @@
-"""Persist and restore the client registration state (ClientId, IsActive)."""
+"""Persist and restore the client registration state (ClientId, IsActive, standalone mode)."""
 from __future__ import annotations
 
 import json
@@ -23,6 +23,10 @@ def load(state: DaemonState) -> None:
         if raw_id:
             state.set_client_id(UUID(raw_id))
         state.update_registration(d.get('IsActive', d.get('isActive', False)))
+        state.set_standalone_mode_chosen(d.get('StandaloneModeChosen', d.get('standaloneModeChosen', False)))
+        state.set_profiles_transferred(
+            d.get('ProfilesTransferredToBackend', d.get('profilesTransferredToBackend', False))
+        )
         log.info("Loaded ClientId %s (active=%s)", state.get_client_id(), state.is_registration_active())
     except Exception as e:
         log.warning("Could not read registration.json: %s — generating new client ID", e)
@@ -38,6 +42,8 @@ def _save(state: DaemonState) -> None:
         'ClientId': str(state.get_client_id()),
         'IsActive': state.is_registration_active(),
         'LastCheckedUtc': None,
+        'StandaloneModeChosen': state.get_standalone_mode_chosen(),
+        'ProfilesTransferredToBackend': state.get_profiles_transferred(),
     }
     try:
         REGISTRATION_FILE.parent.mkdir(parents=True, exist_ok=True)

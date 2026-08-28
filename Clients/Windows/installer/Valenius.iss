@@ -1,5 +1,5 @@
 #define MyAppName      "Valenius"
-#define MyAppVersion   "1.17.0"
+#define MyAppVersion   "1.17.3"
 #define MyAppPublisher "Stranto Business Solutions GmbH"
 #define MyAppURL       "https://valenius.stranto.com"
 #define MyServiceExe   "Valenius.Service.exe"

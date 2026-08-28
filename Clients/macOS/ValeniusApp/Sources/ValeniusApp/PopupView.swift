@@ -22,7 +22,7 @@ struct PopupView: View {
 
             if !state.daemonReachable {
                 infoRow("The Valenius service isn't running.", systemImage: "exclamationmark.triangle")
-            } else if status.registrationIsActive != true {
+            } else if status.registrationIsActive != true && !status.standaloneMode {
                 registerRow
             }
 
@@ -189,6 +189,8 @@ struct PopupView: View {
                         state: state,
                         isConnected: connected(profile),
                         isVerified: verified(profile),
+                        verificationFailed: verificationFailed(profile),
+                        fallbackPortUsed: fallbackPortUsed(profile),
                         isDeletable: status.deletableProfiles.contains(profile)
                     )
                 }
@@ -249,6 +251,12 @@ struct PopupView: View {
     private func verified(_ profile: String) -> Bool {
         status.connectedTunnels.first { $0.name == profile }?.isVerified ?? false
     }
+    private func verificationFailed(_ profile: String) -> Bool {
+        status.connectedTunnels.first { $0.name == profile }?.verificationFailed ?? false
+    }
+    private func fallbackPortUsed(_ profile: String) -> Int {
+        status.connectedTunnels.first { $0.name == profile }?.fallbackPortUsed ?? 0
+    }
 }
 
 /// One profile row: click body to connect/disconnect; hover shows a delete × on user-uploaded
@@ -258,7 +266,19 @@ private struct ProfileRow: View {
     @ObservedObject var state: AppState
     let isConnected: Bool
     let isVerified: Bool
+    /// True once the initial ~60s verification window elapsed with no success; not terminal,
+    /// verification keeps retrying in the background. Mirrors Windows
+    /// ConnectedTunnelInfo.VerificationFailed.
+    let verificationFailed: Bool
+    /// The UDP port this tunnel switched to (docs/design/port-443-fallback.md), or 0 if still
+    /// on the primary port. Appended as " · <port>" to whichever tag is shown.
+    let fallbackPortUsed: Int
     let isDeletable: Bool
+
+    /// Matches Windows TrayPopupForm's CLockAmber (RGB 210,160,55).
+    private static let amber = Color(red: 210.0 / 255, green: 160.0 / 255, blue: 55.0 / 255)
+
+    private var portSuffix: String { fallbackPortUsed > 0 ? " · \(fallbackPortUsed)" : "" }
 
     @State private var hovering = false
 
@@ -272,9 +292,13 @@ private struct ProfileRow: View {
             if busy {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
             } else if isVerified {
-                tag("Verified", color: Color(red: 0, green: 0.78, blue: 0.42), filled: true)
+                tag("Verified\(portSuffix)", color: Color(red: 0, green: 0.78, blue: 0.42), filled: true)
+            } else if verificationFailed {
+                // Not an error state — verification keeps retrying in the background and this
+                // clears on a later success. Mirrors Windows' amber "Confirmation failed" tag.
+                tag("Confirmation failed\(portSuffix)", color: Self.amber, filled: false)
             } else if isConnected {
-                tag("Connected", color: Color(red: 0, green: 0.86, blue: 0.45), filled: false)
+                tag("Connected\(portSuffix)", color: Color(red: 0, green: 0.86, blue: 0.45), filled: false)
             }
             if isDeletable && hovering && !busy {
                 Button(action: { state.deleteProfile(profile) }) {
@@ -301,7 +325,7 @@ private struct ProfileRow: View {
                 .foregroundColor(Color(red: 0, green: 0.78, blue: 0.42))
         } else {
             Circle()
-                .fill(isConnected ? Color(red: 0, green: 0.86, blue: 0.45) : Color.gray.opacity(0.6))
+                .fill(verificationFailed ? Self.amber : (isConnected ? Color(red: 0, green: 0.86, blue: 0.45) : Color.gray.opacity(0.6)))
                 .frame(width: 10, height: 10)
         }
     }

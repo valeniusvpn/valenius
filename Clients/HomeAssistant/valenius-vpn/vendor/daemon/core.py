@@ -16,6 +16,7 @@ from shared.messages import (
 )
 
 from daemon import config_manager as configs_mod
+from daemon import registration as reg_mod
 from daemon.auto_connect import AutoConnectConfig, NetworkMonitor, is_in_trusted_network
 from daemon.backend import BackendClient, get_lan_ip
 from daemon.state import DaemonState
@@ -29,8 +30,26 @@ log = logging.getLogger(__name__)
 _REVERIFY_SETTLE_S = 5
 _REVERIFY_BUDGET_S = 15
 
+# Post-connect verification retry loop (mirrors Windows TunnelVerifier): retry every
+# _VERIFY_FAST_INTERVAL_S for the first _VERIFY_FAST_WINDOW_S; if nothing has succeeded by
+# then, mark the tunnel's confirmation as failed (tray shows an amber tag) but keep retrying
+# every _VERIFY_SLOW_INTERVAL_S for as long as the tunnel stays connected, instead of giving
+# up permanently after a fixed budget.
+_VERIFY_ATTEMPT_BUDGET_S = 4
+_VERIFY_FAST_INTERVAL_S = 5
+_VERIFY_FAST_WINDOW_S = 60
+_VERIFY_SLOW_INTERVAL_S = 20
+
 # Minimum gap between auto-connect actions, to prevent flapping (mirrors Windows).
 _ACTION_COOLDOWN = timedelta(seconds=60)
+
+# Startup auto-connect retry (mirrors Windows AutoConnectService.RunStartupCheckAsync): a
+# single attempt right after boot can lose a race with the network stack settling
+# (DHCP/default route/DNS), so retry a few times before falling back to the NetworkMonitor's
+# periodic poll / real network-change events.
+_STARTUP_INITIAL_DELAY_S = 15
+_STARTUP_RETRY_INTERVAL_S = 10
+_STARTUP_RETRY_ATTEMPTS = 6  # ~1 minute total, then fall into the normal triggers.
 
 
 def _health_port_from_url(url: Optional[str]) -> int:
@@ -58,8 +77,14 @@ class DaemonCore:
         self.configs = configs_mod
         self._loop = loop
         self._net_monitor: Optional[NetworkMonitor] = None
-        self._last_auto_action = datetime.min
+        # Per-target cooldown (keyed by target label -- 'AutoConnect' / 'DeviceTunnel'), so one
+        # target's action never blocks the other's in the same check. Mirrors Windows
+        # AutoConnectService's _lastActionByTarget.
+        self._last_auto_action: dict[str, datetime] = {}
         self._handling_network_change = False
+        # Guards DaemonCore._transfer_local_profiles against a heartbeat/poll race —
+        # both loops call _process_status_response and could otherwise fire it twice.
+        self._transfer_in_progress = False
 
     async def reconcile_active_tunnels(self) -> None:
         """Adopt any WireGuard interfaces already up at startup into daemon state.
@@ -113,6 +138,9 @@ class DaemonCore:
             # No backend URL yet (fresh install, installer provided none): the tray prompts
             # the user for the server DNS. False whenever a URL is configured.
             BackendUnconfigured=not self.backend.is_configured,
+            # True once the user explicitly chose "Use standalone" at first run. The tray
+            # uses this to stop prompting for a backend URL and hide backend-dependent rows.
+            StandaloneMode=self.state.get_standalone_mode_chosen(),
             # Installed package version (the daemon is restarted by postinst on
             # update, so this reflects the on-disk code). The tray compares it to
             # its own in-memory VERSION and self-restarts on a mismatch, so an
@@ -125,7 +153,11 @@ class DaemonCore:
     async def cmd_connect(self, username: str, profile_name: Optional[str]) -> PipeResponse:
         from daemon.ipc_server import _ok, _fail
 
-        if not self.state.is_allowed_to_connect():
+        # Standalone (no backend configured at all): skip the authorization gate entirely —
+        # there is nothing to authorize against. The moment a backend URL is set, normal
+        # authorization applies from then on, same as any brand-new client. Mirrors Windows
+        # PipeServer's Connect handler.
+        if self.backend.is_configured and not self.state.is_allowed_to_connect():
             ok, error = await self._live_register()
             if not ok:
                 cid = self.state.get_client_id()
@@ -136,6 +168,16 @@ class DaemonCore:
 
         if profile_name:
             config_path = configs_mod.get_config_path(username, profile_name)
+            if config_path is None:
+                # Cross-user search: covers auto-connect/device-tunnel identities, which have
+                # no per-user directory of their own but the config usually already lives
+                # under the one real OS user's directory (Linux is single-user by design).
+                config_path = configs_mod.get_config_path_by_tunnel_name(profile_name)
+            if config_path is None and username == 'DeviceTunnel':
+                # Last resort: the machine-level store, for a never-logged-into machine
+                # where no per-user copy exists yet. Mirrors Windows
+                # AutoConnectService.FindConfigPath's two-step lookup.
+                config_path = configs_mod.get_device_tunnel_config_path(profile_name)
             if config_path is None:
                 return _fail(f"Profile '{profile_name}' not found.")
         else:
@@ -189,39 +231,119 @@ class DaemonCore:
         return _ok()
 
     async def _verify_after_connect(self, tunnel_name: str) -> None:
-        """Post-connect verification (mirrors Windows' RunPhase2Async, called right
-        after PipeServer's Connect handler): a sidecar profile with a gateway target
-        probes /health through the tunnel; anything else falls back to a handshake
-        check. Without this, IsVerified never becomes true until the next network
-        change triggers a re-verify — so a freshly-connected tunnel would show as
-        plain "Connected" indefinitely instead of getting the "Verified" badge."""
+        """Post-connect verification retry loop (mirrors Windows' TunnelVerifier, run right
+        after PipeServer's Connect handler / cmd_connect): a sidecar profile with a gateway
+        target probes /health through the tunnel, falling back to a handshake check; anything
+        else goes straight to the handshake check.
+
+        Retries every _VERIFY_FAST_INTERVAL_S for the first _VERIFY_FAST_WINDOW_S. If nothing
+        has succeeded by then, marks the tunnel verification-failed (tray shows an amber
+        "Confirmation failed" tag) but keeps retrying every _VERIFY_SLOW_INTERVAL_S for as long
+        as the tunnel stays connected, rather than giving up permanently after a fixed budget --
+        a real customer network was observed needing well over a minute for the WireGuard
+        handshake to complete even though the same sidecar confirmed in seconds for other
+        clients on the same network (a per-connection timing issue, not a server-side one). A
+        later success still clears the failed flag and promotes to "Verified", no reconnect
+        needed. Before this loop existed, IsVerified never became true until the next network
+        change triggered a re-verify — so a freshly-connected tunnel would show as plain
+        "Connected" indefinitely instead of getting the "Verified" badge.
+
+        Also owns the port-443 fallback retry (docs/design/port-443-fallback.md §5, mirrors
+        Windows TunnelVerifier): if the customer's admin-configured trigger window passes with
+        no successful verification and this profile has a confirmed fallback port, rewrites the
+        Endpoint port on a fresh temp copy of the config and reinstalls the tunnel once, then
+        lets this same loop keep polling. Does not reset the fast/slow-window timing above."""
         gateway = self.state.get_gateway_probe(tunnel_name)
-        if gateway:
-            ip, port = gateway
-            deadline = datetime.utcnow().timestamp() + _REVERIFY_BUDGET_S
-            if await self._probe_gateway_until(ip, port, deadline):
-                self.state.set_verified(tunnel_name, via_gateway=True)
-                # Mirrors Windows' RunPhase2Async reporting a "Verified" event upstream —
+        start = datetime.utcnow().timestamp()
+        failed_marked = False
+        fallback_tried = False
+
+        while self.state.is_connected(tunnel_name):
+            ok = False
+            via_gateway = False
+            try:
+                if gateway:
+                    ip, port = gateway
+                    attempt_deadline = datetime.utcnow().timestamp() + _VERIFY_ATTEMPT_BUDGET_S
+                    if await self._probe_gateway_until(ip, port, attempt_deadline):
+                        ok, via_gateway = True, True
+                if not ok:
+                    epoch = await self.wg.latest_handshake(tunnel_name)
+                    now = int(datetime.utcnow().timestamp())
+                    if epoch > 0 and now - epoch < 180:
+                        ok = True
+            except Exception as e:
+                log.debug("Verification attempt failed for tunnel '%s' (retrying): %s", tunnel_name, e)
+
+            if ok:
+                self.state.set_verified(tunnel_name, via_gateway=via_gateway)
+                log.info(
+                    "Verification succeeded for tunnel '%s' (%s)%s.",
+                    tunnel_name, 'gateway' if via_gateway else 'handshake',
+                    ' after a prior confirmation failure' if failed_marked else '',
+                )
+                # Mirrors Windows' TunnelVerifier reporting a "Verified" event upstream —
                 # required so the admin client list's "connected" star (which now demands
                 # actual gateway verification for sidecar clients, not just Connect) ever
                 # lights up for Linux. Deliberately only the gateway-verified branch reports;
-                # a handshake-only pass below does NOT, matching Windows (handshake freshness
-                # isn't a reliable enough signal to gate a display indicator on).
-                asyncio.create_task(
-                    self.backend.log_event(
-                        self.state.get_client_id(), 'Verified', '', tunnel_name,
+                # a handshake-only pass does NOT, matching Windows (handshake freshness isn't
+                # a reliable enough signal to gate a display indicator on).
+                if via_gateway:
+                    asyncio.create_task(
+                        self.backend.log_event(
+                            self.state.get_client_id(), 'Verified', '', tunnel_name,
+                        )
                     )
+                return
+
+            if not fallback_tried:
+                fallback = self.state.get_fallback_config(tunnel_name)
+                if fallback and datetime.utcnow().timestamp() - start >= fallback[1]:
+                    fallback_tried = True
+                    await self._try_switch_to_fallback_port(tunnel_name, fallback[0], fallback[1])
+
+            if not failed_marked and datetime.utcnow().timestamp() - start >= _VERIFY_FAST_WINDOW_S:
+                failed_marked = True
+                self.state.set_verification_failed(tunnel_name)
+                log.warning(
+                    "Confirmation failed for tunnel '%s' after %ds — still retrying in the background.",
+                    tunnel_name, _VERIFY_FAST_WINDOW_S,
                 )
+
+            await asyncio.sleep(_VERIFY_SLOW_INTERVAL_S if failed_marked else _VERIFY_FAST_INTERVAL_S)
+
+    async def _try_switch_to_fallback_port(self, tunnel_name: str, fallback_port: int, trigger_seconds: int) -> None:
+        """Reinstalls tunnel_name against its UDP fallback port (already confirmed active by
+        the caller -- state.get_fallback_config) after trigger_seconds passed with no
+        successful verification. Runs at most once per connect (guarded by the caller's
+        fallback_tried flag) -- a single alternate-port attempt, not a permanent pin; a later
+        reconnect always starts on the primary port again. Mirrors Windows
+        TunnelVerifier.TrySwitchToFallbackPortAsync."""
+        stored = configs_mod.get_config_path_by_tunnel_name(tunnel_name)
+        if stored is None:
+            return
+
+        log.info(
+            "No successful verification for tunnel '%s' after %ds — retrying via UDP fallback port %d.",
+            tunnel_name, trigger_seconds, fallback_port,
+        )
+        try:
+            await self._wg_down(tunnel_name)
+            wg_path = configs_mod.prepare_config_path(stored, endpoint_port_override=fallback_port)
+            ok, output = await self.wg.connect(wg_path)
+            configs_mod.cleanup_temp_config(tunnel_name)
+            if not ok:
+                log.warning("Fallback-port reconnect failed for tunnel '%s': %s", tunnel_name, output)
                 return
-        for _ in range(5):
-            if not self.state.is_connected(tunnel_name):
-                return
-            epoch = await self.wg.latest_handshake(tunnel_name)
-            now = int(datetime.utcnow().timestamp())
-            if epoch > 0 and now - epoch < 180:
-                self.state.set_verified(tunnel_name)
-                return
-            await asyncio.sleep(2)
+            self.state.mark_used_fallback_port(tunnel_name, fallback_port)
+            detail = f"Switched to UDP {fallback_port} after {trigger_seconds}s with no confirmation on the primary port."
+            asyncio.create_task(
+                self.backend.log_event(
+                    self.state.get_client_id(), 'PortFallback', '', tunnel_name, detail=detail,
+                )
+            )
+        except Exception as e:
+            log.warning("Fallback-port reconnect threw for tunnel '%s': %s", tunnel_name, e)
 
     async def cmd_disconnect(self, username: str, profile_name: Optional[str] = None) -> PipeResponse:
         from daemon.ipc_server import _ok, _fail
@@ -246,7 +368,7 @@ class DaemonCore:
         if not tunnel.is_connected or not tunnel.tunnel_name:
             return _fail("No tunnel is currently active.")
 
-        system_tunnel = tunnel.connected_user in ('AutoConnect', 'PendingConnect', 'Unknown')
+        system_tunnel = tunnel.connected_user in ('AutoConnect', 'PendingConnect', 'Unknown', 'DeviceTunnel')
         if not system_tunnel and tunnel.connected_user and \
                 tunnel.connected_user.lower() != username.lower():
             return _fail("Not authorized to disconnect another user's tunnel.")
@@ -334,6 +456,14 @@ class DaemonCore:
         asyncio.create_task(self.heartbeat_once())
         return PipeResponse(Success=True, Error=warning)
 
+    async def cmd_set_standalone_mode(self) -> PipeResponse:
+        """First-run "Use standalone" choice: no backend contacted, just remember the
+        decision so the tray stops prompting and shows the normal popup. Mirrors Windows
+        PipeServer's SetStandaloneMode case."""
+        self.state.set_standalone_mode_chosen(True)
+        reg_mod.save(self.state)
+        return PipeResponse(Success=True)
+
     async def cmd_register(self, username: str) -> RegistrationResult:
         ok, msg = await self._live_register(username=username)
         message = {
@@ -371,6 +501,13 @@ class DaemonCore:
         is_active = resp.get('IsActive', resp.get('isActive', False))
         self.state.update_registration(is_active)
 
+        # A standalone client that later configured a backend and got activated: bulk-
+        # transfer its local unmanaged profiles once. Mirrors Windows
+        # ClientRegistrationService.ProcessStatusResponseAsync's TransferLocalProfilesAsync
+        # trigger.
+        if is_active and self.state.get_standalone_mode_chosen() and not self.state.get_profiles_transferred():
+            asyncio.create_task(self._transfer_local_profiles())
+
         ac_enabled = resp.get('AutoConnectEnabled', resp.get('autoConnectEnabled', False))
         ac_profile = resp.get('AutoConnectProfileName', resp.get('autoConnectProfileName'))
         networks_raw = resp.get('TrustedNetworks', resp.get('trustedNetworks')) or []
@@ -385,7 +522,17 @@ class DaemonCore:
         self.persist_auto_connect()
 
         self.state.set_heartbeat_interval(resp.get('HeartbeatIntervalMinutes', resp.get('heartbeatIntervalMinutes', 5)))
-        self.state.set_server_profile_name(resp.get('ServerProfileName', resp.get('serverProfileName')))
+        server_profile_name = resp.get('ServerProfileName', resp.get('serverProfileName'))
+        self.state.set_server_profile_name(server_profile_name)
+        # Device tunnel: connect the native profile before any login (root daemon, not tied
+        # to a session). Runs on every heartbeat/poll regardless of login state, so the
+        # machine-level config store (config_manager.DEVICE_DIR) stays populated even on a
+        # never-logged-into machine. Mirrors Windows ClientRegistrationService's
+        # EnsureDeviceTunnelConfigAsync call site.
+        device_tunnel_enabled = resp.get('DeviceTunnelEnabled', resp.get('deviceTunnelEnabled', False))
+        self.state.set_device_tunnel_enabled(device_tunnel_enabled)
+        if device_tunnel_enabled and server_profile_name:
+            asyncio.create_task(self._ensure_device_tunnel_config(server_profile_name))
         # Auto-update channel (stable|beta) — the updater polls the matching Linux release stream.
         self.backend.set_channel(resp.get('UpdateChannel', resp.get('updateChannel', 'stable')))
 
@@ -402,6 +549,10 @@ class DaemonCore:
         # Per-profile remote LAN CIDR(s) behind each profile's own sidecar, for the
         # pre-connect LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
         self.state.set_remote_lan_cidrs(resp.get('RemoteLanCidrsByProfile', resp.get('remoteLanCidrsByProfile')))
+
+        # Per-profile UDP fallback port + trigger window (docs/design/port-443-fallback.md).
+        # Present only when the serving sidecar has confirmed the redirect is active.
+        self.state.set_fallback_ports(resp.get('FallbackEndpoints', resp.get('fallbackEndpoints')))
 
         # MFA state — pass through to tray via build_tunnel_status.
         mfa_expires_raw = resp.get('MfaSessionExpiresAt', resp.get('mfaSessionExpiresAt'))
@@ -461,6 +612,98 @@ class DaemonCore:
         if delete_name:
             self._handle_pending_delete(delete_name)
 
+        # Last, and deliberately so: this tears the process down, so anything queued above
+        # must have been started first. The one-shot flag is already cleared server-side, and
+        # the restart itself waits a few seconds before stopping the service, so this response
+        # finishes processing normally rather than being cut off mid-way. Mirrors Windows
+        # ClientRegistrationService.ProcessStatusResponseAsync's ServiceRestartRequested check.
+        if resp.get('ServiceRestartRequested', resp.get('serviceRestartRequested', False)):
+            log.info("Service restart requested by admin — scheduling a restart of the valenius service.")
+            asyncio.create_task(self._request_service_restart())
+
+    async def _transfer_local_profiles(self) -> None:
+        """One-time bulk archive of every local unmanaged profile once a client that was
+        standalone configures a backend and activates. Guarded by state.get_profiles_transferred()
+        (persisted) so a partial failure retries the whole batch on the next heartbeat/poll
+        rather than silently dropping profiles, and by _transfer_in_progress so a heartbeat/poll
+        race doesn't fire it twice concurrently. Deliberately does NOT mark profiles managed —
+        they stay private/user-deletable, exactly like a self-uploaded profile on an
+        always-connected client. Mirrors Windows ClientRegistrationService.TransferLocalProfilesAsync."""
+        if self._transfer_in_progress:
+            return
+        self._transfer_in_progress = True
+        try:
+            profiles = configs_mod.get_all_unmanaged_profiles_with_content()
+            if not profiles:
+                self.state.set_profiles_transferred(True)
+                reg_mod.save(self.state)
+                return
+
+            client_id = self.state.get_client_id()
+            all_ok = True
+            for _username, profile_name, content in profiles:
+                ok = await self.backend.archive_profile(client_id, profile_name, content)
+                if not ok:
+                    all_ok = False
+                    log.warning("Local profile transfer: failed to archive '%s' — will retry.", profile_name)
+
+            if all_ok:
+                self.state.set_profiles_transferred(True)
+                reg_mod.save(self.state)
+                log.info("Transferred %d local profile(s) to the backend.", len(profiles))
+        finally:
+            self._transfer_in_progress = False
+
+    async def _ensure_device_tunnel_config(self, profile_name: str) -> None:
+        """Best-effort: pulls GET /api/clients/profiles and saves the entry matching
+        profile_name into the machine-level device-tunnel store, so the config is available
+        even on a machine nobody has ever logged into (no per-user copy exists yet). Runs on
+        every heartbeat/poll while device tunnel is enabled. Mirrors Windows
+        ClientRegistrationService.EnsureDeviceTunnelConfigAsync."""
+        try:
+            entries = await self.backend.get_profiles(self.state.get_client_id())
+            if not entries:
+                return
+            for entry in entries:
+                filename = entry.get('FileName', entry.get('fileName', ''))
+                if filename.lower() == profile_name.lower():
+                    content = entry.get('Content', entry.get('content', ''))
+                    if content:
+                        configs_mod.save_device_tunnel_config(profile_name, content)
+                    return
+        except Exception as e:
+            log.debug("Device tunnel config sync for '%s' failed (will retry): %s", profile_name, e)
+
+    async def _request_service_restart(self) -> None:
+        """Admin recovery hatch for stale in-memory state (e.g. a tunnel removed behind the
+        daemon's back, leaving it reporting Connected with no tunnel present, which a
+        non-admin user has no way back from). Waits a few seconds so the heartbeat/poll
+        response that requested this finishes processing and the server-side one-shot flag
+        stays cleared, then restarts the systemd service via a DETACHED transient unit --
+        fire-and-forget, no --pipe/--wait, since this action is about to kill the very
+        process issuing it (mirrors daemon/updater.py's self-update install, which solves the
+        identical problem). reconcile_active_tunnels() re-adopts any live kernel interface at
+        the fresh daemon's startup, so this alone also clears the stale-state scenario above --
+        no separate phantom-state fix is needed. Mirrors Windows ServiceRestarter."""
+        import subprocess
+        await asyncio.sleep(3)
+        try:
+            result = await self._loop.run_in_executor(None, lambda: subprocess.run(
+                ['systemd-run', '--collect', '--quiet',
+                 '--unit', 'valenius-remote-restart',
+                 '--property', 'StandardOutput=journal',
+                 '--property', 'StandardError=journal',
+                 '--', 'systemctl', 'restart', 'valenius.service'],
+                capture_output=True, text=True,
+            ))
+            if result.returncode != 0:
+                log.warning(
+                    "Remote service restart: systemd-run failed (exit %d): %s",
+                    result.returncode, result.stderr,
+                )
+        except Exception as e:
+            log.warning("Remote service restart failed: %s", e)
+
     async def _upload_logs(self, trigger: str) -> None:
         """Collect the (Valenius-only, redacted) diagnostic bundle and upload it. Called on an
         admin heartbeat request ("Admin") and by the tray "Send logs" action ("User")."""
@@ -514,6 +757,50 @@ class DaemonCore:
                 await asyncio.sleep(15)
 
     # ── Auto-connect triggers ────────────────────────────────────────────────
+
+    async def run_startup_auto_connect_check(self) -> None:
+        """Applies the auto-connect policy shortly after daemon start, retrying if the first
+        attempt doesn't result in a connection. This is the path that reconnects the tunnel
+        after a service restart (a normal boot, or the restart a self-update triggers) --
+        wg-quick tunnels never come back up on their own. A single attempt right after boot
+        can lose a race with the network stack settling (DHCP/default route/DNS); mirrors
+        Windows' AutoConnectService.RunStartupCheckAsync."""
+        await asyncio.sleep(_STARTUP_INITIAL_DELAY_S)
+        for attempt in range(1, _STARTUP_RETRY_ATTEMPTS + 1):
+            await self._handle_network_change()
+            if not self._is_auto_connect_pending():
+                return
+            if attempt < _STARTUP_RETRY_ATTEMPTS:
+                log.debug("Auto-connect startup check attempt %d did not connect -- retrying.", attempt)
+                await asyncio.sleep(_STARTUP_RETRY_INTERVAL_S)
+
+    def _get_auto_connect_targets(self) -> list[tuple[str, Optional[str]]]:
+        """Enumerate active auto-connect targets: the generic admin-configured profile (when
+        enabled), plus the device tunnel's native profile (when the backend has it enabled for
+        this client). Evaluated fresh on every check. Mirrors Windows
+        AutoConnectService.GetTargets."""
+        targets: list[tuple[str, Optional[str]]] = []
+        if self.auto_connect.is_enabled():
+            profile = self.auto_connect.get_profile_name() or self.state.get_server_profile_name()
+            targets.append(('AutoConnect', profile))
+        if self.state.get_device_tunnel_enabled():
+            targets.append(('DeviceTunnel', self.state.get_server_profile_name()))
+        return targets
+
+    def _is_auto_connect_pending(self) -> bool:
+        """True if any auto-connect target still has something to do: trusted networks
+        configured, current network not trusted, and that target's profile not yet connected.
+        Mirrors AutoConnectService.IsAutoConnectPending -- used only to decide whether the
+        startup retry loop should keep going."""
+        targets = self._get_auto_connect_targets()
+        if not targets:
+            return False
+        networks = self.auto_connect.get_trusted_networks()
+        if not networks:
+            return False
+        if is_in_trusted_network(networks):
+            return False
+        return any(not (profile and self.state.is_connected(profile)) for _label, profile in targets)
 
     def on_network_change(self) -> None:
         """Called from the NetworkMonitor thread on every network transition."""
@@ -603,29 +890,33 @@ class DaemonCore:
         return False
 
     async def _auto_connect_action(self) -> None:
-        """Apply the trusted-network auto-connect/disconnect policy (when enabled)."""
-        if not self.auto_connect.is_enabled():
+        """Apply the trusted-network auto-connect/disconnect policy to every active target
+        (the generic admin-configured profile, plus the device tunnel when enabled) --
+        mirrors Windows AutoConnectService.CheckAsync. Cooldown is tracked per target label so
+        one target's action never blocks the other's in the same check."""
+        targets = self._get_auto_connect_targets()
+        if not targets:
             return
         networks = self.auto_connect.get_trusted_networks()
         if not networks:
             return
 
-        now = datetime.utcnow()
-        if now - self._last_auto_action < _ACTION_COOLDOWN:
-            return
-
         in_trusted = is_in_trusted_network(networks)
-        server_profile = self.auto_connect.get_profile_name() or self.state.get_server_profile_name()
-        is_server_up = self.state.is_connected(server_profile) if server_profile else self.state.is_connected()
+        now = datetime.utcnow()
 
-        if not is_server_up and not in_trusted:
-            log.info("Auto-connect: outside trusted network, connecting")
-            self._last_auto_action = now
-            await self.cmd_connect('AutoConnect', server_profile)
-        elif is_server_up and in_trusted:
-            log.info("Auto-connect: inside trusted network, disconnecting")
-            self._last_auto_action = now
-            await self.cmd_disconnect('AutoConnect', server_profile)
+        for label, profile in targets:
+            if now - self._last_auto_action.get(label, datetime.min) < _ACTION_COOLDOWN:
+                continue
+            is_up = self.state.is_connected(profile) if profile else self.state.is_connected()
+
+            if not is_up and not in_trusted:
+                log.info("Auto-connect (%s): outside trusted network, connecting", label)
+                self._last_auto_action[label] = now
+                await self.cmd_connect(label, profile)
+            elif is_up and in_trusted:
+                log.info("Auto-connect (%s): inside trusted network, disconnecting", label)
+                self._last_auto_action[label] = now
+                await self.cmd_disconnect(label, profile)
 
     # ── Private helpers ──────────────────────────────────────────────────────
 

@@ -14,6 +14,14 @@ public class Client
     public string Hostname { get; set; } = "";
 
     /// <summary>
+    /// Stable platform-provided device identifier used for duplicate detection where a
+    /// human-readable hostname is not unique. Android sends ANDROID_ID; null for clients
+    /// that do not expose a suitable identifier.
+    /// </summary>
+    [MaxLength(128)]
+    public string? DeviceId { get; set; }
+
+    /// <summary>
     /// Admin-set friendly name. When set, shown in place of <see cref="Hostname"/>
     /// throughout the admin UI (useful for mobile devices with unhelpful model
     /// names). Null/blank falls back to the hostname.
@@ -61,8 +69,8 @@ public class Client
     public bool IsDeleted { get; set; }
 
     /// <summary>
-    /// True when this row was created by a registration whose hostname collides with an
-    /// existing, non-deleted client (typically a reinstall that generated a fresh ClientKey).
+    /// True when this row was created by a registration whose identity collides with an
+    /// existing, non-deleted client (hostname for desktop clients, device ID for Android).
     /// The client stays inactive and is shown an "already exists — ask your admin to reassign"
     /// message until an admin either reassigns the original record to this install's ClientKey
     /// or chooses to keep both. See <c>ClientsController.Register</c>.
@@ -132,6 +140,14 @@ public class Client
     /// after being sent.</summary>
     public bool PendingConfigRepair { get; set; }
 
+    /// <summary>When true, the client restarts its own background service (Windows: the
+    /// <c>Valenius</c> service) on its next heartbeat. Recovery hatch for a client whose in-memory
+    /// tunnel state has gone stale — e.g. a tunnel that was removed behind the service's back, so
+    /// it reports Connected with no tunnel and the user can neither disconnect nor reconnect.
+    /// Drops any active tunnel, so it's an explicit admin action, never automatic. Cleared
+    /// atomically after being sent.</summary>
+    public bool PendingServiceRestart { get; set; }
+
     /// <summary>Auto-update channel this client tracks: "stable" (default) or "beta". Admin-set
     /// per client; surfaced in the heartbeat so the updater polls the matching release stream.</summary>
     [MaxLength(10)]
@@ -186,6 +202,18 @@ public class Client
     /// </summary>
     [MaxLength(200)]
     public string? AllowedIPs { get; set; }
+
+    /// <summary>
+    /// Networks reachable BEHIND this client (e.g. a Home Assistant LAN like "10.16.12.0/24"),
+    /// not the client's own tunnel address. Folded into the sidecar-side peer AllowedIPs in
+    /// addition to the client's own /32 (<see cref="Services.WireGuardHelper.PeerAllowedIps"/>)
+    /// so other peers/the sidecar's LAN can route to that network through this client — the
+    /// opposite direction of <see cref="Customer.SidecarLanCidrs"/>, which covers the sidecar's
+    /// own physical LAN. Only takes effect for Pro, Valenius-mode (sidecar-provisioned)
+    /// customers; ignored for foreign-profile peers by design.
+    /// </summary>
+    [MaxLength(255)]
+    public string? RemoteLanCidrs { get; set; }
 
     /// <summary>
     /// Per-client DNS server override for the generated config.

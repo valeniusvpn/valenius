@@ -30,6 +30,10 @@ public class TunnelVerifier
     private static readonly TimeSpan FastWindow      = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan SlowInterval    = TimeSpan.FromSeconds(20);
 
+    // How long to wait for a torn-down tunnel service to actually disappear before reinstalling
+    // it on another port. Windows deletes a service only once its last handle closes.
+    private static readonly TimeSpan ServiceRemovalTimeout = TimeSpan.FromSeconds(10);
+
     private readonly TunnelStateManager _state;
     private readonly ConnectivityVerifier _verifier;
     private readonly HandshakeVerifier _handshakeVerifier;
@@ -153,7 +157,9 @@ public class TunnelVerifier
     /// starts on the primary port again. On success, records the switch on
     /// <see cref="TunnelStateManager"/> (tray tag) and reports it to the backend (best-effort,
     /// same as every other <c>LogEventAsync</c>-style call — a failed report never blocks the
-    /// switch itself).
+    /// switch itself). On failure the tunnel is put back on its primary port — see
+    /// <see cref="RestorePrimaryPortAsync"/> — so a failed switch can never cost the client the
+    /// tunnel it already had.
     /// </summary>
     private async Task TrySwitchToFallbackPortAsync(string tunnelName, int fallbackPort, int triggerSeconds)
     {
@@ -166,28 +172,95 @@ public class TunnelVerifier
 
         try
         {
-            await _wireGuard.DisconnectAsync(tunnelName);
-            var (success, output) = await _wireGuard.ConnectAsync(configPath, fallbackPort);
-            if (!success)
+            // Tear the primary-port tunnel down and wait for the service to actually disappear.
+            // Windows service deletion is asynchronous, so reinstalling immediately used to fail
+            // with "Tunnel already installed and running" — which left the client with NO tunnel
+            // at all while TunnelStateManager still said Connected, and no way out short of
+            // restarting the service. Never reinstall without confirming the old service is gone.
+            var (disconnectOk, disconnectOutput) = await _wireGuard.DisconnectAsync(tunnelName);
+            if (!disconnectOk && !WireGuardController.IsTunnelAlreadyGone(disconnectOutput))
             {
-                _logger.LogWarning("Fallback-port reconnect failed for tunnel '{Tunnel}': {Output}", tunnelName, output);
+                _logger.LogWarning(
+                    "Fallback-port switch aborted for tunnel '{Tunnel}' — could not stop it: {Output}",
+                    tunnelName, disconnectOutput);
                 return;
             }
-            _state.MarkUsedFallbackPort(tunnelName, fallbackPort);
-            await ReportPortFallbackAsync(tunnelName, fallbackPort, triggerSeconds);
+
+            await _wireGuard.WaitForTunnelServiceGoneAsync(tunnelName, ServiceRemovalTimeout);
+
+            var (success, output) = await _wireGuard.ConnectAsync(configPath, fallbackPort);
+            if (success)
+            {
+                _state.MarkUsedFallbackPort(tunnelName, fallbackPort);
+                await ReportPortFallbackAsync(tunnelName, fallbackPort, triggerSeconds);
+                return;
+            }
+
+            _logger.LogWarning("Fallback-port reconnect failed for tunnel '{Tunnel}': {Output}", tunnelName, output);
+            await RestorePrimaryPortAsync(tunnelName, configPath);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Fallback-port reconnect threw for tunnel '{Tunnel}'.", tunnelName);
+            await RestorePrimaryPortAsync(tunnelName, configPath);
         }
     }
 
+    /// <summary>
+    /// Puts the tunnel back on its primary port after a failed fallback-port switch. If even that
+    /// fails, the state is cleared so the client stops reporting a tunnel that no longer exists —
+    /// a phantom "connected" is worse than an honest disconnect, because the tray then only offers
+    /// Disconnect and the user can never get back to a working tunnel on their own.
+    /// </summary>
+    private async Task RestorePrimaryPortAsync(string tunnelName, string configPath)
+    {
+        // If a tunnel service is somehow still running, the fallback install was most likely
+        // refused *because* the old tunnel never went away — meaning the tunnel we already have
+        // is the one we want. Leave it alone (and leave the state connected) rather than tearing
+        // down a working tunnel or reporting a disconnect that didn't happen.
+        if (_wireGuard.IsTunnelServiceRunning(tunnelName))
+        {
+            _logger.LogInformation(
+                "Tunnel '{Tunnel}' is still running after the failed fallback-port switch — keeping it as is.",
+                tunnelName);
+            return;
+        }
+
+        try
+        {
+            await _wireGuard.WaitForTunnelServiceGoneAsync(tunnelName, ServiceRemovalTimeout);
+            var (restored, output) = await _wireGuard.ConnectAsync(configPath);
+            if (restored)
+            {
+                _logger.LogInformation(
+                    "Restored tunnel '{Tunnel}' on its primary port after the fallback-port attempt failed.",
+                    tunnelName);
+                return;
+            }
+            _logger.LogWarning(
+                "Could not restore tunnel '{Tunnel}' on its primary port: {Output}", tunnelName, output);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Restoring tunnel '{Tunnel}' on its primary port threw.", tunnelName);
+        }
+
+        _state.SetDisconnected(tunnelName);
+        await ReportEventAsync(tunnelName, "Disconnect",
+            "Tunnel lost while switching to the UDP fallback port and could not be re-established.");
+    }
+
     /// <summary>Best-effort report of a fallback-port switch to the backend so it shows up in the
-    /// client's connection history (Admin/Details, ConnectionHistory) — same pattern and same
-    /// swallow-on-failure as <see cref="ClientRegistrationService.LogEventAsync"/>, duplicated here
-    /// rather than called there to avoid a circular dependency (ClientRegistrationService already
-    /// depends on TunnelVerifier for RunPhase2Async).</summary>
-    private async Task ReportPortFallbackAsync(string tunnelName, int fallbackPort, int triggerSeconds)
+    /// client's connection history (Admin/Details, ConnectionHistory).</summary>
+    private Task ReportPortFallbackAsync(string tunnelName, int fallbackPort, int triggerSeconds)
+        => ReportEventAsync(tunnelName, "PortFallback",
+            $"Switched to UDP {fallbackPort} after {triggerSeconds}s with no confirmation on the primary port.");
+
+    /// <summary>Best-effort connection event report — same pattern and same swallow-on-failure as
+    /// <see cref="ClientRegistrationService.LogEventAsync"/>, duplicated here rather than called
+    /// there to avoid a circular dependency (ClientRegistrationService already depends on
+    /// TunnelVerifier for RunPhase2Async).</summary>
+    private async Task ReportEventAsync(string tunnelName, string eventType, string detail)
     {
         try
         {
@@ -196,8 +269,7 @@ public class TunnelVerifier
 
             var http     = _httpFactory.CreateClient("Registration");
             var clientId = await _registration.GetOrCreateClientIdAsync();
-            var detail   = $"Switched to UDP {fallbackPort} after {triggerSeconds}s with no confirmation on the primary port.";
-            var request  = new LogEventRequest(clientId.ToString(), "PortFallback", "", tunnelName, "", "", detail);
+            var request  = new LogEventRequest(clientId.ToString(), eventType, "", tunnelName, "", "", detail);
             await http.PostAsJsonAsync(
                 $"{backendUrl}/api/clients/event",
                 request,
@@ -205,7 +277,8 @@ public class TunnelVerifier
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to report PortFallback event to backend for tunnel '{Tunnel}'.", tunnelName);
+            _logger.LogWarning(ex, "Failed to report {EventType} event to backend for tunnel '{Tunnel}'.",
+                eventType, tunnelName);
         }
     }
 }

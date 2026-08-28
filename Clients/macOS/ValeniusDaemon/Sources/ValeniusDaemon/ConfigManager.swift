@@ -16,6 +16,9 @@ import ValeniusShared
 private let usersDir = "\(appSupportDir)/users"
 private let stagedDir = "\(appSupportDir)/staged"
 private let masterKeyPath = "\(appSupportDir)/master.key"
+/// Machine-level (not per-OS-user) store for the device-tunnel feature — see
+/// `saveDeviceTunnelConfig`. Mirrors Windows ConfigManager's device tunnel directory.
+private let deviceDir = "\(appSupportDir)/device"
 
 private let encExt = ".conf.enc"
 private let plainExt = ".conf"
@@ -79,7 +82,7 @@ actor ConfigManager {
     /// Create the data dirs (0700) and encrypt any legacy plain .conf files. Mirrors
     /// ensure_dirs() + migrate_plain_configs(). (No temp dir to evict — macOS has none.)
     func bootstrap() {
-        for dir in [appSupportDir, usersDir, stagedDir] {
+        for dir in [appSupportDir, usersDir, stagedDir, deviceDir] {
             try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: 0o700])
         }
@@ -259,6 +262,14 @@ actor ConfigManager {
         return try decryptedContent(atPath: path)
     }
 
+    /// The device-tunnel machine copy of `profile`, decrypted in memory. Mirrors Windows
+    /// ConfigManager.GetDeviceTunnelConfigPath (read side).
+    func decryptedDeviceTunnelContent(profile: String) throws -> String {
+        let path = "\(deviceDir)/\(profile)\(encExt)"
+        guard fm.fileExists(atPath: path) else { throw ConfigError.notFound(profile) }
+        return try decryptedContent(atPath: path)
+    }
+
     private func decryptedContent(atPath path: String) throws -> String {
         guard let data = fm.contents(atPath: path) else { throw ConfigError.notFound(path) }
         let plaintext: String
@@ -291,6 +302,21 @@ actor ConfigManager {
                 saveManaged(username, existing)
             }
         }
+    }
+
+    /// Machine-level (not per-OS-user) copy of `profile` — the customer's own native sidecar
+    /// profile, kept current so the device tunnel can connect it before any user has ever
+    /// logged in. Refreshed on every heartbeat/poll while the device tunnel is enabled
+    /// (`DaemonCore.ensureDeviceTunnelConfig`); same encryption as the per-user store. Mirrors
+    /// Windows ConfigManager.SaveDeviceTunnelConfig.
+    func saveDeviceTunnelConfig(profile: String, content: String) throws {
+        guard ProfileNameHelper.isValid(profile) else { throw ConfigError.notFound(profile) }
+        if let err = ConfigValidation.validateContent(content) { throw ConfigError.unsafe(profile, err) }
+        try fm.createDirectory(atPath: deviceDir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        let path = "\(deviceDir)/\(profile)\(encExt)"
+        try encrypt(Data(content.utf8)).write(to: URL(fileURLWithPath: path))
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
     }
 
     /// User-initiated delete, scoped to one user (rejects managed profiles at the caller).

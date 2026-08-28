@@ -10,10 +10,10 @@
     .tab-content.card-tabs { border: 1px solid #dee2e6; border-top: 0; border-radius: 0 0 10px 10px; background: #fff; padding: 1.5rem; max-width: 720px; }
 </style>
 
-<div class="d-flex align-items-center gap-2 mb-4">
-    <i class="bi bi-gear text-primary" style="font-size:1.4rem;"></i>
-    <h1 class="page-title mb-0">Settings</h1>
-</div>
+<header class="page-header"><div class="page-header-copy">
+    <div class="page-kicker">System</div><h1 class="page-title">Settings</h1>
+    <p class="page-description density-comfort-only">Configure connectivity, authentication, notifications and data retention.</p>
+</div></header>
 
 @if (TempData["Success"] is string success)
 {

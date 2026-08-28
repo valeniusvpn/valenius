@@ -241,6 +241,7 @@ class TrayApp:
         self._restarting = False
         self._backend_prompt_open = False
         self._backend_prompt_auto_shown = False
+        self._setup_choice_open = False
         self._lock = threading.Lock()
 
         self._setup_css()
@@ -298,9 +299,9 @@ class TrayApp:
             menu.show_all()
             return menu
 
-        if status.BackendUnconfigured:
-            self._open_item = Gtk.MenuItem(label='Connect to server…')
-            self._open_item.connect('activate', lambda _: self._action_set_backend_url())
+        if status.BackendUnconfigured and not status.StandaloneMode:
+            self._open_item = Gtk.MenuItem(label='Set up Valenius…')
+            self._open_item.connect('activate', lambda _: self._action_setup_choice())
             menu.append(self._open_item)
             menu.append(Gtk.SeparatorMenuItem())
             self._append_exit_item(menu)
@@ -310,6 +311,9 @@ class TrayApp:
         connected_names: set[str] = {t.Name for t in status.ConnectedTunnels}
         verified_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.IsVerified}
         failed_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.VerificationFailed}
+        fallback_ports: dict[str, int] = {
+            t.Name: t.FallbackPortUsed for t in status.ConnectedTunnels if t.FallbackPortUsed > 0
+        }
 
         if len(connected_names) > 1:
             status_text = f"Connected • {len(connected_names)} tunnels active"
@@ -322,7 +326,9 @@ class TrayApp:
         menu.append(header)
         menu.append(Gtk.SeparatorMenuItem())
 
-        if status.RegistrationIsActive is not True:
+        # RegistrationIsActive is always false/null with no backend to register against —
+        # standalone has nothing to register (mirrors Windows TrayPopupForm.BuildRows).
+        if status.RegistrationIsActive is not True and not status.StandaloneMode:
             item = Gtk.MenuItem(label='Register Client')
             item.connect('activate', lambda _: self._action_register())
             menu.append(item)
@@ -353,7 +359,9 @@ class TrayApp:
                 is_active = profile in connected_names
                 is_verified = profile in verified_names
                 is_failed = profile in failed_names
-                menu.append(self._make_profile_menu_item(profile, is_active, is_verified, is_failed, mfa_locked))
+                menu.append(self._make_profile_menu_item(
+                    profile, is_active, is_verified, is_failed, mfa_locked,
+                    fallback_port=fallback_ports.get(profile, 0)))
         else:
             item = Gtk.MenuItem(label='No profiles configured')
             item.set_sensitive(False)
@@ -376,13 +384,16 @@ class TrayApp:
         item.connect('activate', lambda _: self._action_upload())
         menu.append(item)
 
-        # Fresh CheckMenuItem each rebuild: set_active() before connect() so the
-        # initial state never re-triggers the handler (no listener attached yet).
-        ac_item = Gtk.CheckMenuItem(label='Auto Connect')
-        ac_item.set_active(status.AutoConnectEnabled)
-        ac_item.connect('toggled', lambda _: self._action_toggle_autoconnect(
-            status.AutoConnectEnabled, reopen_popup=False))
-        menu.append(ac_item)
+        # Auto Connect's profile/trusted-network data only ever arrives via a heartbeat,
+        # which a standalone client never sends — the toggle would be inert.
+        if not status.StandaloneMode:
+            # Fresh CheckMenuItem each rebuild: set_active() before connect() so the
+            # initial state never re-triggers the handler (no listener attached yet).
+            ac_item = Gtk.CheckMenuItem(label='Auto Connect')
+            ac_item.set_active(status.AutoConnectEnabled)
+            ac_item.connect('toggled', lambda _: self._action_toggle_autoconnect(
+                status.AutoConnectEnabled, reopen_popup=False))
+            menu.append(ac_item)
 
         menu.append(Gtk.SeparatorMenuItem())
 
@@ -410,15 +421,20 @@ class TrayApp:
         return menu
 
     def _make_profile_menu_item(self, profile: str, active: bool, verified: bool,
-                                 verification_failed: bool, mfa_locked: bool) -> Gtk.MenuItem:
+                                 verification_failed: bool, mfa_locked: bool,
+                                 fallback_port: int = 0) -> Gtk.MenuItem:
+        # UDP port-443 fallback (docs/design/port-443-fallback.md §5.4): append the port to
+        # whichever tag would otherwise show, rather than inventing a fourth visual state --
+        # mirrors Windows TrayPopupForm.
+        port_suffix = f' · {fallback_port}' if fallback_port > 0 else ''
         if mfa_locked:
             label = f'\U0001f512 {profile}'
         elif active and verified:
-            label = f'✓ {profile} (Verified)'
+            label = f'✓ {profile} (Verified{port_suffix})'
         elif active and verification_failed:
-            label = f'● {profile} (Confirmation failed)'
+            label = f'● {profile} (Confirmation failed{port_suffix})'
         elif active:
-            label = f'● {profile} (Connected)'
+            label = f'● {profile} (Connected{port_suffix})'
         else:
             label = f'○ {profile}'
         item = Gtk.MenuItem(label=label)
@@ -460,16 +476,18 @@ class TrayApp:
                     and not self._restarting):
                 self._restart_for_update(status.DaemonVersion)
                 return True
-            # No backend URL configured yet (fresh install, installer provided none): the
-            # tray's job is to collect it. Auto-open the prompt once; re-prompting on demand
-            # happens when the user opens the popup (see _toggle_popup).
-            if status.BackendUnconfigured:
+            # No backend URL configured yet (fresh install, installer provided none) AND the
+            # user hasn't chosen standalone: the tray's job is to collect a choice. Auto-open
+            # the prompt once; re-prompting on demand happens when the user opens the popup
+            # (see _toggle_popup). Once standalone is chosen this is permanently false and
+            # the tray behaves like a normal popup from then on.
+            if status.BackendUnconfigured and not status.StandaloneMode:
                 self._update_indicator_icon(False)
                 self._rebuild_indicator_menu()
                 if self._popup_visible:
                     self._hide_popup()
-                if not self._backend_prompt_auto_shown and not self._backend_prompt_open:
-                    self._action_set_backend_url()
+                if not self._backend_prompt_auto_shown and not self._backend_prompt_open and not self._setup_choice_open:
+                    self._action_setup_choice()
                 return True
             self._update_indicator_icon(status.IsConnected)
             self._rebuild_indicator_menu()
@@ -531,9 +549,10 @@ class TrayApp:
     # ── Popup window ─────────────────────────────────────────────────────────
 
     def _toggle_popup(self):
-        # Not configured yet: collect the server address instead of showing the empty popup.
-        if self._status and self._status.BackendUnconfigured:
-            self._action_set_backend_url()
+        # Not configured yet and standalone hasn't been chosen: collect a setup choice
+        # instead of showing the empty popup.
+        if self._status and self._status.BackendUnconfigured and not self._status.StandaloneMode:
+            self._action_setup_choice()
             return
         if self._popup_visible:
             self._hide_popup()
@@ -591,6 +610,9 @@ class TrayApp:
         connected_names: set[str] = {t.Name for t in status.ConnectedTunnels} if status else set()
         verified_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.IsVerified} if status else set()
         failed_names: set[str] = {t.Name for t in status.ConnectedTunnels if t.VerificationFailed} if status else set()
+        fallback_ports: dict[str, int] = (
+            {t.Name: t.FallbackPortUsed for t in status.ConnectedTunnels if t.FallbackPortUsed > 0} if status else {}
+        )
 
         # ── Header ──────────────────────────────────────────────────────────
         header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -622,8 +644,9 @@ class TrayApp:
 
         box.pack_start(_separator(), False, False, 0)
 
-        # ── Register (same condition as Windows: RegistrationIsActive != true) ─
-        if status and status.RegistrationIsActive is not True:
+        # ── Register (same condition as Windows: RegistrationIsActive != true, and
+        # never in standalone -- there is no backend to register against) ──────
+        if status and status.RegistrationIsActive is not True and not status.StandaloneMode:
             register_row = self._make_register_row('Register Client', self._action_register)
             box.pack_start(register_row, False, False, 0)
 
@@ -650,7 +673,8 @@ class TrayApp:
                 is_verified = profile in verified_names
                 is_failed = profile in failed_names
                 row = self._make_profile_row(profile, is_active, verified=is_verified,
-                                              verification_failed=is_failed, mfa_locked=mfa_locked)
+                                              verification_failed=is_failed, mfa_locked=mfa_locked,
+                                              fallback_port=fallback_ports.get(profile, 0))
                 box.pack_start(row, False, False, 0)
         else:
             no_profiles = Gtk.Label(label='No profiles configured')
@@ -696,7 +720,7 @@ class TrayApp:
         btn_upload.connect('clicked', lambda _: self._action_upload())
         action_box.pack_start(btn_upload, False, True, 0)
 
-        if status:
+        if status and not status.StandaloneMode:
             ac_label = 'Auto Connect: On' if status.AutoConnectEnabled else 'Auto Connect: Off'
             btn_ac = Gtk.Button(label=ac_label)
             btn_ac.get_style_context().add_class('wgt-action-btn')
@@ -747,7 +771,8 @@ class TrayApp:
         box.show_all()
 
     def _make_profile_row(self, profile: str, active: bool, verified: bool = False,
-                           verification_failed: bool = False, mfa_locked: bool = False) -> Gtk.EventBox:
+                           verification_failed: bool = False, mfa_locked: bool = False,
+                           fallback_port: int = 0) -> Gtk.EventBox:
         verification_failed = verification_failed and not verified and not mfa_locked
         evbox = Gtk.EventBox()
         if mfa_locked:
@@ -781,16 +806,20 @@ class TrayApp:
         row.pack_start(lbl, True, True, 0)
 
         if active and not mfa_locked:
+            # UDP port-443 fallback (docs/design/port-443-fallback.md §5.4): append the port
+            # to whichever tag would otherwise show, rather than inventing a fourth visual
+            # state -- mirrors Windows TrayPopupForm.
+            port_suffix = f' · {fallback_port}' if fallback_port > 0 else ''
             if verified:
-                tag = Gtk.Label(label='Verified')
+                tag = Gtk.Label(label=f'Verified{port_suffix}')
                 tag.get_style_context().add_class('wgt-verified-pill')
             elif verification_failed:
                 # amber "Confirmation failed" tag — not an error state, verification keeps
                 # retrying in the background (mirrors Windows' TrayPopupForm amber tag).
-                tag = Gtk.Label(label='Confirmation failed')
+                tag = Gtk.Label(label=f'Confirmation failed{port_suffix}')
                 tag.get_style_context().add_class('wgt-verification-failed-tag')
             else:
-                tag = Gtk.Label(label='Connected')
+                tag = Gtk.Label(label=f'Connected{port_suffix}')
                 tag.get_style_context().add_class('wgt-connected-tag')
             row.pack_start(tag, False, False, 0)
 
@@ -968,6 +997,35 @@ class TrayApp:
         except ipc.IpcError as e:
             self._show_error(str(e))
 
+    def _action_setup_choice(self):
+        """First-run choice: "Connect to a server" (existing DNS-prompt flow) or "Use
+        standalone" (local profiles only, no backend ever contacted). Single-instance; on
+        Cancel/close neither choice is sent, so BackendUnconfigured stays true and this
+        reappears next time the tray is opened. Mirrors Windows
+        TrayApplicationContext.PromptSetupChoiceAsync."""
+        if self._setup_choice_open or self._backend_prompt_open:
+            return
+        self._setup_choice_open = True
+        self._backend_prompt_auto_shown = True  # stop the poll from re-queuing this
+        self._hide_popup()
+        dlg = _SetupChoiceDialog()
+        try:
+            result = dlg.run()
+        finally:
+            dlg.destroy()
+            self._setup_choice_open = False
+
+        if result == Gtk.ResponseType.YES:
+            self._action_set_backend_url()
+            return
+        if result == Gtk.ResponseType.NO:
+            try:
+                ipc.set_standalone_mode()
+            except ipc.IpcError as e:
+                self._show_error(str(e))
+        # Cancel/close: neither choice sent — stays unconfigured, reappears next open.
+        self._poll()
+
     def _action_set_backend_url(self):
         """First-run prompt for the backend server DNS (shown when the installer set no URL).
         Single-instance; on Cancel the client stays unconfigured and the prompt reappears the
@@ -1009,29 +1067,48 @@ class TrayApp:
         if logo is not None:
             dlg.set_logo(logo)
 
-        # Backend reachability + URL (same info Windows' AboutForm shows), so an
-        # admin can confirm the client is actually pointed at the right backend.
         status = self._status
-        backend_url = status.BackendUrl if status else None
-        reachable = status.BackendReachable if status else None
-        if reachable is True:
-            color, text = '#00a85c', 'Backend reachable'
-        elif reachable is False:
-            color, text = '#d64545', 'Backend unreachable'
+        standalone = bool(status and status.StandaloneMode)
+
+        if standalone:
+            # A reachability probe would be meaningless with no server configured.
+            # Mirrors Windows AboutForm's standaloneMode branch.
+            status_label = Gtk.Label()
+            status_label.set_markup(
+                '<span foreground="#b0b8c4">●</span> '
+                '<span foreground="#6b7684" size="small">Standalone — no server configured</span>')
         else:
-            color, text = '#b0b8c4', 'Checking backend…'
-        markup = f'<span foreground="{color}">●</span> <span foreground="#6b7684" size="small">{text}'
-        if backend_url:
-            markup += f' — {GLib.markup_escape_text(backend_url)}'
-        markup += '</span>'
-        status_label = Gtk.Label()
-        status_label.set_markup(markup)
+            # Backend reachability + URL (same info Windows' AboutForm shows), so an
+            # admin can confirm the client is actually pointed at the right backend.
+            backend_url = status.BackendUrl if status else None
+            reachable = status.BackendReachable if status else None
+            if reachable is True:
+                color, text = '#00a85c', 'Backend reachable'
+            elif reachable is False:
+                color, text = '#d64545', 'Backend unreachable'
+            else:
+                color, text = '#b0b8c4', 'Checking backend…'
+            markup = f'<span foreground="{color}">●</span> <span foreground="#6b7684" size="small">{text}'
+            if backend_url:
+                markup += f' — {GLib.markup_escape_text(backend_url)}'
+            markup += '</span>'
+            status_label = Gtk.Label()
+            status_label.set_markup(markup)
         status_label.set_margin_top(6)
         dlg.get_content_area().pack_start(status_label, False, False, 0)
         status_label.show()
 
-        dlg.run()
+        if standalone:
+            btn_connect = Gtk.Button(label='Connect to a server…')
+            btn_connect.set_margin_top(8)
+            btn_connect.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.APPLY))
+            dlg.get_content_area().pack_start(btn_connect, False, False, 0)
+            btn_connect.show()
+
+        result = dlg.run()
         dlg.destroy()
+        if standalone and result == Gtk.ResponseType.APPLY:
+            self._action_set_backend_url()
 
     def _action_sync(self):
         self._hide_popup()
@@ -1179,6 +1256,37 @@ class _MfaEnrollDialog(Gtk.Dialog):
 
     def get_code(self) -> str:
         return self._code_entry.get_text().strip()
+
+
+class _SetupChoiceDialog(Gtk.Dialog):
+    """First-run choice between connecting to a backend server or running standalone
+    (local .conf profiles only, nothing ever contacted except optional auto-update).
+    Mirrors Windows SetupChoiceForm — "Connect to a server" returns YES, "Use standalone"
+    returns NO; closing/Escape returns neither (CANCEL/DELETE_EVENT), left undecided."""
+
+    def __init__(self):
+        super().__init__(title="Set up Valenius", flags=0)
+        self.set_default_size(380, -1)
+
+        content = self.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_start(16)
+        content.set_margin_end(16)
+        content.set_margin_top(14)
+        content.set_margin_bottom(10)
+
+        intro = Gtk.Label(label=(
+            "Connect to a Valenius server your administrator set up, or use Valenius "
+            "standalone with local WireGuard profiles only — no server required."))
+        intro.set_line_wrap(True)
+        intro.set_xalign(0.0)
+        content.pack_start(intro, False, False, 0)
+        content.show_all()
+
+        btn_connect = self.add_button("Connect to a server", Gtk.ResponseType.YES)
+        btn_connect.get_style_context().add_class('suggested-action')
+        self.add_button("Use standalone", Gtk.ResponseType.NO)
+        self.set_default_response(Gtk.ResponseType.YES)
 
 
 class _BackendUrlDialog(Gtk.Dialog):

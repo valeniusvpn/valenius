@@ -9,11 +9,17 @@
     var _isProEdition = _Sidecar is not NullSidecarService;
 }
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-density="comfortable" data-text-size="default">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@ViewData["Title"] - Valenius</title>
+    <script>
+        try {
+            document.documentElement.dataset.density = localStorage.getItem('valenius-admin-density') || 'comfortable';
+            document.documentElement.dataset.textSize = localStorage.getItem('valenius-admin-text-size') || 'default';
+        } catch (_) { }
+    </script>
     <link rel="icon" href="/favicon.ico" type="image/x-icon" />
     <link rel="stylesheet" href="/lib/inter/inter.css" />
     <link rel="stylesheet" href="/lib/bootstrap/5.3.3/css/bootstrap.min.css" />
@@ -281,12 +287,15 @@
             footer { flex-wrap: wrap; gap: .25rem; }
         }
     </style>
+    <link rel="stylesheet" href="/css/admin.css" asp-append-version="true" />
 </head>
 <body>
 
+    <a class="skip-link" href="#mainContent">Skip to main content</a>
+
     <!-- Top bar -->
     <header class="topbar">
-        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation">
+        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation" aria-expanded="false">
             <i class="bi bi-list"></i>
         </button>
         <a class="topbar-brand" href="/Admin">
@@ -295,6 +304,23 @@
         <div class="topbar-divider"></div>
         <span class="topbar-tagline">WireGuard<sup>®</sup> Management Platform <span class="topbar-tagline-sep">·</span> Powered by WireGuard<sup>®</sup></span>
         <div class="topbar-right">
+            <div class="text-size-switch" role="group" aria-label="Text size">
+                <button type="button" id="textSizeDecrease" title="Decrease text size" aria-label="Decrease text size">
+                    <span aria-hidden="true">A−</span>
+                </button>
+                <button type="button" id="textSizeIncrease" title="Increase text size" aria-label="Increase text size">
+                    <span aria-hidden="true">A+</span>
+                </button>
+            </div>
+            <span class="visually-hidden" id="textSizeStatus" role="status" aria-live="polite"></span>
+            <div class="density-switch" role="group" aria-label="Interface density">
+                <button type="button" data-density-value="comfortable" title="Comfortable view" aria-label="Use comfortable view">
+                    <i class="bi bi-layout-three-columns"></i>
+                </button>
+                <button type="button" data-density-value="compact" title="Compact view" aria-label="Use compact view">
+                    <i class="bi bi-list"></i>
+                </button>
+            </div>
             @if (User.Identity?.IsAuthenticated == true)
             {
                 <span class="user-name"><i class="bi bi-person-circle me-1"></i>@User.Identity.Name</span>
@@ -343,25 +369,25 @@
 
     <div class="shell">
         <!-- Sidebar -->
-        <nav class="sidebar">
-
+        <nav class="sidebar" id="adminSidebar" aria-label="Main navigation">
+            <div class="sidebar-section-label">Operations</div>
             @if (User.IsInRole("Admin"))
             {
                 <a href="/Admin/Overview" class="sidebar-link @(ViewData["Title"]?.ToString() == "Overview" ? "active" : "")">
                     <i class="bi bi-grid-1x2-fill"></i> Overview
                 </a>
-                <hr class="sidebar-divider" />
             }
-
-            <div class="sidebar-section-label">Clients</div>
             <a href="/Admin" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Client") == true ? "active" : "")">
                 <i class="bi bi-display"></i> Clients
             </a>
+            @if (User.IsInRole("Admin") && _isProEdition)
+            {
+                <a href="/Admin/Server/Dashboard" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Dashboard") == true ? "active" : "")">
+                    <i class="bi bi-hdd-rack"></i> Server health
+                </a>
+            }
             <a href="/Admin/ConnectionHistory" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Connection") == true ? "active" : "")">
                 <i class="bi bi-clock-history"></i> Connection history
-            </a>
-            <a href="/Admin/Downloads" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Downloads") == true ? "active" : "")">
-                <i class="bi bi-box-arrow-down"></i> Downloads
             </a>
 
             @if (User.IsInRole("Admin"))
@@ -375,20 +401,17 @@
                     <i class="bi bi-people"></i> Users
                 </a>
 
-                @if (_isProEdition)
-                {
-                    <hr class="sidebar-divider" />
-                    <div class="sidebar-section-label">Server</div>
-                    <a href="/Admin/Server/Dashboard" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Dashboard") == true ? "active" : "")">
-                        <i class="bi bi-speedometer2"></i> Dashboard
-                    </a>
-                }
-
                 <hr class="sidebar-divider" />
-                <div class="sidebar-section-label">System</div>
+                <div class="sidebar-section-label">Software</div>
+                <a href="/Admin/Downloads" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Downloads") == true ? "active" : "")">
+                    <i class="bi bi-box-arrow-down"></i> Downloads
+                </a>
                 <a href="/Admin/Releases" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Releases") == true ? "active" : "")">
                     <i class="bi bi-cloud-upload"></i> Releases
                 </a>
+
+                <hr class="sidebar-divider" />
+                <div class="sidebar-section-label">Security &amp; system</div>
                 <a href="/Admin/Alerts" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Alerts") == true ? "active" : "")">
                     <i class="bi bi-shield-exclamation"></i> Security alerts
                     <partial name="_AlertBadge" />
@@ -398,9 +421,6 @@
                 </a>
                 <a href="/Admin/ErrorLog" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Error") == true ? "active" : "")">
                     <i class="bi bi-exclamation-triangle"></i> Error log
-                </a>
-                <a href="/Admin/Settings" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Settings") == true ? "active" : "")">
-                    <i class="bi bi-gear"></i> Settings
                 </a>
                 <a href="/Admin/Monitoring" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Monitoring") == true ? "active" : "")">
                     <i class="bi bi-graph-up"></i> Monitoring
@@ -417,9 +437,19 @@
                 <a href="/Admin/Backup" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Backup") == true ? "active" : "")">
                     <i class="bi bi-safe2"></i> Backup &amp; Restore
                 </a>
+                <a href="/Admin/Settings" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Settings") == true ? "active" : "")">
+                    <i class="bi bi-gear"></i> Settings
+                </a>
+            }
+            else
+            {
+                <a href="/Admin/Downloads" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Downloads") == true ? "active" : "")">
+                    <i class="bi bi-box-arrow-down"></i> Downloads
+                </a>
             }
 
             <hr class="sidebar-divider" />
+            <div class="sidebar-section-label">Support</div>
             <a href="/Admin/Help" class="sidebar-link @(ViewData["Title"]?.ToString()?.Contains("Help") == true ? "active" : "")">
                 <i class="bi bi-question-circle"></i> Help
             </a>
@@ -427,7 +457,7 @@
         </nav>
 
         <!-- Page content -->
-        <main class="main-content">
+        <main class="main-content" id="mainContent" tabindex="-1">
             @RenderBody()
         </main>
     </div>
@@ -439,6 +469,7 @@
 
     <script src="/lib/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
     @await RenderSectionAsync("Scripts", required: false)
+    <script src="/js/admin.js" asp-append-version="true"></script>
     <script>
     (function () {
         var toggle = document.getElementById('sidebarToggle');

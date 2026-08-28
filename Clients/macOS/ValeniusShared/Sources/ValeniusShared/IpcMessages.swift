@@ -27,6 +27,11 @@ public enum CommandType: Int, Codable, Sendable {
     /// name is carried in `PipeCommand.backendDns`; the daemon prepends https:// and persists
     /// it. Mirrors Windows CommandType.SetBackendUrl / Mobile's SetupScreen.
     case setBackendUrl = 13
+    /// Sent by the app's first-run "Use standalone" choice. No payload — the daemon just
+    /// persists that the user opted out of backend setup, so the app stops prompting and
+    /// shows the normal popover (local profiles, no backend contacted) instead of the
+    /// setup-required block. Mirrors Windows CommandType.SetStandaloneMode.
+    case setStandaloneMode = 14
 }
 
 public struct PipeCommand: Codable, Sendable {
@@ -116,13 +121,29 @@ public struct PipeResponse: Codable, Sendable {
 public struct ConnectedTunnelInfo: Codable, Sendable {
     public var name: String
     public var isVerified: Bool
+    /// True once the initial ~60s verification window elapsed with no success. Not terminal —
+    /// verification keeps retrying at a slower cadence in the background, and a late success
+    /// still clears this and sets `isVerified`. The app shows an amber "Confirmation failed"
+    /// tag instead of the plain "Connected" one. Mirrors Windows ConnectedTunnelInfo.VerificationFailed.
+    public var verificationFailed: Bool
+    /// The UDP port this tunnel switched to (typically 443) after the primary WireGuard port
+    /// produced no successful verification within the trigger window
+    /// (docs/design/port-443-fallback.md), or 0 if still on the primary port. Sticky for the
+    /// life of the connection — cleared only by a fresh connect. Mirrors Windows
+    /// ConnectedTunnelInfo.FallbackPortUsed.
+    public var fallbackPortUsed: Int
     public var connectedUser: String?
     /// ISO-8601 string (matches .NET DateTime / Python isoformat on the wire).
     public var connectedSince: String?
 
-    public init(name: String, isVerified: Bool = false, connectedUser: String? = nil, connectedSince: String? = nil) {
+    public init(
+        name: String, isVerified: Bool = false, verificationFailed: Bool = false, fallbackPortUsed: Int = 0,
+        connectedUser: String? = nil, connectedSince: String? = nil
+    ) {
         self.name = name
         self.isVerified = isVerified
+        self.verificationFailed = verificationFailed
+        self.fallbackPortUsed = fallbackPortUsed
         self.connectedUser = connectedUser
         self.connectedSince = connectedSince
     }
@@ -130,6 +151,8 @@ public struct ConnectedTunnelInfo: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case name = "Name"
         case isVerified = "IsVerified"
+        case verificationFailed = "VerificationFailed"
+        case fallbackPortUsed = "FallbackPortUsed"
         case connectedUser = "ConnectedUser"
         case connectedSince = "ConnectedSince"
     }
@@ -140,6 +163,10 @@ public struct TunnelStatus: Codable, Sendable {
     /// True once the background probe confirmed end-to-end traffic through the tunnel.
     /// The UI replaces the green dot with a green checkmark when this is true.
     public var isVerified: Bool = false
+    /// Mirrors `ConnectedTunnelInfo.verificationFailed` for the primary/server tunnel.
+    public var verificationFailed: Bool = false
+    /// Mirrors `ConnectedTunnelInfo.fallbackPortUsed` for the primary/server tunnel.
+    public var fallbackPortUsed: Int = 0
     public var connectedUser: String?
     public var tunnelName: String?
     public var connectedSince: String?
@@ -179,12 +206,21 @@ public struct TunnelStatus: Codable, Sendable {
     /// prompts for the server address instead of showing the normal popover. Mirrors Windows
     /// TunnelStatus.BackendUnconfigured / Mobile's SetupScreen gate.
     public var backendUnconfigured: Bool = false
+    /// True once the user explicitly chose "Use standalone" in the first-run setup dialog
+    /// while `backendUnconfigured` is true. The app shows the normal popover (local profiles,
+    /// connect/upload/delete all work with no backend contacted) instead of the setup-required
+    /// block, plus a "Connect to a server" action to opt in later. Default `false` preserves
+    /// today's behavior — same reasoning as `backendUnconfigured`'s doc comment. Mirrors
+    /// Windows TunnelStatus.StandaloneMode.
+    public var standaloneMode: Bool = false
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case isConnected = "IsConnected"
         case isVerified = "IsVerified"
+        case verificationFailed = "VerificationFailed"
+        case fallbackPortUsed = "FallbackPortUsed"
         case connectedUser = "ConnectedUser"
         case tunnelName = "TunnelName"
         case connectedSince = "ConnectedSince"
@@ -204,6 +240,7 @@ public struct TunnelStatus: Codable, Sendable {
         case backendUrl = "BackendUrl"
         case backendReachable = "BackendReachable"
         case backendUnconfigured = "BackendUnconfigured"
+        case standaloneMode = "StandaloneMode"
     }
 }
 

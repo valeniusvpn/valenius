@@ -14,10 +14,10 @@
     string Short(string s) => s.Length <= 16 ? s : s[..16] + "…";
 }
 
-<div class="d-flex align-items-center gap-2 mb-4">
-    <i class="bi bi-cloud-upload text-primary" style="font-size:1.4rem;"></i>
-    <h1 class="page-title mb-0">Releases</h1>
-</div>
+<header class="page-header"><div class="page-header-copy">
+    <div class="page-kicker">Software delivery</div><h1 class="page-title">Releases</h1>
+    <p class="page-description density-comfort-only">Publish and manage independent Stable and Beta release streams for every client platform.</p>
+</div></header>
 
 @if (TempData["Success"] is string success)
 {

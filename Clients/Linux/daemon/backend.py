@@ -20,6 +20,14 @@ log = logging.getLogger(__name__)
 
 VERSION = '1.0.0'
 
+# Overridable the same way VERSION is (see register() below) -- the Home Assistant
+# add-on monkeypatches this to 'homeassistant' so the backend's PlatformIcon switch
+# (Client.cs) and its release-stream update comparison (ReleaseOsForPlatform, which has
+# no Linux-stream entry for 'homeassistant' -- that add-on is Supervisor-updated, not
+# Valenius-updated) both treat it distinctly from the desktop Linux client instead of
+# reporting a bare 'Linux' that gets compared against the wrong release stream.
+PLATFORM = 'Linux'
+
 # A backend-rotated API key is persisted here (root-only) so it survives a daemon
 # restart/upgrade. /var/lib/valenius is 0700 root; the file is 0600. On startup a
 # persisted key takes precedence over the one from /etc/valenius/appsettings.json,
@@ -198,10 +206,14 @@ class BackendClient:
 
     # ── Low-level HTTP ───────────────────────────────────────────────────────
 
-    def _request_sync(self, method: str, path: str, body: Optional[dict] = None, timeout: int = 15) -> Optional[dict]:
-        if not self._base:
+    def _request_sync(
+        self, method: str, path: str, body: Optional[dict] = None, timeout: int = 15,
+        base_override: Optional[str] = None,
+    ) -> Optional[dict]:
+        base = base_override if base_override is not None else self._base
+        if not base:
             return None  # not configured yet — nothing to call
-        url = self._base + path
+        url = base + path
         data = json.dumps(body).encode() if body else None
         req = urllib.request.Request(url, data=data, method=method, headers=self._headers)
         try:
@@ -217,9 +229,12 @@ class BackendClient:
             log.debug("%s %s failed: %s", method, path, e)
             return None
 
-    async def _request(self, method: str, path: str, body: Optional[dict] = None, timeout: int = 15) -> Optional[dict]:
+    async def _request(
+        self, method: str, path: str, body: Optional[dict] = None, timeout: int = 15,
+        base_override: Optional[str] = None,
+    ) -> Optional[dict]:
         return await self._loop.run_in_executor(
-            None, lambda: self._request_sync(method, path, body, timeout)
+            None, lambda: self._request_sync(method, path, body, timeout, base_override)
         )
 
     # ── API calls ────────────────────────────────────────────────────────────
@@ -241,7 +256,7 @@ class BackendClient:
             'Version': VERSION,
             'TrayRunning': tray_running,
             'Profiles': profiles,
-            'Platform': 'Linux',
+            'Platform': PLATFORM,
         })
 
     async def poll(self, client_id: UUID, tray_running: bool = False) -> Optional[dict]:
@@ -266,15 +281,19 @@ class BackendClient:
         tunnel_name: str,
         lan_ip: str = '',
         wan_ip: str = '',
+        detail: Optional[str] = None,
     ) -> None:
-        await self._request('POST', '/api/clients/event', {
+        body = {
             'ClientKey': str(client_id),
             'EventType': event_type,
             'Username': username,
             'TunnelName': tunnel_name,
             'LanIp': lan_ip,
             'WanIp': wan_ip,
-        })
+        }
+        if detail is not None:
+            body['Detail'] = detail
+        await self._request('POST', '/api/clients/event', body)
 
     async def get_pending_config(self, client_id: UUID) -> Optional[dict]:
         return await self._request('GET', f'/api/clients/pending-config?clientKey={client_id}')
@@ -283,10 +302,51 @@ class BackendClient:
         # Per-OS stream: {version, downloadUrl, sha256, releaseNotes}. The Linux stream is
         # independent of Windows (see backend Admin/Releases + GET /api/version/{os}).
         # ?channel=beta selects the beta stream (falls back to stable when none published).
+        return await self.get_version_at(self._base)
+
+    async def get_version_at(self, base_url: Optional[str]) -> Optional[dict]:
+        """Same as get_version() but against an explicit base URL rather than self._base --
+        used by the standalone-mode auto-update fallback (see daemon/cloud_update_source.py),
+        which checks Stranto's own managed instance instead of a (nonexistent) configured
+        backend."""
         path = '/api/version/linux'
         if self._channel == 'beta':
             path += '?channel=beta'
-        return await self._request('GET', path)
+        return await self._request('GET', path, base_override=base_url)
+
+    async def archive_profile(self, client_id: UUID, profile_name: str, content: str) -> bool:
+        """POST /api/clients/profiles/archive -- archives a local profile's content server-side
+        without marking it managed. Used by the standalone-mode local-profile bulk transfer
+        (DaemonCore._transfer_local_profiles) once a client that was standalone configures a
+        backend and activates. Mirrors Windows ClientRegistrationService.ArchiveProfileAsync.
+
+        Builds its own request (like confirm_mfa_enrollment) rather than going through
+        _request/_request_sync: the endpoint returns 200 with an empty body on success, which
+        _request_sync's JSON-or-None parsing can't distinguish from a failed call."""
+        def _sync() -> bool:
+            if not self._base:
+                return False
+            url = self._base + '/api/clients/profiles/archive'
+            body = json.dumps({
+                'ClientKey': str(client_id), 'ProfileName': profile_name, 'Content': content,
+            }).encode()
+            req = urllib.request.Request(url, data=body, method='POST', headers=self._headers)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return resp.status < 300
+            except urllib.error.HTTPError:
+                return False
+            except Exception as e:
+                log.debug("profiles/archive failed: %s", e)
+                return False
+        return await self._loop.run_in_executor(None, _sync)
+
+    async def get_profiles(self, client_id: UUID) -> Optional[list[dict]]:
+        """GET /api/clients/profiles -- every ClientConfigArchive row for this machine
+        ({FileName, Content} each), regardless of platform or which identity claimed it.
+        Used to bootstrap the device-tunnel machine-level config store (see
+        DaemonCore._ensure_device_tunnel_config)."""
+        return await self._request('GET', f'/api/clients/profiles?clientKey={client_id}')
 
     async def confirm_mfa_enrollment(self, client_id: UUID, code: str) -> bool:
         """POST /api/clients/mfa/enroll-confirm. Returns True on HTTP 200."""

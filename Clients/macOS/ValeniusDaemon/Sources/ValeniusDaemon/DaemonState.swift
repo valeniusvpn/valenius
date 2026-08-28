@@ -18,6 +18,10 @@ struct TunnelEntry {
     var since: Date
     var verified: Bool = false
     var verifiedViaGateway: Bool = false
+    /// Mirrors Windows TunnelStateManager.Entry.VerificationFailed — see `markVerificationFailed`.
+    var verificationFailed: Bool = false
+    /// Mirrors Windows TunnelStateManager.Entry.FallbackPortUsed — see `markUsedFallbackPort`.
+    var fallbackPortUsed: Int = 0
 }
 
 actor DaemonState {
@@ -37,8 +41,25 @@ actor DaemonState {
     /// profile's connect would misattribute a conflict (a real bug found in testing).
     private var remoteLanCidrsByProfile: [String: [String]] = [:]
     private var skipConnectivityCheck = false
+    /// Backend-resolved (Customer.DeviceTunnelDefaultEnabled / Client.DeviceTunnelEnabled
+    /// override) — gates the device-tunnel auto-connect target. Mirrors Windows
+    /// RegistrationManager._deviceTunnelEnabled.
+    private var deviceTunnelEnabled = false
+    /// Per-profile UDP fallback port + trigger window, refreshed on every heartbeat. Present
+    /// only when the serving sidecar has confirmed the redirect is actually active — see
+    /// docs/design/port-443-fallback.md §4.4 — so a profile absent here means "no fallback
+    /// offered", never "fallback offered but unconfirmed". Mirrors Windows
+    /// RegistrationManager._fallbackPorts.
+    private var fallbackPortsByProfile: [String: (port: Int, triggerSeconds: Int)] = [:]
     private var heartbeatIntervalMinutes: Int = 5
     private var appLastSeen: Date?
+    /// Last real macOS username seen on any IPC call (`dispatch` refreshes this on every
+    /// command, including the app's 5s Status poll, so it's rarely more than a few seconds
+    /// stale). Used so internal-trigger connect events (AutoConnect, PendingConnect) log who
+    /// was actually using the machine instead of the trigger-source label — that label alone
+    /// isn't useful on the admin client list's "Last user" column. Mirrors Windows
+    /// RegistrationManager._lastKnownUsername.
+    private var lastKnownUsername: String?
 
     // MFA state — written by processStatusResponse, read by buildTunnelStatus.
     private var mfaRequired = false
@@ -73,10 +94,26 @@ actor DaemonState {
     func setVerified(tunnel: String, viaGateway: Bool) {
         active[tunnel]?.verified = true
         active[tunnel]?.verifiedViaGateway = viaGateway
+        active[tunnel]?.verificationFailed = false
     }
 
     func setUnverified(tunnel: String) {
         active[tunnel]?.verified = false
+        active[tunnel]?.verificationFailed = false
+    }
+
+    /// Marks that the initial verification window elapsed with no success — not terminal,
+    /// the caller keeps retrying at a slower cadence. Cleared by a later `setVerified`.
+    /// Mirrors Windows TunnelStateManager.MarkVerificationFailed.
+    func markVerificationFailed(tunnel: String) {
+        active[tunnel]?.verificationFailed = true
+    }
+
+    /// Records that `tunnel` switched to its UDP fallback port (docs/design/port-443-fallback.md).
+    /// Sticky for the life of the connection — only a fresh `setConnected` clears it.
+    /// Mirrors Windows TunnelStateManager.MarkUsedFallbackPort.
+    func markUsedFallbackPort(tunnel: String, port: Int) {
+        active[tunnel]?.fallbackPortUsed = port
     }
 
     func isVerifiedViaGateway(tunnel: String) -> Bool {
@@ -93,6 +130,8 @@ actor DaemonState {
             ConnectedTunnelInfo(
                 name: name,
                 isVerified: entry.verified,
+                verificationFailed: entry.verificationFailed,
+                fallbackPortUsed: entry.fallbackPortUsed,
                 connectedUser: entry.user,
                 connectedSince: ISO8601DateFormatter().string(from: entry.since)
             )
@@ -172,6 +211,16 @@ actor DaemonState {
         return Date().timeIntervalSince(appLastSeen) < appActiveThreshold
     }
 
+    /// Mirrors Windows RegistrationManager.SetLastKnownUsername. Only `dispatch` (real IPC
+    /// callers, authenticated via LOCAL_PEERCRED) calls this, so the cached value is always a
+    /// genuine macOS username, never an internal trigger label. Guards against an empty string
+    /// defensively, matching the Windows implementation.
+    func setLastKnownUsername(_ username: String) {
+        if !username.isEmpty { lastKnownUsername = username }
+    }
+
+    func getLastKnownUsername() -> String? { lastKnownUsername }
+
     // MARK: Update / misc
 
     func setUpdateAvailable(_ v: Bool) {
@@ -220,6 +269,25 @@ actor DaemonState {
     func setSkipConnectivityCheck(_ v: Bool) { skipConnectivityCheck = v }
     func getSkipConnectivityCheck() -> Bool { skipConnectivityCheck }
 
+    func setDeviceTunnelEnabled(_ v: Bool) { deviceTunnelEnabled = v }
+    func getDeviceTunnelEnabled() -> Bool { deviceTunnelEnabled }
+
+    /// `entries`: (profileName, port, triggerSeconds) from StatusResponse.FallbackEndpoints.
+    func setFallbackPorts(_ entries: [(profileName: String, port: Int, triggerSeconds: Int)]) {
+        var map: [String: (port: Int, triggerSeconds: Int)] = [:]
+        for (name, port, triggerSeconds) in entries where !name.isEmpty && port > 0 {
+            map[name] = (port, triggerSeconds > 0 ? triggerSeconds : 20)
+        }
+        fallbackPortsByProfile = map
+    }
+
+    /// The UDP fallback port + trigger window (seconds of no successful verification before
+    /// trying it) advertised for `profile`, or nil when none is offered (no customer opt-in,
+    /// or opted-in but not confirmed active). Mirrors Windows RegistrationManager.GetFallbackConfig.
+    func getFallbackConfig(profile: String) -> (port: Int, triggerSeconds: Int)? {
+        fallbackPortsByProfile[profile]
+    }
+
     /// Gateway /health target (ip, port) for the server profile, or nil. Only the native
     /// server tunnel has a gateway target; foreign profiles fall back to handshake.
     func gatewayProbe(profile: String?) -> (ip: String, port: Int)? {
@@ -233,6 +301,9 @@ actor DaemonState {
         let primary = primaryTunnel()
         status.isConnected = primary != nil
         status.isVerified = connectedTunnels.first?.isVerified ?? false
+        let primaryInfo = primary.flatMap { p in connectedTunnels.first { $0.name == p.name } }
+        status.verificationFailed = primaryInfo?.verificationFailed ?? false
+        status.fallbackPortUsed = primaryInfo?.fallbackPortUsed ?? 0
         status.tunnelName = primary?.name
         status.connectedUser = primary?.entry.user
         status.connectedSince = primary.map { ISO8601DateFormatter().string(from: $0.entry.since) }

@@ -4,10 +4,10 @@
     ViewData["Title"] = "Security Alerts";
 }
 
-<div class="d-flex align-items-center gap-2 mb-4">
-    <i class="bi bi-shield-exclamation text-warning" style="font-size:1.4rem;"></i>
-    <h1 class="page-title mb-0">Security Alerts</h1>
-</div>
+<header class="page-header"><div class="page-header-copy">
+    <div class="page-kicker">Security</div><h1 class="page-title">Security alerts</h1>
+    <p class="page-description density-comfort-only">Review sidecar identity changes and acknowledge verified security events.</p>
+</div></header>
 
 @if (TempData["Success"] is string ok)
 {

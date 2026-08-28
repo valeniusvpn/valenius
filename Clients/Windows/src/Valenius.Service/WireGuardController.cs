@@ -74,6 +74,15 @@ public class WireGuardController
         return result;
     }
 
+    /// <summary>
+    /// True if <paramref name="wireGuardOutput"/> is wireguard.exe's "there is no such tunnel
+    /// service" failure — i.e. the tunnel is already gone, which for a disconnect is the desired
+    /// end state rather than an error. Callers use this so a tunnel that vanished behind our back
+    /// can't leave <see cref="TunnelStateManager"/> stuck reporting Connected forever.
+    /// </summary>
+    public static bool IsTunnelAlreadyGone(string wireGuardOutput) =>
+        wireGuardOutput.Contains("does not exist as an installed service", StringComparison.OrdinalIgnoreCase);
+
     public bool IsTunnelServiceRunning(string tunnelName)
     {
         try
@@ -85,6 +94,49 @@ public class WireGuardController
         {
             return false;
         }
+    }
+
+    /// <summary>True if a tunnel service for <paramref name="tunnelName"/> exists at all,
+    /// in any state. Unlike <see cref="IsTunnelServiceRunning"/> this is also true for a service
+    /// that is stopped or marked for deletion but not yet removed — which is exactly the state
+    /// that makes an immediate reinstall fail with "Tunnel already installed and running".</summary>
+    public bool TunnelServiceExists(string tunnelName)
+    {
+        try
+        {
+            using var sc = new ServiceController($"WireGuardTunnel${tunnelName}");
+            _ = sc.Status;   // throws InvalidOperationException if the service is gone
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Waits (bounded) for a tunnel service to actually disappear after an uninstall. Windows
+    /// deletes a service only once its last handle closes, so `/uninstalltunnelservice` can return
+    /// while the service still exists — an immediate `/installtunnelservice` then fails with
+    /// "Tunnel already installed and running". Returns true if the service is gone.
+    /// </summary>
+    public async Task<bool> WaitForTunnelServiceGoneAsync(
+        string tunnelName, TimeSpan timeout, CancellationToken ct = default)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (TunnelServiceExists(tunnelName))
+        {
+            if (DateTime.UtcNow >= deadline || ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    "Tunnel service WireGuardTunnel${Tunnel} still present after waiting {Seconds}s for removal.",
+                    tunnelName, (int)timeout.TotalSeconds);
+                return false;
+            }
+            try { await Task.Delay(250, ct); }
+            catch (OperationCanceledException) { return false; }
+        }
+        return true;
     }
 
     public IEnumerable<string> GetRunningTunnels()

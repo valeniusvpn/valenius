@@ -4,10 +4,10 @@
     ViewData["Title"] = "Backup & Restore";
 }
 
-<div class="d-flex align-items-center gap-2 mb-4">
-    <i class="bi bi-safe2 text-primary" style="font-size:1.4rem;"></i>
-    <h1 class="page-title mb-0">Backup &amp; Restore</h1>
-</div>
+<header class="page-header"><div class="page-header-copy">
+    <div class="page-kicker">Resilience</div><h1 class="page-title">Backup &amp; restore</h1>
+    <p class="page-description density-comfort-only">Protect the configuration database and recover an installation from an encrypted backup.</p>
+</div></header>
 
 @if (TempData["Success"] is string success)
 {

@@ -12,7 +12,7 @@ using Valenius.Backend.Services;
 
 namespace Valenius.Backend.Pages.Admin;
 
-public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker tunnels, IPeerProvisioningService provisioner, ILicenseEnforcement enforcement, ISidecarService sidecar, IConfiguration config, IEmailService email, IAuditService audit, IMfaSessionService mfa, IInstallationLicenseMonitor installLicense, ILicenseContext license) : PageModel
+public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker tunnels, IPeerProvisioningService provisioner, ILicenseEnforcement enforcement, ISidecarService sidecar, IEmailService email, IAuditService audit, IMfaSessionService mfa, IInstallationLicenseMonitor installLicense, ILicenseContext license) : PageModel
 {
     public Client Client { get; private set; } = null!;
     public List<ConnectionLog> Logs { get; private set; } = [];
@@ -26,7 +26,20 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
     /// there can be more than one in flight at once.</summary>
     public HashSet<string> PendingDeleteProfileNames { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
     public bool IsOnline { get; private set; }
+    /// <summary>True when the client's own NATIVE sidecar tunnel specifically is connected —
+    /// scoped like this because both Kill Tunnel and Force Disconnect only ever act on the
+    /// native peer, never a foreign one. For "is any sidecar-based VPN of this client's up at
+    /// all" (native or foreign) use <see cref="AnyTunnelConnected"/> / <see cref="TunnelRows"/>.</summary>
     public bool IsWgConnected { get; private set; }
+    /// <summary>The client's own assigned customer's native WireGuard profile name, or null if
+    /// the customer isn't in Valenius (sidecar) mode.</summary>
+    public string? NativeProfileName { get; private set; }
+    /// <summary>Per-tunnel connected/verified breakdown (native + every foreign profile) for the
+    /// "which peers are actually up" display on this page. Empty entries render as "not connected".</summary>
+    public List<TunnelStatusRow> TunnelRows { get; private set; } = [];
+    public bool AnyTunnelConnected => TunnelRows.Any(r => r.Connected);
+
+    public record TunnelStatusRow(string Label, string ProfileName, bool Connected, bool Verified, bool ExpectsVerification);
 
     // ── MFA (Pro) ────────────────────────────────────────────────────────────
     /// <summary>Whether the MFA management card is shown (Pro installation license active).</summary>
@@ -108,8 +121,12 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         PendingDeleteProfileNames = new HashSet<string>(
             await db.ClientPendingDeletes.Where(d => d.ClientId == id).Select(d => d.ProfileName).ToListAsync(),
             StringComparer.OrdinalIgnoreCase);
-        IsOnline      = presence.IsOnline(client.ClientKey);
-        IsWgConnected = tunnels.IsConnected(client.ClientKey);
+        IsOnline = presence.IsOnline(client.ClientKey);
+        NativeProfileName = client.Customer?.ServerMode == "Valenius"
+            ? Valenius.Backend.Services.WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name)
+            : null;
+        // Kill Tunnel / Force Disconnect only ever act on the native peer.
+        IsWgConnected = NativeProfileName is not null && tunnels.IsConnected(client.ClientKey, NativeProfileName);
 
         TrafficRx = client.WgRxLifetime;
         TrafficTx = client.WgTxLifetime;
@@ -153,6 +170,28 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
                     .OrderBy(c => c.Name)
                     .ToListAsync();
             }
+        }
+
+        // Per-peer connected/verified breakdown — native + every foreign profile — so the admin
+        // can see which specific sidecar-based VPN(s) are actually up, not just an aggregate star.
+        var liveTunnels = tunnels.GetTunnels(client.ClientKey);
+        WgTunnelTracker.TunnelInfo? Find(string profileName) => liveTunnels.FirstOrDefault(t =>
+            string.Equals(t.ProfileName, profileName, StringComparison.OrdinalIgnoreCase));
+
+        if (NativeProfileName is not null)
+        {
+            var t = Find(NativeProfileName);
+            TunnelRows.Add(new TunnelStatusRow(
+                client.Customer!.Name, NativeProfileName,
+                t is not null, t?.Verified ?? false, t?.ExpectsGatewayVerification ?? false));
+        }
+        foreach (var fp in ForeignProfiles)
+        {
+            if (string.IsNullOrEmpty(fp.ProfileName)) continue;
+            var t = Find(fp.ProfileName);
+            TunnelRows.Add(new TunnelStatusRow(
+                fp.SourceCustomer.Name, fp.ProfileName,
+                t is not null, t?.Verified ?? false, t?.ExpectsGatewayVerification ?? false));
         }
 
         GeneratedConfig = await BuildGeneratedConfigAsync(client);
@@ -218,7 +257,11 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         "Windows" => Models.ReleaseOs.Windows,
         "Linux" => Models.ReleaseOs.Linux,
         "macos" or "macOS" or "Mac" or "Darwin" => Models.ReleaseOs.MacOs,
-        _ => null, // Android/iOS are store-updated; unknown/legacy → no update comparison
+        // Android/iOS are store-updated; the Home Assistant add-on is Supervisor-updated
+        // (config.yaml's version tag) and tracks its own version numbers, never comparable
+        // to the desktop Linux .deb stream it'd otherwise fall under — see backend.py's
+        // PLATFORM override in Clients/HomeAssistant. Unknown/legacy → no update comparison.
+        _ => null,
     };
 
     private async Task<string?> BuildGeneratedConfigAsync(Client client)
@@ -668,7 +711,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var removed = await sidecar.RemovePeerAsync(client.Customer.SidecarBaseUrl, client.WgPublicKey);
         client.WgPeerKilled = true;
         await db.SaveChangesAsync();
-        tunnels.MarkDisconnected(client.ClientKey);
+        // Native peer only — a foreign profile's tunnel is untouched by Kill Tunnel.
+        tunnels.MarkDisconnected(client.ClientKey, WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name));
         notifier.Notify(client.ClientKey);
         _ = audit.LogAsync(Audit.Client, "Tunnel killed", $"Client: {client.Hostname}",
             removed ? "Peer removed from sidecar." : "Peer removal request failed or sidecar unreachable.");
@@ -774,12 +818,17 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         return RedirectToPage(new { id });
     }
 
-    public async Task<IActionResult> OnPostSavePeerSettingsAsync(int id, string? allowedIPs, string? dnsServer, string? dnsSearchDomains, int? maxConfigValidDays)
+    public async Task<IActionResult> OnPostSavePeerSettingsAsync(int id, string? allowedIPs, string? remoteLanCidrs, string? dnsServer, string? dnsSearchDomains, int? maxConfigValidDays)
     {
         if (!User.IsInRole("Admin")) return Forbid();
         if (!IsValidCidrList(allowedIPs))
         {
             TempData["Error"] = "Invalid Allowed IPs — enter comma-separated CIDRs, e.g. 0.0.0.0/0, ::/0 or 10.0.0.0/8.";
+            return RedirectToPage(new { id });
+        }
+        if (!IsValidCidrList(remoteLanCidrs))
+        {
+            TempData["Error"] = "Invalid Remote LAN(s) — enter comma-separated CIDRs, e.g. 10.16.12.0/24.";
             return RedirectToPage(new { id });
         }
         if (!IsValidIpv4(dnsServer))
@@ -794,7 +843,20 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         }
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
+
+        var normalizedRemoteLan = string.IsNullOrWhiteSpace(remoteLanCidrs) ? null : remoteLanCidrs.Trim();
+        if (normalizedRemoteLan is not null && client.CustomerId is not null)
+        {
+            var conflict = await FindRemoteLanConflictAsync(client.Id, client.CustomerId.Value, normalizedRemoteLan);
+            if (conflict is not null)
+            {
+                TempData["Error"] = $"Remote LAN(s) overlap with client '{conflict}' on the same customer — each network may only be routed through one peer.";
+                return RedirectToPage(new { id });
+            }
+        }
+
         client.AllowedIPs         = string.IsNullOrWhiteSpace(allowedIPs) ? null : allowedIPs.Trim();
+        client.RemoteLanCidrs     = normalizedRemoteLan;
         client.DnsServer          = string.IsNullOrWhiteSpace(dnsServer)  ? null : dnsServer.Trim();
         client.DnsSearchDomains   = string.IsNullOrWhiteSpace(dnsSearchDomains) ? null : NormalizeDomainList(dnsSearchDomains);
         client.MaxConfigValidDays = maxConfigValidDays is > 0 ? maxConfigValidDays : null;
@@ -809,6 +871,36 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         foreach (var part in value.Split(','))
             if (!System.Net.IPNetwork.TryParse(part.Trim(), out _)) return false;
         return true;
+    }
+
+    /// <summary>Returns the hostname of another active client on the same customer whose
+    /// RemoteLanCidrs overlaps any entry in <paramref name="remoteLanCidrs"/>, or null if none.
+    /// Two CIDR blocks overlap iff one's base address falls inside the other — they can never
+    /// partially cross without nesting, since both are defined by a common address prefix.</summary>
+    private async Task<string?> FindRemoteLanConflictAsync(int clientId, int customerId, string remoteLanCidrs)
+    {
+        var mine = remoteLanCidrs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var others = await db.Clients
+            .Where(c => c.CustomerId == customerId && c.Id != clientId
+                     && c.RemoteLanCidrs != null && c.RemoteLanCidrs != "")
+            .Select(c => new { c.Hostname, c.RemoteLanCidrs })
+            .ToListAsync();
+
+        foreach (var other in others)
+        {
+            var theirs = other.RemoteLanCidrs!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (mine.Any(m => theirs.Any(t => CidrsOverlap(m, t))))
+                return other.Hostname;
+        }
+        return null;
+    }
+
+    private static bool CidrsOverlap(string a, string b)
+    {
+        if (!System.Net.IPNetwork.TryParse(a.Trim(), out var netA)) return false;
+        if (!System.Net.IPNetwork.TryParse(b.Trim(), out var netB)) return false;
+        if (netA.BaseAddress.AddressFamily != netB.BaseAddress.AddressFamily) return false;
+        return netA.Contains(netB.BaseAddress) || netB.Contains(netA.BaseAddress);
     }
 
     private static bool IsValidIpv4(string? value)
@@ -948,6 +1040,28 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         _ = audit.LogAsync(Audit.Client, "Client config repair requested", $"Client: {client.Hostname}");
 
         TempData["Success"] = "Config repair requested — it will run on the client's next heartbeat.";
+        return RedirectToPage(new { id });
+    }
+
+    /// <summary>Remotely restarts the client's own background service on its next heartbeat.
+    /// Recovery hatch for stale in-memory client state — chiefly a tunnel that was removed behind
+    /// the service's back, leaving it reporting Connected with no tunnel present, which the user
+    /// can neither disconnect nor reconnect from the tray. Disruptive by nature (it drops any
+    /// active tunnel), so it is always an explicit admin action and never triggered
+    /// automatically.</summary>
+    public async Task<IActionResult> OnPostRestartServiceAsync(int id)
+    {
+        if (!User.IsInRole("Admin")) return Forbid();
+        var client = await db.Clients.FindAsync(id);
+        if (client is null) return NotFound();
+
+        client.PendingServiceRestart = true;
+        await db.SaveChangesAsync();
+        notifier.Notify(client.ClientKey);
+        _ = audit.LogAsync(Audit.Client, "Client service restart requested", $"Client: {client.Hostname}");
+
+        TempData["Success"] = "Service restart requested — the client will restart its service on its "
+                            + "next heartbeat. Any active tunnel will be disconnected.";
         return RedirectToPage(new { id });
     }
 

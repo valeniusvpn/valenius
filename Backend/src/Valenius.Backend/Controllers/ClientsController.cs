@@ -34,9 +34,15 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             .Include(c => c.Customer).ThenInclude(cu => cu!.TrustedNetworks)
             .FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
 
-        // One-time migration: claim the most-recently-seen non-deleted record for this
-        // hostname that predates the ClientKey scheme (ClientKey == "").
-        if (client is null && !string.IsNullOrEmpty(request.Hostname))
+        var isAndroid = string.Equals(request.Platform, "Android", StringComparison.OrdinalIgnoreCase);
+        var deviceId = string.IsNullOrWhiteSpace(request.DeviceId) ? null : request.DeviceId.Trim();
+        if (deviceId?.Length > 128)
+            return BadRequest("DeviceId must not exceed 128 characters.");
+
+        // One-time desktop migration: claim the most-recently-seen non-deleted record for this
+        // hostname that predates the ClientKey scheme (ClientKey == ""). Android model names are
+        // not unique, so they must never be used to claim a legacy record.
+        if (client is null && !isAndroid && !string.IsNullOrEmpty(request.Hostname))
         {
             var legacy = await db.Clients
                 .Include(c => c.Customer).ThenInclude(cu => cu!.TrustedNetworks)
@@ -52,19 +58,30 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         if (client is null)
         {
-            // Same-hostname collision: a non-deleted client with this hostname already exists
-            // under a different ClientKey (typically a reinstall with a fresh key). Don't
+            // Identity collision: a non-deleted client already exists under a different
+            // ClientKey (typically a reinstall with a fresh key). Desktop clients retain the
+            // hostname rule. Android model names are shared by every device of that model, so
+            // Android uses ANDROID_ID and deliberately performs no duplicate check when an older
+            // app does not provide one. Don't
             // silently create a parallel active client and don't fail with a misleading error —
             // record the new install as a pending duplicate so an admin can reassign the
             // original record to it, or keep both. (Excludes other pending-duplicate rows so
             // repeated heartbeats from this same new install don't chain.)
-            var nameCollision = !string.IsNullOrEmpty(request.Hostname)
-                && await db.Clients.AnyAsync(c =>
+            var identityCollision = isAndroid
+                ? deviceId is not null && await db.Clients.AnyAsync(c =>
                     !c.IsDeleted
                     && !c.IsDuplicatePending
                     && c.ClientKey != ""
                     && c.ClientKey != request.ClientKey
-                    && c.Hostname == request.Hostname);
+                    && c.Platform == "Android"
+                    && c.DeviceId == deviceId)
+                : !string.IsNullOrEmpty(request.Hostname)
+                    && await db.Clients.AnyAsync(c =>
+                        !c.IsDeleted
+                        && !c.IsDuplicatePending
+                        && c.ClientKey != ""
+                        && c.ClientKey != request.ClientKey
+                        && c.Hostname == request.Hostname);
 
             client = new Client
             {
@@ -77,10 +94,11 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 RegisteredAt       = now,
                 LastSeenAt         = now,
                 IsActive           = false,
-                IsDuplicatePending = nameCollision,
+                IsDuplicatePending = identityCollision,
                 CustomerId         = await MatchCustomerAsync(request.Hostname),
                 KnownProfiles      = SerializeProfiles(request.Profiles),
-                Platform           = request.Platform
+                Platform           = request.Platform,
+                DeviceId           = deviceId
             };
             db.Clients.Add(client);
         }
@@ -96,6 +114,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             if (!string.IsNullOrEmpty(request.UserSid))  client.UserSid  = request.UserSid;
             if (!string.IsNullOrEmpty(request.Version))  client.ClientVersion = request.Version;
             if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
+            if (deviceId is not null) client.DeviceId = deviceId;
             client.KnownProfiles = SerializeProfiles(request.Profiles);
             client.LastSeenAt = now;
         }
@@ -107,8 +126,23 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             if (!string.IsNullOrEmpty(request.UserSid))  client.UserSid  = request.UserSid;
             if (!string.IsNullOrEmpty(request.Version))  client.ClientVersion = request.Version;
             if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
+            if (deviceId is not null) client.DeviceId = deviceId;
             client.KnownProfiles = SerializeProfiles(request.Profiles);
             client.LastSeenAt = now;
+        }
+
+        // Repair Android rows that older app versions incorrectly marked as duplicates solely
+        // because another phone had the same model name. A genuine reinstall remains a duplicate
+        // when its Android ID matches another retained client; without an ID it becomes an ordinary
+        // pending registration that an admin can review and activate.
+        if (isAndroid && client.IsDuplicatePending)
+        {
+            client.IsDuplicatePending = deviceId is not null && await db.Clients.AnyAsync(c =>
+                c.Id != client.Id
+                && !c.IsDeleted
+                && !c.IsDuplicatePending
+                && c.ClientKey != ""
+                && c.DeviceId == deviceId);
         }
 
         // Drain confirmed deletes from the queue: any queued name the client's own reported
@@ -186,6 +220,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         var pendingConfigRepair    = client.PendingConfigRepair;
         client.PendingConfigRepair = false;
+
+        var pendingServiceRestart    = client.PendingServiceRestart;
+        client.PendingServiceRestart = false;
 
         // Deliver the oldest queued delete (see ClientPendingDelete) — not one-shot; only the
         // Register POST above drains confirmed entries (it's the only request that carries the
@@ -471,7 +508,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             remoteLanCidrsByProfile,
             pendingConfigRepair,
             deviceTunnelEnabled,
-            fallbackEndpoints.Count > 0 ? fallbackEndpoints.ToArray() : null);
+            fallbackEndpoints.Count > 0 ? fallbackEndpoints.ToArray() : null,
+            pendingServiceRestart);
     }
 
     [HttpPost("event")]
@@ -520,33 +558,73 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         // recorded.
         if (string.Equals(request.EventType, "Verified", StringComparison.OrdinalIgnoreCase))
         {
-            wgTunnels.MarkVerified(client.ClientKey);
+            wgTunnels.MarkVerified(client.ClientKey, request.TunnelName);
             return Ok();
         }
 
-        if (string.Equals(request.EventType, "Connect", StringComparison.OrdinalIgnoreCase)
-            && client.WgPublicKey is not null)
+        // A client's own assigned customer's native profile, if it has one. Every sidecar-backed
+        // tunnel — native or foreign — is identified by matching request.TunnelName against this
+        // or against a ClientForeignProfiles row, since a client can have several tunnels up at
+        // once (see root CLAUDE.md "Simultaneous multi-VPN connections") and only the tunnel this
+        // specific event is actually about may be marked connected/disconnected.
+        var nativeProfileName = client.Customer?.ServerMode == "Valenius"
+            ? WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name)
+            : null;
+        var isNativeTunnel = nativeProfileName is not null
+            && string.Equals(request.TunnelName, nativeProfileName, StringComparison.OrdinalIgnoreCase);
+
+        async Task<bool> IsTransitUniqueForAsync(int customerId, string? subnet)
+        {
+            if (string.IsNullOrEmpty(subnet)) return false;
+            var others = await db.Customers
+                .Where(c => c.Id != customerId && c.SidecarVpnSubnet != null && c.SidecarVpnSubnet != "")
+                .Select(c => c.SidecarVpnSubnet)
+                .ToListAsync();
+            return WireGuardHelper.IsTransitUnique(subnet, others);
+        }
+
+        if (string.Equals(request.EventType, "Connect", StringComparison.OrdinalIgnoreCase))
         {
             // A gateway-verified connect (Pro sidecar, globally-unique transit network) is
             // tracked separately from a plain handshake-only one, so the admin list's "connected"
             // star can require actual verification where that's a meaningful signal, while
-            // clients with no gateway target keep today's simpler "peer registered" behavior —
+            // tunnels with no gateway target keep today's simpler "peer registered" behavior —
             // a handshake alone isn't reliable enough to gate a display indicator on (WireGuard's
             // own rekey timers mean a genuinely-connected peer can go ~180s without a fresh one).
+            string? wgPublicKey = null;
             var expectsGatewayVerification = false;
-            if (client.Customer?.ServerMode == "Valenius" && !string.IsNullOrEmpty(client.Customer.SidecarVpnIp))
-            {
-                var otherSubnets = await db.Customers
-                    .Where(c => c.Id != client.Customer.Id && c.SidecarVpnSubnet != null && c.SidecarVpnSubnet != "")
-                    .Select(c => c.SidecarVpnSubnet)
-                    .ToListAsync();
-                expectsGatewayVerification = WireGuardHelper.IsTransitUnique(client.Customer.SidecarVpnSubnet, otherSubnets);
-            }
-            wgTunnels.MarkConnected(client.ClientKey, client.WgPublicKey, expectsGatewayVerification);
-            _ = eventLog.RecordAsync(ManagementEventType.ClientConnected, client.Id, client.CustomerId, client.Hostname);
 
-            // A prior "Kill Tunnel" removed this peer from the sidecar. Now that the client
-            // is actively reconnecting, transparently re-add it — a kick, not a ban.
+            if (isNativeTunnel && client.WgPublicKey is not null && client.Customer is not null)
+            {
+                wgPublicKey = client.WgPublicKey;
+                if (!string.IsNullOrEmpty(client.Customer.SidecarVpnIp))
+                    expectsGatewayVerification = await IsTransitUniqueForAsync(client.Customer.Id, client.Customer.SidecarVpnSubnet);
+            }
+            else if (!isNativeTunnel)
+            {
+                var foreign = await db.ClientForeignProfiles
+                    .Include(p => p.SourceCustomer)
+                    .FirstOrDefaultAsync(p => p.ClientId == client.Id
+                        && p.ProfileName == request.TunnelName
+                        && p.WgPublicKey != null);
+                if (foreign?.SourceCustomer is { } source)
+                {
+                    wgPublicKey = foreign.WgPublicKey;
+                    if (!string.IsNullOrEmpty(source.SidecarVpnIp))
+                        expectsGatewayVerification = await IsTransitUniqueForAsync(source.Id, source.SidecarVpnSubnet);
+                }
+            }
+
+            if (wgPublicKey is not null)
+            {
+                wgTunnels.MarkConnected(client.ClientKey, request.TunnelName, wgPublicKey, expectsGatewayVerification);
+                _ = eventLog.RecordAsync(ManagementEventType.ClientConnected, client.Id, client.CustomerId, client.Hostname);
+            }
+
+            // A prior "Kill Tunnel" removed the NATIVE peer from the sidecar. Now that the
+            // client is actively reconnecting THAT tunnel specifically, transparently re-add
+            // it — a kick, not a ban. A foreign-profile connect must never resurrect an
+            // unrelated killed native peer.
             //
             // NEVER raw-re-add an MFA-gated peer: a gated peer must be absent from the
             // interface until MfaSessionService pushes a CA-signed grant, and a plain
@@ -555,8 +633,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             // peers) would not undo it. For gated peers the grant pipeline is the only re-add
             // path; the client re-authenticates via the MfaAuthorizeUrl deep link on its next
             // heartbeat. WgPeerKilled is left set and self-clears if the policy later ungates.
-            if (client.WgPeerKilled
+            if (isNativeTunnel && client.WgPeerKilled
                 && client.Customer?.ServerMode == "Valenius"
+                && client.WgPublicKey is not null
                 && client.VpnIpAddress is not null
                 && !mfa.ResolvePolicy(client, client.Customer).Gated)
             {
@@ -568,12 +647,13 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         }
         else if (string.Equals(request.EventType, "Disconnect", StringComparison.OrdinalIgnoreCase))
         {
-            wgTunnels.MarkDisconnected(client.ClientKey);
+            wgTunnels.MarkDisconnected(client.ClientKey, request.TunnelName);
             _ = eventLog.RecordAsync(ManagementEventType.ClientDisconnected, client.Id, client.CustomerId, client.Hostname);
 
-            // PerConnection MFA: an explicit disconnect revokes the active session immediately
-            // so the next connect re-authenticates. (No-op in OSS / for ungated peers.)
-            if (mfa.ResolvePolicy(client, client.Customer).Policy == MfaPolicy.PerConnection)
+            // PerConnection MFA gates the native tunnel specifically (grants are pushed to the
+            // client's own customer's sidecar) — a foreign-profile disconnect must not revoke a
+            // session tied to an unrelated, possibly still-connected, native tunnel.
+            if (isNativeTunnel && mfa.ResolvePolicy(client, client.Customer).Policy == MfaPolicy.PerConnection)
             {
                 var active = await mfa.GetActiveSessionAsync(client.Id);
                 if (active is not null)
@@ -816,6 +896,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
     {
         if (string.IsNullOrWhiteSpace(request.Token) || string.IsNullOrWhiteSpace(request.ClientKey))
             return BadRequest("Token and ClientKey are required.");
+        if (request.DeviceId?.Trim().Length > 128)
+            return BadRequest("DeviceId must not exceed 128 characters.");
 
         var now = DateTime.UtcNow;
         var token = await db.PairingTokens.FirstOrDefaultAsync(t => t.Token == request.Token);
@@ -833,6 +915,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 Username     = "",
                 UserSid      = "",
                 RegisteredAt = now,
+                DeviceId     = string.IsNullOrWhiteSpace(request.DeviceId) ? null : request.DeviceId.Trim(),
             };
             db.Clients.Add(client);
         }
@@ -844,10 +927,34 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         client.CustomerId         = token.CustomerId;
         if (!string.IsNullOrEmpty(request.Hostname)) client.Hostname = request.Hostname;
         if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
+        if (!string.IsNullOrWhiteSpace(request.DeviceId)) client.DeviceId = request.DeviceId.Trim();
         client.LastSeenAt = now;
         token.UsedAt      = now;
 
-        await db.SaveChangesAsync();
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex) when (IsDuplicateKeyViolation(ex))
+        {
+            // Redeem raced a concurrent first registration (same ClientKey) that inserted first —
+            // same recovery as Register() above. Re-read the winner's row and apply this redeem's
+            // activation to it instead of failing the pairing outright.
+            db.ChangeTracker.Clear();
+            client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
+            if (client is null)
+                return Problem("Pairing conflict could not be resolved.", statusCode: 500);
+            client.IsActive           = true;
+            client.IsDeleted          = false;
+            client.IsDuplicatePending = false;
+            client.CustomerId         = token.CustomerId;
+            if (!string.IsNullOrEmpty(request.Hostname)) client.Hostname = request.Hostname;
+            if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
+            if (!string.IsNullOrWhiteSpace(request.DeviceId)) client.DeviceId = request.DeviceId.Trim();
+            client.LastSeenAt = now;
+            token.UsedAt      = now;
+            await db.SaveChangesAsync();
+        }
         // Pairing both activates the device and hands it the installation's API key, so a keyless
         // first-run app never needs a hardcoded shared key. The one-time token was the authorization.
         return Ok(new { activated = true, apiKey = apiKeyStore.Key });
@@ -925,12 +1032,12 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
     }
 }
 
-public record RegisterRequest(string ClientKey, string Hostname, string HostSid, string Username, string UserSid, string? Version, bool TrayRunning = false, string[]? Profiles = null, string? Platform = null);
+public record RegisterRequest(string ClientKey, string Hostname, string HostSid, string Username, string UserSid, string? Version, bool TrayRunning = false, string[]? Profiles = null, string? Platform = null, string? DeviceId = null);
 public record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "",
     /// <summary>Free-text detail for non-connection events (e.g. "ConfigRepairFailed"). Null/unused for Connect/Disconnect.</summary>
     string? Detail = null);
 public record MfaEnrollConfirmRequest(string ClientKey, string Code);
-public record RedeemPairingRequest(string Token, string ClientKey, string? Hostname = null, string? Platform = null);
+public record RedeemPairingRequest(string Token, string ClientKey, string? Hostname = null, string? Platform = null, string? DeviceId = null);
 public record RegisterDeviceRequest(string ClientKey, string? FcmToken);
 public record MfaApproveRequest(string ClientKey, int ChallengeId, int MatchedNumber);
 public record MfaDenyRequest(string ClientKey, int ChallengeId);
@@ -1037,7 +1144,14 @@ public record StatusResponse(
     /// installed; External customers are taken at the admin's word), so a client never wastes a
     /// connect attempt on a port nothing answers.
     /// </summary>
-    FallbackEndpointEntry[]? FallbackEndpoints = null);
+    FallbackEndpointEntry[]? FallbackEndpoints = null,
+    /// <summary>When true, the client restarts its own background service (Windows: the
+    /// <c>Valenius</c> service). Admin-triggered recovery hatch for stale in-memory client state —
+    /// e.g. a tunnel removed behind the service's back, leaving it reporting Connected with no
+    /// tunnel present, which the user can neither disconnect nor reconnect. Drops any active
+    /// tunnel. One-shot, cleared atomically after being sent. Windows-only today; other platforms
+    /// ignore the field.</summary>
+    bool ServiceRestartRequested = false);
 public record MfaApprovalEntry(int ChallengeId, string RequesterName, string? RequesterIp, int[] Choices, DateTime ExpiresAt);
 public record PendingConfigResponse(string FileName, string Content);
 public record PendingForeignConfigEntry(string FileName, string Content);

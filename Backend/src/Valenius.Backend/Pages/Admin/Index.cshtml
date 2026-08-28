@@ -11,12 +11,15 @@
     tr.client-beta { --bs-table-bg: #f0f0f0; }
 </style>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h1 class="page-title mb-0">Clients</h1>
-    <small class="text-muted">Machines that have contacted this server</small>
-</div>
+<header class="page-header">
+    <div class="page-header-copy">
+        <div class="page-kicker">Client operations</div>
+        <h1 class="page-title">Clients</h1>
+        <p class="page-description density-comfort-only">Find, provision and troubleshoot every machine that has contacted this server.</p>
+    </div>
+</header>
 
-<div class="mb-3 d-flex gap-2 flex-wrap">
+<div class="filter-chips mb-3" aria-label="Client status filters">
     <a asp-page="Index" asp-route-filter="all" asp-route-customer="@Model.SelectedCustomer" asp-route-pageSize="@Model.PageSizeRaw" asp-route-search="@Model.Search"
        class="btn btn-sm @(Model.Filter == "all" ? "btn-primary" : "btn-outline-secondary")">
         <i class="bi bi-grid me-1"></i>All <span id="count-total" class="ms-1 badge @(Model.Filter == "all" ? "bg-white text-primary" : "bg-secondary")">@Model.Counts.Total</span>
@@ -47,7 +50,7 @@
     }
 </div>
 
-<div class="mb-3 d-flex gap-2 flex-wrap align-items-center">
+<div class="filter-bar">
     <form method="get" asp-page="Index" id="searchForm" class="input-group input-group-sm" style="max-width: 340px;">
         <input type="hidden" name="filter" value="@Model.Filter" />
         <input type="hidden" name="customer" value="@Model.SelectedCustomer" />

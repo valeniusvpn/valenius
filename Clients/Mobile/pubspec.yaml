@@ -1,7 +1,7 @@
 name: valenius_mobile
 description: Valenius mobile VPN client (Android-first, iOS-ready).
 publish_to: "none"
-version: 1.11.18+7
+version: 1.11.18+8
 environment:
   sdk: ">=3.4.0 <4.0.0"
   flutter: ">=3.22.0"
@@ -15,6 +15,7 @@ dependencies:
     path: packages/valenius_vpn
   flutter_secure_storage: ^9.2.2   # ClientKey (and later, config keys) at rest
   device_info_plus: ^10.1.2        # device name reported to the backend as Hostname
+  android_id: ^0.5.2+1             # stable Android identity for backend duplicate detection
   mobile_scanner: ^7.0.0           # QR pairing scan (7.x MLKit uses GoogleDataTransport ~>10, aligning with Firebase's on iOS)
   url_launcher: ^6.3.0             # open MFA authorize / enrollment links
   package_info_plus: ^8.0.0        # app version for the About dialog

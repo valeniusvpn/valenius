@@ -77,7 +77,12 @@ internal record ClientStatusResponse(
     /// A profile absent from this list never falls back. The backend only lists a profile once the
     /// serving side is confirmed to answer on that port, so it is safe to try without a pre-check.
     /// See docs/design/port-443-fallback.md.</summary>
-    FallbackEndpointEntry[]? FallbackEndpoints = null);
+    FallbackEndpointEntry[]? FallbackEndpoints = null,
+    /// <summary>When true, restart the Valenius Windows service. Admin-triggered recovery hatch for
+    /// stale in-memory state — e.g. a tunnel removed behind the service's back, leaving it
+    /// reporting Connected with no tunnel present, which the user can neither disconnect nor
+    /// reconnect. Drops any active tunnel. One-shot — cleared server-side after being sent.</summary>
+    bool ServiceRestartRequested = false);
 
 internal record PendingForeignConfigEntry(string FileName, string Content);
 internal record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);

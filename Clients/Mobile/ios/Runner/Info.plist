@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Valenius Mobile</string>
+	<string>Valenius VPN</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -26,6 +26,13 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- WireGuard's crypto (Curve25519, ChaCha20-Poly1305, BLAKE2s) is standard, non-proprietary
+	     encryption used only for authenticating/encrypting the user's own VPN traffic — qualifies
+	     for the international EAR exemption, so this is NOT "non-exempt" encryption. Skips the
+	     export-compliance questionnaire on future uploads for most territories. Does NOT resolve
+	     France's separate cryptography import declaration if the app is distributed there. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
