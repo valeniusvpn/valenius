@@ -46,58 +46,6 @@
     </div>
 </div>
 
-<!-- Standard backup & restore -->
-<div class="card mb-4" style="max-width:760px;">
-    <div class="card-header">
-        <i class="bi bi-archive me-2"></i>Standard backup &amp; restore
-    </div>
-
-    <!-- Download -->
-    <div class="card-body">
-        <h6 class="fw-semibold mb-1"><i class="bi bi-download me-1 text-primary"></i>Download</h6>
-        <p class="text-muted small mb-3">
-            Downloads a JSON file with all customers, clients, users, trusted networks, and settings.
-            <strong>Private keys are not included</strong> — use the encrypted backup below for full disaster recovery.
-        </p>
-        <form method="post" asp-page-handler="Download">
-            <div class="form-check mb-3">
-                <input asp-for="IncludeConnectionLogs" class="form-check-input" type="checkbox" />
-                <label asp-for="IncludeConnectionLogs" class="form-check-label">
-                    Include connection logs
-                    <span class="text-muted small">(@Model.ConnectionLogCount entries)</span>
-                </label>
-            </div>
-            <button type="submit" class="btn btn-primary btn-sm">
-                <i class="bi bi-download me-1"></i>Download backup
-            </button>
-        </form>
-    </div>
-
-    <hr class="my-0" />
-
-    <!-- Restore -->
-    <div class="card-body">
-        <h6 class="fw-semibold mb-1"><i class="bi bi-upload me-1 text-danger"></i>Restore</h6>
-        <div class="alert alert-danger py-2 mb-3 small">
-            <i class="bi bi-exclamation-triangle-fill me-1"></i>
-            <strong>Destructive operation.</strong> Replaces <em>all</em> current data.
-            <strong>This cannot be undone.</strong>
-        </div>
-        <form method="post" asp-page-handler="Restore" enctype="multipart/form-data"
-              onsubmit="return confirm('Restore will permanently replace ALL current data.\n\nThis cannot be undone. Are you sure?');">
-            <div class="mb-3">
-                <label asp-for="BackupFile" class="form-label small fw-semibold">
-                    Backup file <span class="text-muted fw-normal">(.json)</span>
-                </label>
-                <input asp-for="BackupFile" type="file" accept=".json" class="form-control form-control-sm" />
-            </div>
-            <button type="submit" class="btn btn-danger btn-sm">
-                <i class="bi bi-arrow-counterclockwise me-1"></i>Restore
-            </button>
-        </form>
-    </div>
-</div>
-
 <!-- Encrypted backup & restore -->
 <div class="card border-warning mb-4" style="max-width:760px;">
     <div class="card-header" style="background:#fffbf0; border-bottom-color:#ffe69c;">
@@ -109,9 +57,11 @@
     <div class="card-body">
         <h6 class="fw-semibold mb-1"><i class="bi bi-download me-1 text-warning"></i>Download</h6>
         <p class="text-muted small mb-3">
-            Downloads a fully encrypted backup containing <strong>all private key material</strong>
-            (CA private key, mTLS backend key, and WireGuard® client keys).
-            An auto-generated passphrase is shown once — store it in a password manager or alongside the file.
+            Downloads an encrypted database snapshot containing settings, security policies,
+            user credentials, profile archives, certificates, API tokens, appliance records,
+            diagnostic bundles, and <strong>all database private key material</strong>.
+            Release files, backend configuration/secrets and sidecar volumes require separate backups.
+            An auto-generated passphrase is shown once — store it in a password manager separately from the file.
             You will need both the file <em>and</em> the passphrase to restore.
         </p>
         <form id="encBackupForm" method="post" asp-page-handler="DownloadEncrypted">
@@ -139,7 +89,10 @@
         <div class="alert alert-danger py-2 mb-3 small">
             <i class="bi bi-exclamation-triangle-fill me-1"></i>
             <strong>Destructive operation.</strong> Replaces <em>all</em> current data <strong>including CA and WireGuard® private keys.</strong>
-            Restart the backend after restoring to reload the CA material.
+            Restore during a maintenance window. Restart the backend before resuming operations
+            to reload authentication and CA settings. Temporary authorizations and enrollment codes
+            are invalidated; users must authorize again. Existing VPN-side grants retain their own expiry.
+            Only encrypted backups matching this backend's database model are accepted.
             <strong>This cannot be undone.</strong>
         </div>
         <form method="post" asp-page-handler="RestoreEncrypted" enctype="multipart/form-data"
@@ -166,6 +119,33 @@
     </div>
 </div>
 
+<!-- Redacted inventory export -->
+<div class="card mb-4" style="max-width:760px;">
+    <div class="card-header">
+        <i class="bi bi-list-check me-2"></i>Redacted inventory export
+    </div>
+    <div class="card-body">
+        <p class="text-muted small mb-3">
+            Downloads IDs, timestamps, security-policy values and status flags for review.
+            Credentials, configuration text, names, addresses, notes and log details are omitted.
+            <strong>This is not a recovery backup.</strong> Review the remaining internal information before sharing.
+            Older plaintext exports may still contain credentials.
+        </p>
+        <form method="post" asp-page-handler="Download">
+            <div class="form-check mb-3">
+                <input asp-for="IncludeConnectionLogs" class="form-check-input" type="checkbox" />
+                <label asp-for="IncludeConnectionLogs" class="form-check-label">
+                    Include redacted connection history
+                    <span class="text-muted small">(@Model.ConnectionLogCount entries)</span>
+                </label>
+            </div>
+            <button type="submit" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-download me-1"></i>Download redacted inventory
+            </button>
+        </form>
+    </div>
+</div>
+
 <!-- Passphrase modal (shown after encrypted backup download) -->
 <div class="modal fade" id="passphraseModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
     <div class="modal-dialog modal-dialog-centered">
@@ -177,7 +157,7 @@
                 <div class="alert alert-warning py-2 mb-3 small">
                     <strong>This passphrase is shown only once.</strong>
                     Without it, the encrypted backup cannot be decrypted. Store it in a password manager
-                    or securely alongside the backup file.
+                    separately from the backup file.
                 </div>
                 <label class="form-label small fw-semibold">Backup passphrase</label>
                 <div class="input-group input-group-sm mb-2">

@@ -26,14 +26,54 @@ namespace Valenius.Service;
 internal static class StateFileWriter
 {
     private const int MaxAttempts = 5;
+    private static readonly object AtomicWriteLock = new();
 
     public static void WriteAllText(string path, string contents) =>
-        Write(path, () => File.WriteAllText(path, contents));
+        ServiceFileAccess.Run(() => Retry(path, () => File.WriteAllText(path, contents)));
 
     public static void WriteAllBytes(string path, byte[] bytes) =>
-        Write(path, () => File.WriteAllBytes(path, bytes));
+        ServiceFileAccess.Run(() => Retry(path, () => File.WriteAllBytes(path, bytes)));
 
-    private static void Write(string path, Action write)
+    /// <summary>Flush a sibling temporary file before replacing a registration cache.
+    /// An interrupted write must leave the previous complete identity and authorization intact.</summary>
+    public static void WriteAllTextAtomic(string path, string contents) => ServiceFileAccess.Run(() =>
+    {
+        // ReplaceFile is atomic for readers, but competing replacements can interfere
+        // with each other's rename/metadata steps. Serialize our small state writes.
+        lock (AtomicWriteLock) WriteAtomicCore(path, contents);
+    });
+
+    private static void WriteAtomicCore(string path, string contents)
+    {
+        var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            Retry(path, () =>
+            {
+                using (var file = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    using (var writer = new StreamWriter(file, leaveOpen: true))
+                    {
+                        writer.Write(contents);
+                        writer.Flush();
+                    }
+                    file.Flush(flushToDisk: true);
+                }
+                // ReplaceFile preserves the existing target's security descriptor.
+                // MoveFileEx would substitute the temporary file's inherited DACL.
+                if (File.Exists(path)) File.Replace(temporaryPath, path, null);
+                else File.Move(temporaryPath, path);
+            });
+        }
+        finally
+        {
+            try { File.Delete(temporaryPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    internal static void Retry(string path, Action write)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         for (var attempt = 1; ; attempt++)

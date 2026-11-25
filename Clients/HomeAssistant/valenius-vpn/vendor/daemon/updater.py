@@ -31,6 +31,7 @@ from daemon.state import DaemonState
 log = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT = 300  # seconds for large .deb files
+_MAX_DOWNLOAD = 512 * 1024 * 1024
 _CHUNK = 65_536          # 64 KiB read chunks
 # The .deb must land somewhere the *unsandboxed* dpkg (spawned via systemd-run, see
 # _install) can read. The daemon runs PrivateTmp=true, so a file in /tmp lives in the
@@ -136,10 +137,14 @@ def _download(url: str, expected_sha256: str) -> Path:
         req = urllib.request.Request(url, headers={'User-Agent': f'Valenius-Linux/{VERSION}'})
         with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT) as resp, \
              open(tmp_path, 'wb') as out:
+            received = 0
             while True:
                 chunk = resp.read(_CHUNK)
                 if not chunk:
                     break
+                received += len(chunk)
+                if received > _MAX_DOWNLOAD:
+                    raise ValueError('Update exceeds 512 MiB')
                 out.write(chunk)
                 sha256.update(chunk)
     except Exception:

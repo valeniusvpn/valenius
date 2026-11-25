@@ -52,7 +52,7 @@ if ($TrustedSigning) { $Sign = $true }
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$LASTEXITCODE = 0   # initialise so strict mode doesn't complain before first native call
+$global:LASTEXITCODE = 0   # native tools update global state; do not shadow it with a script-local zero
 
 # -- Signing helpers -----------------------------------------------------------
 
@@ -121,7 +121,7 @@ function Invoke-Sign {
         foreach ($file in $Files) {
             Write-Host "  Signing (Azure Trusted Signing): $file"
             & $tool sign /v /fd SHA256 /td SHA256 /tr $ts /dlib $TsDlib /dmdf $TsMetadata $file
-            if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed for: $file"; exit 1 }
+            if ($global:LASTEXITCODE -ne 0) { Write-Error "Signing failed for: $file"; exit 1 }
         }
         return
     }
@@ -130,7 +130,7 @@ function Invoke-Sign {
     foreach ($file in $Files) {
         Write-Host "  Signing: $file"
         & $tool sign /fd SHA256 /td SHA256 /tr $TimestampUrl @certArgs $file
-        if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed for: $file"; exit 1 }
+        if ($global:LASTEXITCODE -ne 0) { Write-Error "Signing failed for: $file"; exit 1 }
     }
 }
 
@@ -228,9 +228,9 @@ foreach ($arch in @('x64', 'arm64')) {
         --self-contained true `
         /p:Version=$Version `
         --output (Join-Path $PublishDir "service-$arch")
-    if ($LASTEXITCODE -ne 0) { Write-Error "Service ($arch) publish failed"; exit 1 }
+    if ($global:LASTEXITCODE -ne 0) { Write-Error "Service ($arch) publish failed"; exit 1 }
     $outDir = Join-Path $PublishDir "service-$arch"
-    if ((Get-ChildItem $outDir -File -Recurse).Count -eq 0) {
+    if (@(Get-ChildItem $outDir -File -Recurse).Count -eq 0) {
         Write-Error "Service ($arch) publish produced no output in: $outDir"; exit 1
     }
 }
@@ -244,9 +244,9 @@ foreach ($arch in @('x64', 'arm64')) {
         --self-contained true `
         /p:Version=$Version `
         --output (Join-Path $PublishDir "trayapp-$arch")
-    if ($LASTEXITCODE -ne 0) { Write-Error "TrayApp ($arch) publish failed"; exit 1 }
+    if ($global:LASTEXITCODE -ne 0) { Write-Error "TrayApp ($arch) publish failed"; exit 1 }
     $outDir = Join-Path $PublishDir "trayapp-$arch"
-    if ((Get-ChildItem $outDir -File -Recurse).Count -eq 0) {
+    if (@(Get-ChildItem $outDir -File -Recurse).Count -eq 0) {
         Write-Error "TrayApp ($arch) publish produced no output in: $outDir"; exit 1
     }
 }
@@ -273,7 +273,7 @@ Write-Host "  Version set to $Version"
 # -- Run Inno Setup ------------------------------------------------------------
 Write-Host "`n=== Running Inno Setup ===" -ForegroundColor Cyan
 & $InnoSetupPath $IssFile
-if ($LASTEXITCODE -ne 0) { Write-Error 'Inno Setup compilation failed'; exit 1 }
+if ($global:LASTEXITCODE -ne 0) { Write-Error 'Inno Setup compilation failed'; exit 1 }
 
 # -- Sign the installer EXE ----------------------------------------------------
 $installer = Get-ChildItem $OutputDir -Filter "ValeniusSetup-*.exe" |
@@ -284,6 +284,13 @@ if ($Sign) {
     if (-not $installer) { Write-Error 'Installer EXE not found - cannot sign.'; exit 1 }
     Write-Host "`n=== Signing installer ===" -ForegroundColor Cyan
     Invoke-Sign @($installer.FullName)
+    # Use the same publisher/product gate as clients before advertising a signed release.
+    $verifier = Join-Path $PublishDir 'service-x64\Valenius.Service.exe'
+    $signedHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
+    & $verifier --verify-update $installer.FullName $Version $signedHash
+    if ($global:LASTEXITCODE -ne 0) { Write-Error 'Signed installer failed the client update trust policy.'; exit 1 }
+} else {
+    Write-Warning 'Unsigned development installer: updated clients will refuse automatic installation.'
 }
 
 # -- Compute SHA-256 and update versions.json ---------------------------------

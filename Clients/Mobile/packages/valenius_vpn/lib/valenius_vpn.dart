@@ -81,3 +81,20 @@ class TunnelStateEvent {
   final String name;
   final String state;
 }
+
+/// Android-only reader for the data the app stored with flutter_secure_storage v9
+/// (EncryptedSharedPreferences), which v11 can no longer read. See
+/// `android/.../LegacySecureStorage.kt` and the app's `SecureKeyStore`. Other
+/// platforms have no such store and always report `none`.
+class ValeniusLegacyStorage {
+  static const MethodChannel _channel =
+      MethodChannel('valenius_vpn/legacy_storage');
+
+  /// `{status: none|ok|failed|abandoned, entries?, skipped?, error?, attempts?}`.
+  Future<Map<String, dynamic>> read() async =>
+      await _channel.invokeMapMethod<String, dynamic>('read') ??
+      const {'status': 'none'};
+
+  /// Deletes the v9 data file. Call only after its entries were copied and verified.
+  Future<void> delete() => _channel.invokeMethod<void>('delete');
+}

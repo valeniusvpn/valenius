@@ -145,25 +145,7 @@
                 <input type="hidden" name="setupName"   value="@Model.CarriedName" />
                 <input type="hidden" name="setupPrefix" value="@Model.CarriedPrefix" />
                 <input type="hidden" name="setupNotes"  value="@Model.CarriedNotes" />
-                <input type="hidden" name="setupToken"  value="@Model.CarriedToken" />
-
-                @if (Model.CarriedToken is not null)
-                {
-                    <div class="alert alert-info py-2 px-3 mb-3">
-                        <div class="small fw-semibold mb-1"><i class="bi bi-key me-1"></i>Enrollment token</div>
-                        <div class="small text-muted mb-2">
-                            Set <code>ENROLLMENT_TOKEN</code> to this value in your wg-sidecar stack, then start
-                            the sidecar before testing the connection below.
-                        </div>
-                        <div class="input-group input-group-sm">
-                            <input id="enrollToken" type="text" class="form-control font-monospace"
-                                   value="@Model.CarriedToken" readonly />
-                            <button class="btn btn-outline-secondary" type="button" onclick="copyToken()">
-                                <i class="bi bi-clipboard" id="copyIcon"></i>
-                            </button>
-                        </div>
-                    </div>
-                }
+                <p class="small text-muted">Finish setup to generate a single-use enrollment token, valid for 15 minutes.</p>
 
                 <h6 class="text-muted small text-uppercase fw-semibold mb-3 mt-1">Sidecar connection</h6>
 
@@ -187,12 +169,8 @@
                     </div>
                 </div>
 
-                <div class="mb-4">
-                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnTestSidecar">
-                        <i class="bi bi-plug me-1"></i>Test connection
-                    </button>
-                    <span id="sidecarTestResult" class="ms-2 small"></span>
-                </div>
+                <p class="small text-muted mb-4">Finish setup and enroll the server, then test
+                    the connection on the customer's Integrated Server page.</p>
 
                 <hr class="my-3" />
                 <h6 class="text-muted small text-uppercase fw-semibold mb-3">Client configuration</h6>
@@ -268,7 +246,7 @@
                     <p class="small fw-semibold mb-1">Sidecar enrollment token</p>
                     <p class="text-muted small mb-2">
                         Set this as <code>ENROLLMENT_TOKEN</code> in your wg-sidecar stack and deploy.
-                        The token is shown only once — you can regenerate it anytime in Customer settings.
+                        The token is shown only once and expires after 15 minutes — you can regenerate it in Customer settings.
                     </p>
                     <div class="input-group input-group-sm">
                         <input id="enrollToken" type="text" class="form-control font-monospace"
@@ -348,30 +326,6 @@ function copyToken() {
         if (r.checked) updateMode(r.value);
     });
 
-    // Sidecar test connection
-    var btnTest  = document.getElementById('btnTestSidecar');
-    var testResult = document.getElementById('sidecarTestResult');
-    if (btnTest) {
-        btnTest.addEventListener('click', function () {
-            var host = (document.getElementById('sidecarHost')  || {}).value || '';
-            var port = (document.getElementById('sidecarMgmtPort') || {}).value || '8443';
-            if (!host) { testResult.textContent = 'Enter a host first.'; testResult.className = 'ms-2 small text-warning'; return; }
-            btnTest.disabled = true;
-            testResult.textContent = 'Testing…';
-            testResult.className   = 'ms-2 small text-muted';
-            fetch('@Url.Page("Setup", "TestSidecar")&host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port))
-                .then(function (r) { return r.json(); })
-                .then(function (d) {
-                    testResult.textContent = d.message;
-                    testResult.className   = 'ms-2 small ' + (d.ok ? 'text-success' : 'text-danger');
-                })
-                .catch(function () {
-                    testResult.textContent = 'Request failed.';
-                    testResult.className   = 'ms-2 small text-danger';
-                })
-                .finally(function () { btnTest.disabled = false; });
-        });
-    }
 }());
 </script>
 }

@@ -11,6 +11,7 @@ import logging
 import os
 import socket
 import ssl
+import tempfile
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -55,9 +56,15 @@ def _load_persisted_backend_url() -> Optional[str]:
     try:
         with open(_BACKEND_URL_FILE, 'r', encoding='utf-8') as f:
             url = f.read().strip()
-            return url or None
-    except Exception:
+            if not url or not normalize_backend_url(url):
+                raise RuntimeError('Persisted backend URL is invalid; refusing to change backend trust')
+            return url
+    except FileNotFoundError:
+        if os.path.lexists(_BACKEND_URL_FILE):
+            raise RuntimeError('Persisted backend URL is unreadable; repair storage before startup')
         return None
+    except OSError as error:
+        raise RuntimeError('Persisted backend URL is unreadable; refusing to change backend trust') from error
 
 
 def normalize_backend_url(raw: Optional[str]) -> str:
@@ -110,6 +117,7 @@ class BackendClient:
         self._channel = 'stable'  # auto-update channel, refreshed from the heartbeat
         self._headers = {
             'X-Api-Key': _load_persisted_api_key() or api_key,
+            'X-Valenius-Device-Auth': '1',
             'Content-Type': 'application/json',
             'User-Agent': f'Valenius-Linux/{VERSION}',
         }
@@ -118,21 +126,34 @@ class BackendClient:
         self._channel = 'beta' if (channel or '').lower() == 'beta' else 'stable'
 
     def set_api_key(self, new_key: Optional[str]) -> None:
-        """Adopt a backend-rotated key (heartbeat ClientApiKey): switch + persist so it
-        survives a restart. No-op if empty or unchanged. Only sent by the backend while
-        this client is still on the previous key during a rotation grace window."""
+        """Persist an offered individual credential before using it to confirm migration.
+        A failed write retains the current key so the same offer can be retried."""
         if not new_key or new_key == self._headers.get('X-Api-Key'):
             return
-        self._headers['X-Api-Key'] = new_key
+        temporary = None
         try:
-            os.makedirs(os.path.dirname(_API_KEY_FILE), mode=0o700, exist_ok=True)
-            fd = os.open(_API_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            directory = os.path.dirname(_API_KEY_FILE)
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix='.apikey-', dir=directory)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(new_key)
-            os.chmod(_API_KEY_FILE, 0o600)
-            log.info("Adopted rotated client API key from backend.")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, _API_KEY_FILE)
+            temporary = None
+            if os.name == 'posix':
+                directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            self._headers['X-Api-Key'] = new_key
+            log.info("Persisted and adopted individual client API credential.")
         except Exception as e:
-            log.warning("Could not persist rotated API key: %s", e)
+            log.warning("Could not persist API credential (%s); retaining current credential for retry.", type(e).__name__)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
 
     @property
     def base_url(self) -> str:
@@ -143,23 +164,40 @@ class BackendClient:
         """True once a backend URL is available (from appsettings or the persisted user choice)."""
         return bool(self._base)
 
-    def set_base_url(self, raw: Optional[str]) -> Optional[str]:
-        """Set the backend URL from a user-entered DNS (first-run tray prompt): normalize to
-        https://host, switch, and persist (root-only, 0600) so it survives a restart/upgrade and
-        overrides appsettings. Returns the normalized URL, or None if the input has no usable host."""
+    def set_base_url(self, raw: Optional[str], *, privileged: bool = False) -> Optional[str]:
+        """Administrator-owned initial provisioning, persisted before use (0600).
+        Existing origins cannot be reassigned; None means the input has no usable host."""
+        if not privileged:
+            raise PermissionError('An administrator must provision the backend address')
         normalized = normalize_backend_url(raw)
         if not normalized:
             return None
-        self._base = normalized
+        if self._base:
+            if self._base.casefold() == normalized.casefold():
+                return self._base
+            raise ValueError('Backend reassignment is not supported through IPC. Administrator migration is required.')
+        temporary = None
         try:
-            os.makedirs(os.path.dirname(_BACKEND_URL_FILE), mode=0o700, exist_ok=True)
-            fd = os.open(_BACKEND_URL_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            directory = os.path.dirname(_BACKEND_URL_FILE)
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix='.backend-', dir=directory)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(normalized)
-            os.chmod(_BACKEND_URL_FILE, 0o600)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, _BACKEND_URL_FILE)
+            temporary = None
+            if os.name == 'posix':
+                directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            self._base = normalized
             log.info("Backend URL set to %s and persisted.", normalized)
-        except Exception as e:
-            log.warning("Could not persist backend URL: %s", e)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
         return normalized
 
     @property
@@ -220,7 +258,10 @@ class BackendClient:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status == 204:
                     return None
-                raw = resp.read().decode()
+                raw_bytes = resp.read(16 * 1024 * 1024 + 1)
+                if len(raw_bytes) > 16 * 1024 * 1024:
+                    raise ValueError('Backend response exceeds 16 MiB')
+                raw = raw_bytes.decode()
                 return json.loads(raw) if raw.strip() else None
         except urllib.error.HTTPError as e:
             log.warning("HTTP %d %s %s", e.code, method, path)

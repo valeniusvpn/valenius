@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <!-- Audit the complete graph; never silently ship a high/critical advisory
+         or treat an unavailable audit feed as a successful security check. -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>low</NuGetAuditLevel>
+    <WarningsAsErrors>$(WarningsAsErrors);NU1900;NU1903;NU1904;NU1905</WarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+</Project>

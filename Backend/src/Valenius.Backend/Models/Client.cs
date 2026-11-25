@@ -10,6 +10,19 @@ public class Client
     [MaxLength(36)]
     public string ClientKey { get; set; } = "";
 
+    /// <summary>SHA-256 of this device's independent bearer credential; null means
+    /// migration/recovery is required. Never returned in management DTOs.</summary>
+    [MaxLength(64)]
+    public string? DeviceCredentialHash { get; set; }
+
+    // Only identities present at the one-time upgrade snapshot can use the optional
+    // legacy window. Confirmation/administrator rotation is irreversible for that row.
+    public bool LegacyAuthenticationEligible { get; set; }
+    [MaxLength(64)]
+    public string? PendingDeviceCredentialHash { get; set; }
+    [MaxLength(1024)]
+    public string? PendingDeviceCredentialProtected { get; set; }
+
     [MaxLength(255)]
     public string Hostname { get; set; } = "";
 
@@ -153,6 +166,10 @@ public class Client
     [MaxLength(10)]
     public string UpdateChannel { get; set; } = ReleaseChannel.Stable;
 
+    /// <summary>Last delivered non-secret connection policy, replayed during an update halt.
+    /// Bound to the device identity; contains no credentials, configs or commands.</summary>
+    public string? LastDeliveredPolicyJson { get; set; }
+
     /// <summary>
     /// When true the Windows service skips the Phase 2 connectivity probe
     /// (https://SidecarVpnIp/health through the tunnel) and treats the tunnel
@@ -283,6 +300,9 @@ public class Client
 
     /// <summary>RFC 6238 time-step of the last accepted MFA TOTP code (replay protection).</summary>
     public long? MfaTotpLastUsedInterval { get; set; }
+
+    public int TotpFailureCount { get; set; }
+    public DateTime? TotpFailureWindowEndsAt { get; set; }
 
     public int? CustomerId { get; set; }
     public Customer? Customer { get; set; }

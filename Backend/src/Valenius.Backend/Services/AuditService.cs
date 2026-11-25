@@ -8,42 +8,57 @@ namespace Valenius.Backend.Services;
 public sealed class AuditService(
     IServiceScopeFactory  scopeFactory,
     IHttpContextAccessor  http,
-    ILogger<AuditService> logger) : IAuditService
+    ILogger<AuditService> logger,
+    AuditWriteStatus status) : IAuditService
 {
-    public Task LogAsync(string category, string action, string target, string? details = null)
-    {
-        // Capture request-context values synchronously (HttpContext may be gone after first await).
-        var actor = GetActor();
-        var ip    = GetIp();
-        var ts    = DateTime.UtcNow;
+    public Task LogAsync(string category, string action, string target, string? details = null) =>
+        WriteAsync(Entry(category, action, target, details), required: false);
 
-        // Fire-and-forget async write so the calling handler is not delayed.
-        return WriteAsync(ts, category, action, actor, target, details, ip);
+    public Task LogRequiredAsync(string category, string action, string target, string? details = null) =>
+        WriteAsync(Entry(category, action, target, details), required: true);
+
+    public async Task SaveChangesWithAuditAsync(ApplicationDbContext db, string category, string action,
+        string target, string? details = null)
+    {
+        try
+        {
+            db.AuditLogs.Add(Entry(category, action, target, details));
+            await db.SaveChangesAsync();
+            status.Succeeded();
+        }
+        catch (Exception ex) { Failed(ex, required: true); }
     }
 
-    private async Task WriteAsync(DateTime ts, string category, string action,
-        string actor, string target, string? details, string? ip)
+    private AuditLog Entry(string category, string action, string target, string? details) => new()
+    {
+        Timestamp = DateTime.UtcNow, Category = category, Action = action,
+        Actor = GetActor(), Target = target, Details = details, IpAddress = GetIp()
+    };
+
+    private async Task WriteAsync(AuditLog entry, bool required)
     {
         try
         {
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-            db.AuditLogs.Add(new AuditLog
-            {
-                Timestamp = ts,
-                Category  = category,
-                Action    = action,
-                Actor     = actor,
-                Target    = target,
-                Details   = details,
-                IpAddress = ip
-            });
+            db.AuditLogs.Add(entry);
             await db.SaveChangesAsync();
+            status.Succeeded();
         }
         catch (Exception ex)
         {
-            logger.LogDebug(ex, "Audit log write failed.");
+            Failed(ex, required);
         }
+    }
+
+    private void Failed(Exception ex, bool required)
+    {
+        status.Failed();
+        // Exception messages/DB diagnostics can include credentials or SQL values.
+        // Log a stable failure signal without event content or exception payloads.
+        logger.LogError("Audit persistence failed ({FailureType}); required={Required}. Check database availability and permissions.",
+            ex.GetType().Name, required);
+        if (required) throw new AuditPersistenceException();
     }
 
     private string GetActor()

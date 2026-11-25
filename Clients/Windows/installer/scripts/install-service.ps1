@@ -34,7 +34,8 @@ $ErrorActionPreference = 'Stop'
 #   3. /grant ... /T          -- add an EXPLICIT SYSTEM + Administrators FullControl ACE to the
 #                                folder AND every child, so SYSTEM always retains access even on
 #                                a file whose inheritance was somehow broken.
-# Idempotent; safe on every install/update. *S-1-5-18 = NT AUTHORITY\SYSTEM,
+# The sequence is now applied top-down per ordinary item, excluding credentials
+# from /reset. *S-1-5-18 = NT AUTHORITY\SYSTEM,
 # *S-1-5-32-544 = BUILTIN\Administrators.
 #
 # Do NOT add /inheritance:r here. Blocking inheritance turns each child into a protected
@@ -42,8 +43,8 @@ $ErrorActionPreference = 'Stop'
 # file's SYSTEM ACE without re-adding it -- the SYSTEM service then cannot read its own
 # registration.json and silently goes offline (regression fixed by reverting to this form).
 # The trade-off: BUILTIN\Users:(RX) inherited from C:\ProgramData remains readable. That
-# hardening is deferred until it can ship without stranding the fleet; DataDirSelfHeal in
-# the service is the runtime safety net if a data-dir ACL ever ends up unreadable again.
+# retained for ordinary legacy profile flows; credentials get an explicit protected
+# file DACL below. DataDirSelfHeal preserves the same distinction at runtime.
 $DataDir = Join-Path $env:ProgramData 'Valenius'
 # Create the directory up front so its ACL is correct BEFORE the service (SYSTEM) starts
 # and writes registration.json into it. Done unconditionally, not "if it exists" -- a fresh
@@ -52,10 +53,55 @@ if (-not (Test-Path $DataDir)) {
     New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
     Write-Host "Created data directory: $DataDir"
 }
-& icacls.exe $DataDir /setowner "*S-1-5-18" /T /C 2>$null | Out-Null
-& icacls.exe $DataDir /reset /T /C 2>$null | Out-Null
-& icacls.exe $DataDir /grant "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /C 2>$null | Out-Null
-Write-Host "Data directory permissions ensured (SYSTEM + Administrators FullControl): $DataDir"
+# The tree deliberately retains inherited Users read access for legacy profile flows.
+# Credential files (including interrupted private temporary writes) must never
+# participate in a recursive /reset, even briefly during an upgrade.
+function Protect-ValeniusCredential([string] $CredentialPath) {
+    $CredentialAcl = [Security.AccessControl.FileSecurity]::new()
+    $CredentialAcl.SetAccessRuleProtection($true, $false)
+    foreach ($CredentialSid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $CredentialAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($CredentialSid),
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    # Persist only the modified DACL. Windows PowerShell's Set-Acl provider may
+    # request SACL privileges even though no audit policy is being changed.
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($CredentialPath), $CredentialAcl)
+    } else {
+        [IO.File]::SetAccessControl($CredentialPath, $CredentialAcl)
+    }
+}
+
+function Repair-ValeniusDataAcl([string] $DirectoryPath) {
+    if ((Get-Item -LiteralPath $DirectoryPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Valenius data directory must not contain reparse points.'
+    }
+    & icacls.exe $DirectoryPath /setowner '*S-1-5-18' /C 2>$null | Out-Null
+    & icacls.exe $DirectoryPath /reset /C 2>$null | Out-Null
+    & icacls.exe $DirectoryPath /grant '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C 2>$null | Out-Null
+    foreach ($DataItem in Get-ChildItem -LiteralPath $DirectoryPath -Force) {
+        if ($DataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Valenius data directory must not contain reparse points.'
+        }
+        if ($DataItem.PSIsContainer) {
+            Repair-ValeniusDataAcl $DataItem.FullName
+        } elseif ($DataItem.Name -ieq 'apikey.dat' -or
+                  ($DataItem.Name -ilike 'apikey.dat.*.tmp')) {
+            # Explicitly construct both required file ACEs: no inherited empty-DACL
+            # trap, and no readable interval caused by a blanket /reset /T.
+            Protect-ValeniusCredential $DataItem.FullName
+            & icacls.exe $DataItem.FullName /setowner '*S-1-5-18' /C 2>$null | Out-Null
+        } else {
+            & icacls.exe $DataItem.FullName /setowner '*S-1-5-18' /C 2>$null | Out-Null
+            & icacls.exe $DataItem.FullName /reset /C 2>$null | Out-Null
+            & icacls.exe $DataItem.FullName /grant '*S-1-5-18:F' '*S-1-5-32-544:F' /C 2>$null | Out-Null
+        }
+    }
+}
+Repair-ValeniusDataAcl $DataDir
+Write-Host "Data permissions ensured; credentials restricted to SYSTEM and Administrators: $DataDir"
 
 # --- Write appsettings.json --------------------------------------------------
 # Priority order:

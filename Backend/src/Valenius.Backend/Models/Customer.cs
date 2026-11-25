@@ -120,10 +120,14 @@ public class Customer
     [MaxLength(500)]
     public string? SidecarLanCidrs { get; set; }
 
-    /// <summary>Single-use enrollment token set by an admin to bootstrap mTLS on a new sidecar.
-    /// Cleared immediately after the sidecar successfully enrolls.</summary>
+    /// <summary>Legacy plaintext column, cleared at startup. Never issue or accept tokens here.</summary>
     [MaxLength(128)]
     public string? EnrollmentToken { get; set; }
+
+    [MaxLength(64)]
+    public string? EnrollmentTokenHash { get; set; }
+    public DateTime? EnrollmentTokenCreatedAt { get; set; }
+    public DateTime? EnrollmentTokenExpiresAt { get; set; }
 
     /// <summary>Public endpoint written into generated client configs, e.g. vpn.example.com:51820</summary>
     [MaxLength(255)]

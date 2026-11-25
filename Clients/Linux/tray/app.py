@@ -1277,7 +1277,7 @@ class _SetupChoiceDialog(Gtk.Dialog):
 
         intro = Gtk.Label(label=(
             "Connect to a Valenius server your administrator set up, or use Valenius "
-            "standalone with local WireGuard profiles only — no server required."))
+            "standalone with local WireGuard profiles only. An administrator must provision the initial choice."))
         intro.set_line_wrap(True)
         intro.set_xalign(0.0)
         content.pack_start(intro, False, False, 0)
@@ -1311,7 +1311,7 @@ class _BackendUrlDialog(Gtk.Dialog):
 
         intro = Gtk.Label(label=(
             "Enter the address of your Valenius server. Your administrator provided this — "
-            "just the server name, for example vpn.company.com."))
+            "just the server name, for example vpn.company.com. Administrator provisioning is required."))
         intro.set_line_wrap(True)
         intro.set_xalign(0.0)
         content.pack_start(intro, False, False, 0)

@@ -13,9 +13,15 @@ import 'dart:io';
 ///   dart run tool/build_release.dart            # bump + build .aab (Play Store)
 ///   dart run tool/build_release.dart --apk       # bump + build .apk (sideloading)
 ///   dart run tool/build_release.dart --dry-run   # bump pubspec.yaml only, no build
+///
+/// Any other argument is forwarded verbatim to `flutter build`, e.g. the Play Store
+/// build's quick-config host (never hardcoded in source -- see CLAUDE.md):
+///   dart run tool/build_release.dart --dart-define=VALENIUS_QUICK_CONFIG_URL=https://<host>/
 void main(List<String> args) {
   final apk = args.contains('--apk');
   final dryRun = args.contains('--dry-run');
+  final passThrough =
+      args.where((a) => a != '--apk' && a != '--dry-run').toList();
 
   final pubspecFile = File('pubspec.yaml');
   if (!pubspecFile.existsSync()) {
@@ -54,10 +60,11 @@ void main(List<String> args) {
       'Version code bumped: $oldBuildNumber -> $newBuildNumber (version name $versionName unchanged)');
 
   final target = apk ? 'apk' : 'appbundle';
-  stdout.writeln('Running: flutter build $target --release');
+  final flutterArgs = ['build', target, '--release', ...passThrough];
+  stdout.writeln('Running: flutter ${flutterArgs.join(' ')}');
   final result = Process.runSync(
     'flutter',
-    ['build', target, '--release'],
+    flutterArgs,
     runInShell: true,
   );
   stdout.write(result.stdout);

@@ -1,14 +1,11 @@
 // Shared daemon state — mirrors Clients/Linux/daemon/state.py. An `actor` gives us the
 // same thread-safety Linux gets from its `threading.Lock`, without hand-rolled locking.
 //
-// Tunnel bookkeeping (ConnectedTunnels, verification flags, gateway probe target) is
-// scaffolded here now so M2's TunnelEngine has a home to wire into, but nothing populates
-// it yet — M1 has no tunnels.
+// Registration and reusable policy are applied and persisted in one actor call.
 
 import Foundation
 import ValeniusShared
 
-private let gracePeriod: TimeInterval = 24 * 60 * 60 // 1 day
 /// The app polls the daemon over IPC every 5 s (mirrors Linux's _TRAY_ACTIVE_THRESHOLD).
 /// Anything heard within 3x that interval counts as "app running".
 private let appActiveThreshold: TimeInterval = 15
@@ -16,6 +13,7 @@ private let appActiveThreshold: TimeInterval = 15
 struct TunnelEntry {
     var user: String
     var since: Date
+    var systemOwned: Bool = false
     var verified: Bool = false
     var verifiedViaGateway: Bool = false
     /// Mirrors Windows TunnelStateManager.Entry.VerificationFailed — see `markVerificationFailed`.
@@ -27,8 +25,11 @@ struct TunnelEntry {
 actor DaemonState {
     private var active: [String: TunnelEntry] = [:]
     private(set) var clientId: UUID
-    private var isActive: Bool = false
-    private var lastCheckedUtc: Date?
+    private var registration: CachedRegistration
+    private let offlineAccessDays: Int
+    private let now: () -> Date
+    private let persist: (CachedRegistration) throws -> Void
+    private var isActive: Bool { registration.isActive }
     private var updateAvailable: Bool = false
     private var serverProfileName: String?
     private var serverVpnIp: String?
@@ -62,7 +63,6 @@ actor DaemonState {
     private var lastKnownUsername: String?
 
     // MFA state — written by processStatusResponse, read by buildTunnelStatus.
-    private var mfaRequired = false
     private var mfaAuthorizeUrl: String?
     private var mfaSessionExpiresAt: String?
     private var mfaEnrollmentOpen = false
@@ -73,18 +73,43 @@ actor DaemonState {
     /// neutral "Checking backend..." instead of a false "unreachable".
     private var backendReachable: Bool?
 
-    init(clientId: UUID, isActive: Bool = false) {
-        self.clientId = clientId
-        self.isActive = isActive
-        // Mirror Linux's registration.load(), which seeds last_checked on load so the
-        // 24h connect grace applies from startup, not only after the first heartbeat.
-        self.lastCheckedUtc = Date()
+    init(registration: CachedRegistration, offlineAccessDays: Int = 7,
+         now: @escaping () -> Date = Date.init,
+         persist: @escaping (CachedRegistration) throws -> Void = { try RegistrationStore.save($0) }) throws {
+        guard (1...365).contains(offlineAccessDays),
+              registration.clientId != UUID(uuidString: "00000000-0000-0000-0000-000000000000") else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.clientId = registration.clientId
+        self.registration = registration
+        self.offlineAccessDays = offlineAccessDays
+        self.now = now
+        self.persist = persist
+        // Copy metadata synchronously during actor initialization. Never renew the lease.
+        let policy = registration.connectionPolicy
+        serverProfileName = policy?.serverProfileName
+        serverVpnIp = policy?.serverVpnIp
+        serverHealthPort = policy?.serverHealthUrl.flatMap { URL(string: $0)?.port } ?? 8443
+        deviceTunnelEnabled = policy?.deviceTunnelEnabled ?? false
+        skipConnectivityCheck = policy?.skipConnectivityCheck ?? false
+        for row in policy?.remoteLanCidrsByProfile ?? [] { remoteLanCidrsByProfile[row.profileName] = row.cidrs }
+        for row in policy?.fallbackEndpoints ?? [] where row.port > 0 {
+            fallbackPortsByProfile[row.profileName] = (row.port, row.triggerSeconds > 0 ? row.triggerSeconds : 20)
+        }
+        mfaAuthorizeUrl = policy?.mfaAuthorizeUrl
+        mfaSessionExpiresAt = policy?.mfaSessionExpiresAt
+        mfaEnrollmentOpen = policy?.mfaEnrollmentOpen ?? false
     }
 
     // MARK: Multi-tunnel state (M2 wires these)
 
-    func setConnected(tunnel: String, user: String) {
-        active[tunnel] = TunnelEntry(user: user, since: Date())
+    func setConnected(tunnel: String, user: String, systemOwned: Bool = false) {
+        active[tunnel] = TunnelEntry(user: user, since: Date(), systemOwned: systemOwned)
+    }
+
+    func canControlTunnel(_ tunnel: String, username: String) -> Bool {
+        guard let entry = active[tunnel] else { return false }
+        return !entry.systemOwned && entry.user == username
     }
 
     func setDisconnected(tunnel: String?) {
@@ -149,13 +174,42 @@ actor DaemonState {
 
     // MARK: Registration
 
-    func setClientId(_ id: UUID) {
-        clientId = id
+    func applyBackendStatus(_ response: [String: Any]) {
+        let j = JsonObject(response)
+        registration.isActive = j.bool("IsActive")
+        registration.lastCheckedUtc = AuthorizationDate.string(now())
+        registration.connectionPolicy = try? ConnectionPolicy.fromBackend(response)
+        let policy = registration.connectionPolicy
+        serverProfileName = policy?.serverProfileName
+        serverVpnIp = policy?.serverVpnIp
+        serverHealthPort = policy?.serverHealthUrl.flatMap { URL(string: $0)?.port } ?? 8443
+        deviceTunnelEnabled = policy?.deviceTunnelEnabled ?? false
+        skipConnectivityCheck = policy?.skipConnectivityCheck ?? false
+        remoteLanCidrsByProfile = [:]
+        for row in policy?.remoteLanCidrsByProfile ?? [] { remoteLanCidrsByProfile[row.profileName] = row.cidrs }
+        fallbackPortsByProfile = [:]
+        for row in policy?.fallbackEndpoints ?? [] where row.port > 0 {
+            fallbackPortsByProfile[row.profileName] = (row.port, row.triggerSeconds > 0 ? row.triggerSeconds : 20)
+        }
+        mfaAuthorizeUrl = policy?.mfaAuthorizeUrl
+        mfaSessionExpiresAt = policy?.mfaSessionExpiresAt
+        mfaEnrollmentOpen = policy?.mfaEnrollmentOpen ?? false
+        mfaEnrollmentUri = j.string("MfaEnrollmentUri")
+        mfaApproveNumber = j.int("MfaApproveNumber")
+        backendReachable = true
+        persistCurrentRegistration()
     }
 
-    func updateRegistration(isActive: Bool) {
-        self.isActive = isActive
-        self.lastCheckedUtc = Date()
+    func registrationSnapshot() -> CachedRegistration { registration }
+
+    func setStandaloneModeChosen(_ value: Bool) {
+        registration.standaloneModeChosen = value
+        persistCurrentRegistration()
+    }
+
+    private func persistCurrentRegistration() {
+        do { try persist(registration) }
+        catch { logError("Could not persist registration cache: \(error). Current authorization remains in memory; repair storage before restart.") }
     }
 
     func isRegistrationActive() -> Bool {
@@ -163,34 +217,25 @@ actor DaemonState {
     }
 
     func lastChecked() -> Date? {
-        lastCheckedUtc
+        AuthorizationDate.parse(registration.lastCheckedUtc)
     }
 
     func isAllowedToConnect() -> Bool {
-        if isActive { return true }
-        if let lastCheckedUtc {
-            return Date().timeIntervalSince(lastCheckedUtc) < gracePeriod
-        }
-        return false
+        registration.activationAllowed(at: now(), days: offlineAccessDays)
+    }
+
+    func isProfileAllowedToConnect(_ profile: String) -> Bool {
+        registration.profileAllowed(profile, at: now(), days: offlineAccessDays)
+    }
+
+    func connectionDeniedReason() -> String {
+        if !registration.isActive { return "This device is not activated. Contact your administrator." }
+        if !isAllowedToConnect() { return "Cached VPN access expired or is unavailable. Reconnect to the management server to refresh access." }
+        return "MFA authorization is required for this VPN. Unlock it through Valenius before connecting."
     }
 
     // MARK: MFA
 
-    func setMfaState(
-        required: Bool,
-        authorizeUrl: String?,
-        sessionExpiresAt: String?,
-        enrollmentOpen: Bool,
-        enrollmentUri: String?,
-        approveNumber: Int?
-    ) {
-        mfaRequired = required
-        mfaAuthorizeUrl = authorizeUrl
-        mfaSessionExpiresAt = sessionExpiresAt
-        mfaEnrollmentOpen = enrollmentOpen
-        mfaEnrollmentUri = enrollmentUri
-        mfaApproveNumber = approveNumber
-    }
 
     func setBackendReachable(_ reachable: Bool) {
         backendReachable = reachable
@@ -239,25 +284,12 @@ actor DaemonState {
         heartbeatIntervalMinutes
     }
 
-    func setServerProfileName(_ name: String?) {
-        serverProfileName = name
-    }
 
     func getServerProfileName() -> String? {
         serverProfileName
     }
 
-    func setServerGateway(vpnIp: String?, healthPort: Int) {
-        serverVpnIp = (vpnIp?.isEmpty ?? true) ? nil : vpnIp
-        serverHealthPort = healthPort
-    }
 
-    /// `entries`: (profileName, cidrs) pairs from RemoteLanCidrsByProfile.
-    func setRemoteLanCidrs(_ entries: [(profileName: String, cidrs: [String])]) {
-        var map: [String: [String]] = [:]
-        for (name, cidrs) in entries where !name.isEmpty && !cidrs.isEmpty { map[name] = cidrs }
-        remoteLanCidrsByProfile = map
-    }
 
     /// The remote LAN CIDR(s) reported for `profileName`'s own sidecar, or empty when none
     /// are known for that specific profile.
@@ -266,20 +298,10 @@ actor DaemonState {
         return remoteLanCidrsByProfile[profileName] ?? []
     }
 
-    func setSkipConnectivityCheck(_ v: Bool) { skipConnectivityCheck = v }
     func getSkipConnectivityCheck() -> Bool { skipConnectivityCheck }
 
-    func setDeviceTunnelEnabled(_ v: Bool) { deviceTunnelEnabled = v }
     func getDeviceTunnelEnabled() -> Bool { deviceTunnelEnabled }
 
-    /// `entries`: (profileName, port, triggerSeconds) from StatusResponse.FallbackEndpoints.
-    func setFallbackPorts(_ entries: [(profileName: String, port: Int, triggerSeconds: Int)]) {
-        var map: [String: (port: Int, triggerSeconds: Int)] = [:]
-        for (name, port, triggerSeconds) in entries where !name.isEmpty && port > 0 {
-            map[name] = (port, triggerSeconds > 0 ? triggerSeconds : 20)
-        }
-        fallbackPortsByProfile = map
-    }
 
     /// The UDP fallback port + trigger window (seconds of no successful verification before
     /// trying it) advertised for `profile`, or nil when none is offered (no customer opt-in,
@@ -310,13 +332,14 @@ actor DaemonState {
         status.connectedTunnels = connectedTunnels
         status.registrationIsActive = isActive
         status.updateAvailable = updateAvailable
-        status.mfaRequired = mfaRequired
+        status.mfaRequired = registration.connectionPolicy?.requiresMfa(at: now()) ?? false
         status.mfaAuthorizeUrl = mfaAuthorizeUrl
         status.mfaSessionExpiresAt = mfaSessionExpiresAt
         status.mfaEnrollmentOpen = mfaEnrollmentOpen
         status.mfaEnrollmentUri = mfaEnrollmentUri
         status.mfaApproveNumber = mfaApproveNumber
         status.backendReachable = backendReachable
+        status.offlineAccessExpiresAt = registration.expiresAt(days: offlineAccessDays).map(AuthorizationDate.string)
         return status
     }
 }

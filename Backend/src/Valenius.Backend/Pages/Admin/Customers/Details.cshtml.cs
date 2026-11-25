@@ -8,7 +8,8 @@ using Valenius.Backend.Services;
 
 namespace Valenius.Backend.Pages.Admin.Customers;
 
-public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILicenseEnforcement enforcement, ISidecarService sidecar, IPeerProvisioningService provisioner, IAuditService audit, HeartbeatSettingsStore heartbeatSettings, BackendEgressIpProvider egressIp, WireGuardHandshakeProbe handshakeProbe) : PageModel
+[ResponseCache(Location = ResponseCacheLocation.None, NoStore = true)]
+public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILicenseEnforcement enforcement, ISidecarService sidecar, IPeerProvisioningService provisioner, IAuditService audit, HeartbeatSettingsStore heartbeatSettings, BackendEgressIpProvider egressIp, WireGuardHandshakeProbe handshakeProbe, ISidecarEnrollmentTokens enrollmentTokens) : PageModel
 {
     public Customer     Customer             { get; private set; } = null!;
 
@@ -64,6 +65,14 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
 
     public bool    HasActiveSidecarCert    { get; private set; }
     public bool    EnrollmentTokenIsSet    { get; private set; }
+    public string? NewEnrollmentToken      { get; private set; }
+
+    private void LoadEnrollmentToken(Customer customer)
+    {
+        EnrollmentTokenIsSet = enrollmentTokens.IsPending(customer);
+        var raw = TempData[$"EnrollmentToken:{customer.Id}"] as string;
+        NewEnrollmentToken = enrollmentTokens.Matches(customer, raw) ? raw : null;
+    }
     public bool?   UdpPortReachable        { get; private set; }
     public int?    UdpCheckedPort          { get; private set; }
     public string? UdpCheckedHost          { get; private set; }
@@ -112,7 +121,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             db, Clients.Select(c => c.Id).ToList(), Valenius.Backend.Services.TrafficRange.Default);
         TotalAssigned        = await db.Customers.SumAsync(c => c.MaxEndpoints);
         HasActiveSidecarCert = await db.SidecarCertificates.AnyAsync(c => c.CustomerId == id && !c.IsRevoked);
-        EnrollmentTokenIsSet = !string.IsNullOrEmpty(customer.EnrollmentToken);
+        LoadEnrollmentToken(customer);
     }
 
     public async Task<IActionResult> OnGetAsync(int id)
@@ -134,7 +143,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         TotalAssigned        = await db.Customers.SumAsync(c => c.MaxEndpoints);
         HasActiveSidecarCert = await db.SidecarCertificates
             .AnyAsync(c => c.CustomerId == id && !c.IsRevoked);
-        EnrollmentTokenIsSet = !string.IsNullOrEmpty(customer.EnrollmentToken);
+        LoadEnrollmentToken(customer);
         await FetchSidecarInfoAsync(customer);
         return Page();
     }
@@ -217,8 +226,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         customer.HeartbeatIntervalMinutes = heartbeatIntervalMinutes is >= 1 and <= 60
             ? heartbeatIntervalMinutes
             : null;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Customer, "Updated", $"Customer: {customer.Name}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Customer, "Updated", $"Customer: {customer.Name}");
         return RedirectToPage(new { id });
     }
 
@@ -258,7 +266,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
                 };
                 customer.MfaSessionLifetimeHours = mfaSessionLifetimeHours is >= 1 and <= 720
                     ? mfaSessionLifetimeHours.Value : 12;
-                _ = audit.LogAsync(Audit.Mfa, "Customer MFA defaults updated", $"Customer: {customer.Name}",
+                await audit.LogAsync(Audit.Mfa, "Customer MFA defaults updated", $"Customer: {customer.Name}",
                     $"policy={customer.DefaultMfaPolicy}, lifetime={customer.MfaSessionLifetimeHours}h");
             }
         }
@@ -304,36 +312,47 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
 
     public async Task<IActionResult> OnPostGenerateEnrollmentTokenAsync(int id)
     {
+        if (!IsProEdition) return Forbid();
         var customer = await db.Customers.FindAsync(id);
         if (customer is null) return NotFound();
 
-        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24));
-        customer.EnrollmentToken = token;
-        await db.SaveChangesAsync();
-
-        TempData["EnrollmentToken"] = token;
+        var token = enrollmentTokens.Issue(customer);
+        await audit.SaveChangesWithAuditAsync(db, Audit.Customer, "Enrollment token generated", customer.Name);
+        TempData[$"EnrollmentToken:{id}"] = token;
         TempData["WgTab"] = true;
         return RedirectToPage(new { id });
     }
 
     public async Task<IActionResult> OnPostRevokeEnrollmentTokenAsync(int id)
     {
-        var customer = await db.Customers.FindAsync(id);
-        if (customer is null) return NotFound();
-        customer.EnrollmentToken = null;
-        await db.SaveChangesAsync();
+        var cleared = await db.Customers.Where(c => c.Id == id).ExecuteUpdateAsync(set => set
+            .SetProperty(c => c.EnrollmentToken, (string?)null)
+            .SetProperty(c => c.EnrollmentTokenHash, (string?)null)
+            .SetProperty(c => c.EnrollmentTokenCreatedAt, (DateTime?)null)
+            .SetProperty(c => c.EnrollmentTokenExpiresAt, (DateTime?)null));
+        if (cleared != 1) return NotFound();
+        TempData.Remove($"EnrollmentToken:{id}");
+        await audit.LogAsync(Audit.Customer, "Enrollment token revoked", $"Customer #{id}");
         TempData["WgTab"] = true;
         return RedirectToPage(new { id });
     }
 
-    public async Task<IActionResult> OnGetDownloadEnvAsync(int id)
+    // Old download links cannot recover a secret from its stored hash.
+    public IActionResult OnGetDownloadEnv(int id)
+    {
+        TempData["WgError"] = "Tokens are shown only once. Generate a fresh token, then download its .env from that page.";
+        TempData["WgTab"] = true;
+        return RedirectToPage(new { id });
+    }
+
+    public async Task<IActionResult> OnPostDownloadEnvAsync(int id, string? token)
     {
         var customer = await db.Customers.FindAsync(id);
         if (customer is null) return NotFound();
 
-        if (string.IsNullOrEmpty(customer.EnrollmentToken))
+        if (!enrollmentTokens.Matches(customer, token))
         {
-            TempData["WgError"] = "No enrollment token is set. Generate a token first.";
+            TempData["WgError"] = "This token is unavailable, expired or no longer current. Generate a fresh token first.";
             TempData["WgTab"]   = true;
             return RedirectToPage(new { id });
         }
@@ -354,7 +373,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             MANAGEMENT_PORT={customer.SidecarManagementPort}
             HEALTH_PORT={(customer.SidecarHealthPort > 0 ? customer.SidecarHealthPort : 9004)}
             BACKEND_URL={backendUrl}
-            ENROLLMENT_TOKEN={customer.EnrollmentToken}
+            ENROLLMENT_TOKEN={token}
             """;
 
         var bytes    = System.Text.Encoding.UTF8.GetBytes(content);
@@ -451,7 +470,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         if (fallbackChanged && customer.ServerMode == "Valenius" && !string.IsNullOrEmpty(customer.SidecarUrl))
         {
             var (ok, message, active) = await sidecar.SetFallbackAsync(
-                customer.SidecarBaseUrl, fallbackPortEnabled, newFallbackPort);
+                customer.SidecarBaseUrl, customer.Id, fallbackPortEnabled, newFallbackPort);
 
             // FallbackPortActive is the observed state the heartbeat gates on, so it follows
             // the sidecar's answer — never the admin's intent. A refusal leaves the toggle on
@@ -463,7 +482,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             else
                 TempData["WgSuccess"] = message;
 
-            _ = audit.LogAsync(Audit.Customer, "Port fallback changed", $"Customer: {customer.Name}",
+            await audit.LogAsync(Audit.Customer, "Port fallback changed", $"Customer: {customer.Name}",
                 $"enabled={fallbackPortEnabled}, port={newFallbackPort}, applied={ok}, active={active}");
         }
         else if (fallbackChanged)
@@ -471,7 +490,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             // No sidecar to ask (no address configured, or not a Valenius customer) — nothing
             // can confirm the redirect, so nothing is advertised to clients.
             customer.FallbackPortActive = false;
-            _ = audit.LogAsync(Audit.Customer, "Port fallback changed", $"Customer: {customer.Name}",
+            await audit.LogAsync(Audit.Customer, "Port fallback changed", $"Customer: {customer.Name}",
                 $"enabled={fallbackPortEnabled}, port={newFallbackPort}, no sidecar to apply to");
         }
 
@@ -486,7 +505,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         if (customer is null) return NotFound();
 
         var result = await provisioner.ResyncAsync(customer, db);
-        _ = audit.LogAsync(Audit.Customer, "Peer resync", $"Customer: {customer.Name}", result);
+        await audit.LogAsync(Audit.Customer, "Peer resync", $"Customer: {customer.Name}", result);
 
         TempData[result.Contains("failed") ? "WgError" : "WgSuccess"] = result;
         TempData["WgTab"] = true;
@@ -744,7 +763,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
             return Page();
         }
 
-        SelfTest = await sidecar.GetSelfTestAsync(customer.SidecarBaseUrl);
+        SelfTest = await sidecar.GetSelfTestAsync(customer.SidecarBaseUrl, customer.Id);
 
         var serverKey = SidecarPublicKey;
         if (SidecarListenPort is not int listenPort || string.IsNullOrEmpty(serverKey))
@@ -788,7 +807,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
 
         // Audit-logged because it briefly mutates the sidecar's peer list — a stray test peer
         // appearing in a later investigation should be traceable to this action.
-        _ = audit.LogAsync(Audit.Customer, "Full configuration test", $"Customer: {customer.Name}",
+        await audit.LogAsync(Audit.Customer, "Full configuration test", $"Customer: {customer.Name}",
             $"selftest={(SelfTest is null ? "unavailable" : SelfTest.Ok ? "ok" : "failed")}, "
             + string.Join(", ", checks.Select(c => $"{c.Key}={c.State}")));
 
@@ -822,7 +841,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         // TEST-NET-1 (RFC 5737) rather than an address from the customer's transit subnet: it can
         // never collide with a real client's allocation, and if cleanup ever fails the stray peer
         // is unmistakably a test artefact.
-        if (!await sidecar.AddPeerAsync(customer.SidecarBaseUrl, pubB64, "192.0.2.254/32"))
+        if (!await sidecar.AddPeerAsync(customer.SidecarBaseUrl, customer.Id, pubB64, "192.0.2.254/32"))
             return new WireGuardHandshakeProbe.Result(false,
                 "The test peer could not be registered on the sidecar, so this endpoint was not tested.");
 
@@ -835,7 +854,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         {
             // Always remove the test peer, including when the probe threw. A leak is surfaced
             // rather than swallowed: a stray peer is a (small) security artefact, not cosmetic.
-            if (!await sidecar.RemovePeerAsync(customer.SidecarBaseUrl, pubB64))
+            if (!await sidecar.RemovePeerAsync(customer.SidecarBaseUrl, customer.Id, pubB64))
                 TestPeerLeak = pubB64;
         }
     }
@@ -935,8 +954,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         if (customer is null) return NotFound();
         customer.AllowShareSidecar             = allowShareSidecar;
         customer.AllowReceiveForeignProfiles   = allowReceiveForeignProfiles;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Customer, "Sharing settings updated", $"Customer: {customer.Name}",
+        await audit.SaveChangesWithAuditAsync(db, Audit.Customer, "Sharing settings updated", $"Customer: {customer.Name}",
             $"AllowShareSidecar={allowShareSidecar}, AllowReceiveForeignProfiles={allowReceiveForeignProfiles}");
         TempData["WgSuccess"] = "Cross-customer sharing settings saved.";
         TempData["WgTab"] = true;
@@ -949,8 +967,7 @@ public class DetailsModel(ApplicationDbContext db, ILicenseContext license, ILic
         if (customer is null) return NotFound();
         var name = customer.Name;
         db.Customers.Remove(customer);
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Customer, "Deleted", $"Customer: {name}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Customer, "Deleted", $"Customer: {name}");
         return RedirectToPage("Index");
     }
 }

@@ -12,10 +12,17 @@ import 'package:valenius_mobile/state/registration.dart';
 
 class _MemKeyStore implements KeyStore {
   final _store = <String, String>{};
+  bool failCredentialSave = false;
   @override
   Future<String?> read(String key) async => _store[key];
   @override
-  Future<void> write(String key, String value) async => _store[key] = value;
+  Future<void> write(String key, String value) async {
+    if (failCredentialSave && key == kClientApiKeyStorageKey) {
+      throw StateError('synthetic storage failure');
+    }
+    _store[key] = value;
+  }
+
   @override
   Future<void> delete(String key) async => _store.remove(key);
 }
@@ -54,10 +61,14 @@ class _FakeApi implements BackendApi {
   _FakeApi({
     this.pendingForeignConfigs = const [],
     this.pendingDeleteProfileName,
+    this.clientApiKey,
   });
 
   final List<PendingConfig> pendingForeignConfigs;
   final String? pendingDeleteProfileName;
+  final String? clientApiKey;
+  String? currentKey;
+  void Function(String)? onKeyChanged;
 
   @override
   Future<StatusResponse> register({
@@ -88,6 +99,7 @@ class _FakeApi implements BackendApi {
         logUploadRequested: false,
         remoteLanCidrsByProfile: const [],
         pendingDeleteProfileName: pendingDeleteProfileName,
+        clientApiKey: clientApiKey,
       );
 
   @override
@@ -100,7 +112,10 @@ class _FakeApi implements BackendApi {
   Future<void> denyMfa(int challengeId) async {}
 
   @override
-  void setApiKey(String apiKey) {}
+  void setApiKey(String apiKey) {
+    onKeyChanged?.call(apiKey);
+    currentKey = apiKey;
+  }
 
   @override
   Future<String?> redeemPairing(
@@ -135,6 +150,38 @@ class _FakeApi implements BackendApi {
 }
 
 void main() {
+  for (final failSave in [false, true]) {
+    testWidgets(
+        'migration persists before use, failed save retains legacy: $failSave',
+        (tester) async {
+      final keyStore = _MemKeyStore();
+      await keyStore.write('valenius.backendUrl', 'https://test.example');
+      await keyStore.write(kClientApiKeyStorageKey, 'legacy-key');
+      keyStore.failCredentialSave = failSave;
+      final api = _FakeApi(clientApiKey: 'individual-key');
+      api.onKeyChanged =
+          (key) => expect(keyStore._store[kClientApiKeyStorageKey], key);
+      await tester.pumpWidget(ProviderScope(overrides: [
+        keyStoreProvider.overrideWithValue(keyStore),
+        deviceInfoProvider.overrideWithValue(_FakeDeviceInfo()),
+        pushTokensProvider.overrideWithValue(_FakePushTokens()),
+        configStoreProvider.overrideWithValue(_FakeConfigStore()),
+        backendFactoryProvider.overrideWithValue((_, __) => api),
+        registrationPollIntervalProvider.overrideWithValue(null),
+        connectivityChangesProvider.overrideWithValue(null),
+      ], child: const ValeniusApp()));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+      expect(api.currentKey, failSave ? 'legacy-key' : 'individual-key');
+      expect(keyStore._store[kClientApiKeyStorageKey], api.currentKey);
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(ValeniusApp)));
+      expect(container.read(registrationControllerProvider).status,
+          RegStatus.active);
+    });
+  }
+
   testWidgets('renders the config-store profile list and toggles a connection',
       (WidgetTester tester) async {
     // The app now gates on a configured backend URL — seed one so the root gate

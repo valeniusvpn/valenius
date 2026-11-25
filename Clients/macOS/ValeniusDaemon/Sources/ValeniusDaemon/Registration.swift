@@ -1,94 +1,73 @@
-// Persist and restore ClientKey/IsActive across daemon restarts — mirrors
-// Clients/Linux/daemon/registration.py. Deleting registration.json means a new identity
-// and requires admin re-activation.
-
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 let registrationPath = "\(appSupportDir)/registration.json"
 
+enum AtomicCacheWriter {
+    static func write(_ data: Data, to destination: URL, beforeReplace: (URL) throws -> Void = { _ in }) throws {
+        let parent = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let temporary = parent.appendingPathComponent(".registration-\(UUID().uuidString)")
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(0o600))
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer {
+            close(fd)
+            try? FileManager.default.removeItem(at: temporary)
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = writeBytes(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                offset += count
+            }
+        }
+        guard fsync(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try beforeReplace(temporary)
+        guard rename(temporary.path, destination.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let directory = open(parent.path, O_RDONLY)
+        guard directory >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(directory) }
+        guard fsync(directory) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+    private static func writeBytes(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+        #if canImport(Darwin)
+        return Darwin.write(fd, buffer, count)
+        #else
+        return Glibc.write(fd, buffer, count)
+        #endif
+    }
+}
+
 enum RegistrationStore {
-    private struct FileShape: Codable {
-        var clientId: String
-        var isActive: Bool
-        var lastCheckedUtc: String?
-        /// True once the user explicitly chose "Use standalone" in the first-run setup
-        /// dialog. Mirrors Windows RegistrationState.StandaloneModeChosen.
-        var standaloneModeChosen: Bool
-
-        enum CodingKeys: String, CodingKey {
-            case clientId = "ClientId"
-            case isActive = "IsActive"
-            case lastCheckedUtc = "LastCheckedUtc"
-            case standaloneModeChosen = "StandaloneModeChosen"
-        }
-
-        init(clientId: String, isActive: Bool, lastCheckedUtc: String?, standaloneModeChosen: Bool) {
-            self.clientId = clientId
-            self.isActive = isActive
-            self.lastCheckedUtc = lastCheckedUtc
-            self.standaloneModeChosen = standaloneModeChosen
-        }
-
-        /// A registration.json written before standaloneModeChosen existed has no such key —
-        /// default it to false rather than failing the whole decode.
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            clientId = try c.decode(String.self, forKey: .clientId)
-            isActive = try c.decode(Bool.self, forKey: .isActive)
-            lastCheckedUtc = try c.decodeIfPresent(String.self, forKey: .lastCheckedUtc)
-            standaloneModeChosen = try c.decodeIfPresent(Bool.self, forKey: .standaloneModeChosen) ?? false
-        }
-    }
-
-    /// Returns the ClientId to use: read from disk if present and parseable, otherwise a
-    /// freshly generated one (also true when the file is missing). Mirrors Linux's
-    /// registration.load(), which re-mints on any read/parse failure rather than trying
-    /// to distinguish "missing" from "unreadable" (unlike Windows).
-    static func loadClientId() -> (id: UUID, wasActive: Bool, standaloneModeChosen: Bool) {
-        guard FileManager.default.fileExists(atPath: registrationPath) else {
-            let id = UUID()
-            save(clientId: id, isActive: false, standaloneModeChosen: false)
-            return (id, false, false)
-        }
+    static func load(path: URL = URL(fileURLWithPath: registrationPath),
+                     writer: (Data, URL) throws -> Void = { try AtomicCacheWriter.write($0, to: $1) }) throws -> CachedRegistration {
+        let data: Data
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: registrationPath))
-            let shape = try JSONDecoder().decode(FileShape.self, from: data)
-            guard let id = UUID(uuidString: shape.clientId) else { throw CocoaError(.fileReadCorruptFile) }
-            return (id, shape.isActive, shape.standaloneModeChosen)
-        } catch {
-            log("Could not read registration.json (\(error)) — generating new client ID")
-            let id = UUID()
-            save(clientId: id, isActive: false, standaloneModeChosen: false)
-            return (id, false, false)
+            data = try Data(contentsOf: path)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
+            var attributes = stat()
+            // A dangling link is an existing identity path, not a fresh install.
+            guard lstat(path.path, &attributes) != 0 && errno == ENOENT else { throw error }
+            let registration = CachedRegistration()
+            // Never use a fresh identity that could not first be persisted.
+            try writer(JSONEncoder().encode(registration), path)
+            return registration
         }
+        let registration = try JSONDecoder().decode(CachedRegistration.self, from: data)
+        guard registration.clientId != UUID(uuidString: "00000000-0000-0000-0000-000000000000") else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return registration
     }
 
-    /// `standaloneModeChosen`: nil preserves whatever is currently persisted (the common case —
-    /// every heartbeat/register save just refreshes `isActive`/`lastCheckedUtc`); pass a
-    /// concrete value only when actually changing it (`DaemonCore.cmdSetStandaloneMode`).
-    static func save(clientId: UUID, isActive: Bool, lastCheckedUtc: Date? = nil, standaloneModeChosen: Bool? = nil) {
-        let shape = FileShape(
-            clientId: clientId.uuidString,
-            isActive: isActive,
-            lastCheckedUtc: lastCheckedUtc.map { ISO8601DateFormatter().string(from: $0) },
-            standaloneModeChosen: standaloneModeChosen ?? currentStandaloneModeChosen()
-        )
-        do {
-            try FileManager.default.createDirectory(
-                atPath: appSupportDir, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            let data = try JSONEncoder().encode(shape)
-            try data.write(to: URL(fileURLWithPath: registrationPath), options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registrationPath)
-        } catch {
-            log("Could not write registration.json: \(error)")
-        }
-    }
-
-    private static func currentStandaloneModeChosen() -> Bool {
-        guard let data = FileManager.default.contents(atPath: registrationPath),
-              let shape = try? JSONDecoder().decode(FileShape.self, from: data) else { return false }
-        return shape.standaloneModeChosen
+    static func save(_ registration: CachedRegistration, path: URL = URL(fileURLWithPath: registrationPath)) throws {
+        try AtomicCacheWriter.write(JSONEncoder().encode(registration), to: path)
     }
 }

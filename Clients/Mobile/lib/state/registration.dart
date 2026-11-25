@@ -41,10 +41,16 @@ String normalizeBackendUrl(String raw) {
 /// baked in). [loaded] is false until the persisted value has been read from secure storage,
 /// so the root gate can show a splash instead of flashing the setup screen on every launch.
 class BackendUrlState {
-  const BackendUrlState({this.url, this.loaded = false});
+  const BackendUrlState({this.url, this.loaded = false, this.storageError});
 
   final String? url;
   final bool loaded;
+
+  /// Set when secure storage couldn't be read at startup (e.g. the one-time
+  /// secure-storage format handover failed this launch — see SecureKeyStore). The
+  /// root gate shows an error instead of the setup screen, so the user can't
+  /// accidentally set the device up again as a brand-new identity.
+  final String? storageError;
 
   bool get configured => url != null && url!.isNotEmpty;
 }
@@ -62,7 +68,14 @@ class BackendUrlController extends StateNotifier<BackendUrlState> {
   static const _storageKey = 'valenius.backendUrl';
 
   Future<void> _load() async {
-    final stored = await _keyStore.read(_storageKey);
+    final String? stored;
+    try {
+      stored = await _keyStore.read(_storageKey);
+    } catch (e) {
+      DiagnosticsLog.instance.add('Backend URL could not be read: $e');
+      state = BackendUrlState(loaded: true, storageError: '$e');
+      return;
+    }
     state = BackendUrlState(
       url: (stored != null && stored.isNotEmpty) ? stored : null,
       loaded: true,
@@ -445,8 +458,8 @@ class RegistrationController extends StateNotifier<RegistrationState> {
       deviceId: _deviceId,
     );
     if (key != null && key.isNotEmpty) {
-      api.setApiKey(key);
       await keyStore.write(_apiKeyStorageKey, key);
+      api.setApiKey(key);
     }
     await refresh();
   }
@@ -530,8 +543,15 @@ class RegistrationController extends StateNotifier<RegistrationState> {
         // next app launch) authenticate with it. Only sent while still on the previous key.
         final rotatedKey = resp.clientApiKey;
         if (rotatedKey != null && rotatedKey.isNotEmpty) {
-          api.setApiKey(rotatedKey);
-          await keyStore.write(_apiKeyStorageKey, rotatedKey);
+          try {
+            await keyStore.write(_apiKeyStorageKey, rotatedKey);
+            api.setApiKey(rotatedKey);
+          } catch (_) {
+            // Keep using legacy auth until storage is repaired; still apply denial
+            // and MFA policy in this response even when saving the offer fails.
+            DiagnosticsLog.instance.add(
+                'Could not persist API credential; retaining current credential for retry.');
+          }
         }
         await _ingestConfigs(api, resp);
         onGatewayTargets({

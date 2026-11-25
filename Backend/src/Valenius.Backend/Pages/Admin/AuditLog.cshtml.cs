@@ -4,11 +4,14 @@ using Microsoft.EntityFrameworkCore;
 using Valenius.Backend.Data;
 using Valenius.Backend.Helpers;
 using Valenius.Backend.Models;
+using Valenius.Backend.Services;
 
 namespace Valenius.Backend.Pages.Admin;
 
-public class AuditLogModel(ApplicationDbContext db) : PageModel
+public class AuditLogModel(ApplicationDbContext db, AuditWriteStatus status, IAuditService audit) : PageModel
 {
+    public long WriteFailures => status.FailureCount;
+    public DateTime? LastWriteFailureUtc => status.LastFailureUtc;
     public List<AuditLog> Entries    { get; private set; } = [];
     public int            TotalCount { get; private set; }
 
@@ -51,7 +54,10 @@ public class AuditLogModel(ApplicationDbContext db) : PageModel
 
     public async Task<IActionResult> OnPostClearAsync()
     {
-        await db.Database.ExecuteSqlRawAsync("""DELETE FROM "AuditLogs" """);
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var removed = await db.AuditLogs.ExecuteDeleteAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.System, "Audit log cleared", "Audit log", $"Entries removed: {removed}");
+        await transaction.CommitAsync();
         TempData["Success"] = "Audit log cleared.";
         return RedirectToPage();
     }

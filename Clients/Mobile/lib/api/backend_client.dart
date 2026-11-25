@@ -112,8 +112,11 @@ class BackendClient implements BackendApi {
   // longer than the OS's own connect timeout before failing.
   static const _timeout = Duration(seconds: 8);
 
-  Map<String, String> get _jsonHeaders =>
-      {'Content-Type': 'application/json', 'X-Api-Key': apiKey};
+  Map<String, String> get _jsonHeaders => {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey,
+        'X-Valenius-Device-Auth': '1'
+      };
 
   @override
   Future<StatusResponse> register({

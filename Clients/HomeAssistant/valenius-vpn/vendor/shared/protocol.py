@@ -25,6 +25,8 @@ async def read_message(reader: asyncio.StreamReader) -> str:
 
 async def write_message(writer: asyncio.StreamWriter, message: str) -> None:
     data = message.encode('utf-8')
+    if len(data) > MAX_MESSAGE_BYTES:
+        raise ValueError('IPC response exceeds 1 MiB')
     writer.write(struct.pack('<i', len(data)) + data)
     await writer.drain()
 

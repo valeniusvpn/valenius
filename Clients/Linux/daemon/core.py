@@ -52,19 +52,6 @@ _STARTUP_RETRY_INTERVAL_S = 10
 _STARTUP_RETRY_ATTEMPTS = 6  # ~1 minute total, then fall into the normal triggers.
 
 
-def _health_port_from_url(url: Optional[str]) -> int:
-    """Port from a ServerHealthUrl, defaulting to 8443 (mirrors the Windows client)."""
-    if url:
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            if parsed.port:
-                return parsed.port
-        except Exception:
-            pass
-    return 8443
-
-
 class DaemonCore:
     def __init__(self, backend: BackendClient, state: DaemonState, wg: WgManager,
                  auto_connect: AutoConnectConfig, updater: Updater,
@@ -85,6 +72,9 @@ class DaemonCore:
         # Guards DaemonCore._transfer_local_profiles against a heartbeat/poll race —
         # both loops call _process_status_response and could otherwise fire it twice.
         self._transfer_in_progress = False
+        self._tunnel_mutation = asyncio.Lock()
+        self._provisioning_lock = asyncio.Lock()
+        self._tunnel_config_paths: dict[str, Path] = {}
 
     async def reconcile_active_tunnels(self) -> None:
         """Adopt any WireGuard interfaces already up at startup into daemon state.
@@ -97,10 +87,8 @@ class DaemonCore:
         down either — the daemon and the kernel silently disagree about reality.
         """
         for name in await self.wg.get_active_tunnels():
-            # 'Unknown' — real owner is unrecoverable across a restart, so this is
-            # listed alongside 'AutoConnect'/'PendingConnect' in cmd_disconnect's
-            # system_tunnel bypass: no legitimate "wrong owner" to protect against.
-            self.state.set_connected(name, 'Unknown')
+            # Ownership is lost across restart; require trusted/root control.
+            self.state.set_connected(name, 'Unknown', system_owned=True)
             log.info("Adopted already-active tunnel '%s' into daemon state at startup", name)
 
     # ── Status helpers ───────────────────────────────────────────────────────
@@ -135,6 +123,7 @@ class DaemonCore:
             MfaApproveNumber=mfa[5],
             BackendUrl=self.backend.base_url,
             BackendReachable=self.state.is_backend_reachable(),
+            OfflineAccessExpiresAt=self.state.offline_access_expires_at(),
             # No backend URL yet (fresh install, installer provided none): the tray prompts
             # the user for the server DNS. False whenever a URL is configured.
             BackendUnconfigured=not self.backend.is_configured,
@@ -150,30 +139,32 @@ class DaemonCore:
 
     # ── Commands ─────────────────────────────────────────────────────────────
 
-    async def cmd_connect(self, username: str, profile_name: Optional[str]) -> PipeResponse:
+    async def cmd_connect(self, username: str, profile_name: Optional[str], *, privileged: bool = False) -> PipeResponse:
+        async with self._tunnel_mutation:
+            return await self._connect(username, profile_name, privileged=privileged)
+
+    async def _connect(self, username: str, profile_name: Optional[str], *, privileged: bool) -> PipeResponse:
         from daemon.ipc_server import _ok, _fail
+        if profile_name is not None and not configs_mod.is_valid_profile_name(profile_name):
+            return _fail('Invalid profile name.')
 
         # Standalone (no backend configured at all): skip the authorization gate entirely —
         # there is nothing to authorize against. The moment a backend URL is set, normal
         # authorization applies from then on, same as any brand-new client. Mirrors Windows
         # PipeServer's Connect handler.
         if self.backend.is_configured and not self.state.is_allowed_to_connect():
-            ok, error = await self._live_register()
-            if not ok:
-                cid = self.state.get_client_id()
-                msg = f"Not authorized — activate key {cid} in the admin panel."
-                return _fail(error or msg)
+            _, error = await self._live_register()
+            if not self.state.is_allowed_to_connect():
+                return _fail(f"{self.state.connection_denied_reason()} {error or ''}".strip())
 
         configs_mod.claim_staged_config(username)
 
         if profile_name:
             config_path = configs_mod.get_config_path(username, profile_name)
-            if config_path is None:
-                # Cross-user search: covers auto-connect/device-tunnel identities, which have
-                # no per-user directory of their own but the config usually already lives
-                # under the one real OS user's directory (Linux is single-user by design).
+            if config_path is None and privileged:
+                # Only trusted daemon actions/authenticated root may search other users.
                 config_path = configs_mod.get_config_path_by_tunnel_name(profile_name)
-            if config_path is None and username == 'DeviceTunnel':
+            if config_path is None and privileged and username == 'DeviceTunnel':
                 # Last resort: the machine-level store, for a never-logged-into machine
                 # where no per-user copy exists yet. Mirrors Windows
                 # AutoConnectService.FindConfigPath's two-step lookup.
@@ -189,8 +180,13 @@ class DaemonCore:
         if not tunnel_name:
             return _fail(f"Could not determine tunnel name from config path: {config_path}")
 
+        if self.backend.is_configured and not self.state.is_profile_allowed_to_connect(tunnel_name):
+            return _fail(self.state.connection_denied_reason(tunnel_name))
+
         # Already connected to this tunnel — nothing to do.
         if self.state.is_connected(tunnel_name):
+            if not privileged and not self.state.can_control_tunnel(tunnel_name, username):
+                return _fail("Not authorized to control another user's tunnel.")
             return _ok()
 
         # AllowedIPs conflict check — mirrors Windows WireGuardController.FindAllowedIpsConflict.
@@ -211,15 +207,13 @@ class DaemonCore:
 
         wan_ip = await self.backend.get_wan_ip()
         try:
-            wg_path = configs_mod.prepare_config_path(config_path)
+            ok, output = await self._start_tunnel(config_path, tunnel_name)
         except ValueError as e:
             return _fail(str(e))
-        ok, output = await self.wg.connect(wg_path)
-        configs_mod.cleanup_temp_config(tunnel_name)
         if not ok:
             return _fail(f"Failed to start tunnel: {output}")
 
-        self.state.set_connected(tunnel_name, username)
+        self.state.set_connected(tunnel_name, username, system_owned=privileged)
         asyncio.create_task(
             self.backend.log_event(
                 self.state.get_client_id(), 'Connect',
@@ -229,6 +223,28 @@ class DaemonCore:
         )
         asyncio.create_task(self._verify_after_connect(tunnel_name))
         return _ok()
+
+    async def _start_tunnel(self, config_path: Path, tunnel_name: str,
+                            endpoint_port_override: Optional[int] = None) -> tuple[bool, str]:
+        """Every wg-quick up, including internal reconnects, shares this gate."""
+        if self.backend.is_configured and not self.state.is_profile_allowed_to_connect(tunnel_name):
+            return False, self.state.connection_denied_reason(tunnel_name)
+        wg_path = configs_mod.prepare_config_path(config_path, endpoint_port_override=endpoint_port_override)
+        self._tunnel_config_paths[tunnel_name] = config_path
+        try:
+            ok, output = await self.wg.connect(wg_path)
+        finally:
+            configs_mod.cleanup_temp_config(tunnel_name)
+        # A heartbeat can withdraw access while the subprocess is starting.
+        if ok and self.backend.is_configured and not self.state.is_profile_allowed_to_connect(tunnel_name):
+            stopped, _ = await self._wg_down(tunnel_name)
+            if stopped:
+                self.state.set_disconnected(tunnel_name)
+            else:
+                self.state.set_connected(tunnel_name, 'Unknown', system_owned=True)
+                log.error("Access withdrawn but tunnel '%s' could not be stopped", tunnel_name)
+            return False, 'VPN authorization changed while connecting. Disconnect and refresh access.'
+        return ok, output
 
     async def _verify_after_connect(self, tunnel_name: str) -> None:
         """Post-connect verification retry loop (mirrors Windows' TunnelVerifier, run right
@@ -313,13 +329,18 @@ class DaemonCore:
             await asyncio.sleep(_VERIFY_SLOW_INTERVAL_S if failed_marked else _VERIFY_FAST_INTERVAL_S)
 
     async def _try_switch_to_fallback_port(self, tunnel_name: str, fallback_port: int, trigger_seconds: int) -> None:
+        async with self._tunnel_mutation:
+            if self.state.is_connected(tunnel_name):
+                await self._switch_to_fallback_port(tunnel_name, fallback_port, trigger_seconds)
+
+    async def _switch_to_fallback_port(self, tunnel_name: str, fallback_port: int, trigger_seconds: int) -> None:
         """Reinstalls tunnel_name against its UDP fallback port (already confirmed active by
         the caller -- state.get_fallback_config) after trigger_seconds passed with no
         successful verification. Runs at most once per connect (guarded by the caller's
         fallback_tried flag) -- a single alternate-port attempt, not a permanent pin; a later
         reconnect always starts on the primary port again. Mirrors Windows
         TunnelVerifier.TrySwitchToFallbackPortAsync."""
-        stored = configs_mod.get_config_path_by_tunnel_name(tunnel_name)
+        stored = self._tunnel_config_paths.get(tunnel_name) or configs_mod.get_config_path_by_tunnel_name(tunnel_name)
         if stored is None:
             return
 
@@ -328,13 +349,17 @@ class DaemonCore:
             tunnel_name, trigger_seconds, fallback_port,
         )
         try:
-            await self._wg_down(tunnel_name)
-            wg_path = configs_mod.prepare_config_path(stored, endpoint_port_override=fallback_port)
-            ok, output = await self.wg.connect(wg_path)
-            configs_mod.cleanup_temp_config(tunnel_name)
+            owner = self.state.get_tunnel(tunnel_name).connected_user or 'Unknown'
+            system_owned = self.state.is_system_owned(tunnel_name)
+            stopped, _ = await self._wg_down(tunnel_name)
+            if not stopped:
+                return
+            self.state.set_disconnected(tunnel_name)
+            ok, output = await self._start_tunnel(stored, tunnel_name, endpoint_port_override=fallback_port)
             if not ok:
                 log.warning("Fallback-port reconnect failed for tunnel '%s': %s", tunnel_name, output)
                 return
+            self.state.set_connected(tunnel_name, owner, system_owned=system_owned)
             self.state.mark_used_fallback_port(tunnel_name, fallback_port)
             detail = f"Switched to UDP {fallback_port} after {trigger_seconds}s with no confirmation on the primary port."
             asyncio.create_task(
@@ -345,13 +370,21 @@ class DaemonCore:
         except Exception as e:
             log.warning("Fallback-port reconnect threw for tunnel '%s': %s", tunnel_name, e)
 
-    async def cmd_disconnect(self, username: str, profile_name: Optional[str] = None) -> PipeResponse:
+    async def cmd_disconnect(self, username: str, profile_name: Optional[str] = None, *, privileged: bool = False) -> PipeResponse:
+        async with self._tunnel_mutation:
+            return await self._disconnect(username, profile_name, privileged=privileged)
+
+    async def _disconnect(self, username: str, profile_name: Optional[str], *, privileged: bool) -> PipeResponse:
         from daemon.ipc_server import _ok, _fail
+        if profile_name is not None and not configs_mod.is_valid_profile_name(profile_name):
+            return _fail('Invalid profile name.')
 
         if profile_name:
             # Disconnect a specific named tunnel.
             if not self.state.is_connected(profile_name):
                 return _fail(f"Tunnel '{profile_name}' is not active.")
+            if not privileged and not self.state.can_control_tunnel(profile_name, username):
+                return _fail("Not authorized to disconnect another user's tunnel.")
             ok, output = await self._wg_down(profile_name)
             if not ok:
                 return _fail(f"Failed to stop tunnel: {output}")
@@ -368,9 +401,7 @@ class DaemonCore:
         if not tunnel.is_connected or not tunnel.tunnel_name:
             return _fail("No tunnel is currently active.")
 
-        system_tunnel = tunnel.connected_user in ('AutoConnect', 'PendingConnect', 'Unknown', 'DeviceTunnel')
-        if not system_tunnel and tunnel.connected_user and \
-                tunnel.connected_user.lower() != username.lower():
+        if not privileged and not self.state.can_control_tunnel(tunnel.tunnel_name, username):
             return _fail("Not authorized to disconnect another user's tunnel.")
 
         ok, output = await self._wg_down(tunnel.tunnel_name)
@@ -387,6 +418,23 @@ class DaemonCore:
         )
         return _ok()
 
+    async def cmd_delete_profile(self, username: str, profile_name: Optional[str], *, privileged: bool = False) -> PipeResponse:
+        from daemon.ipc_server import _ok, _fail
+        async with self._tunnel_mutation:
+            if not configs_mod.is_valid_profile_name(profile_name):
+                return _fail('Invalid profile name.')
+            if configs_mod.get_config_path(username, profile_name) is None:
+                return _fail(f"Profile '{profile_name}' not found.")
+            if configs_mod.is_managed(username, profile_name):
+                return _fail(f"'{profile_name}' is managed by the administrator.")
+            if self.state.is_connected(profile_name):
+                result = await self._disconnect(username, profile_name, privileged=privileged)
+                if not result.Success:
+                    return result
+            if not configs_mod.delete_user_profile(username, profile_name):
+                return _fail(f"Profile '{profile_name}' not found.")
+            return _ok()
+
     async def _wg_down(self, tunnel_name: str) -> tuple[bool, str]:
         """`wg-quick down` re-reads the same config file `up` used (for its PostDown
         and DNS-restore directives) — it isn't purely a kernel-interface teardown.
@@ -396,7 +444,7 @@ class DaemonCore:
         never existed, and reports a plain "does not exist" error. Re-decrypt the
         stored config to a temp path and pass that explicit path instead — same
         pattern already used for `up`."""
-        stored = configs_mod.get_config_path_by_tunnel_name(tunnel_name)
+        stored = self._tunnel_config_paths.get(tunnel_name) or configs_mod.get_config_path_by_tunnel_name(tunnel_name)
         if stored is None:
             return await self.wg.disconnect(tunnel_name)
         try:
@@ -408,7 +456,10 @@ class DaemonCore:
             log.warning("Not decrypting '%s' for teardown: %s", tunnel_name, e)
             return await self.wg.disconnect(tunnel_name)
         try:
-            return await self.wg.disconnect(str(wg_path))
+            result = await self.wg.disconnect(str(wg_path))
+            if result[0]:
+                self._tunnel_config_paths.pop(tunnel_name, None)
+            return result
         finally:
             configs_mod.cleanup_temp_config(tunnel_name)
 
@@ -431,14 +482,21 @@ class DaemonCore:
             LatestVersion=latest,
         )
 
-    async def cmd_set_backend_url(self, dns: Optional[str]) -> PipeResponse:
+    async def cmd_set_backend_url(self, dns: Optional[str], *, privileged: bool = False) -> PipeResponse:
+        from daemon.ipc_server import _fail
+        if not privileged:
+            return _fail('An administrator must provision this machine. Use the root provisioning command or installer configuration.')
+        async with self._provisioning_lock:
+            return await self._provision_backend(dns)
+
+    async def _provision_backend(self, dns: Optional[str]) -> PipeResponse:
         """First-run: set the backend URL from a user-entered DNS (the tray prompt shown when the
         installer provided none). Persists it (always — "save anyway"), probes reachability, and
         kicks a registration so activation starts immediately. Mirrors the Windows
         ClientRegistrationService.SetBackendUrlAsync."""
         from daemon.ipc_server import _fail
 
-        normalized = self.backend.set_base_url(dns)
+        normalized = self.backend.set_base_url(dns, privileged=True)
         if not normalized:
             return _fail("Enter a valid server address, for example vpn.example.com")
 
@@ -456,12 +514,18 @@ class DaemonCore:
         asyncio.create_task(self.heartbeat_once())
         return PipeResponse(Success=True, Error=warning)
 
-    async def cmd_set_standalone_mode(self) -> PipeResponse:
+    async def cmd_set_standalone_mode(self, *, privileged: bool = False) -> PipeResponse:
         """First-run "Use standalone" choice: no backend contacted, just remember the
         decision so the tray stops prompting and shows the normal popup. Mirrors Windows
         PipeServer's SetStandaloneMode case."""
-        self.state.set_standalone_mode_chosen(True)
-        reg_mod.save(self.state)
+        if not privileged:
+            return PipeResponse(Success=False, Error='An administrator must provision this machine.')
+        async with self._provisioning_lock:
+            if self.backend.is_configured:
+                return PipeResponse(Success=False, Error='A managed client cannot switch to standalone mode through IPC.')
+            self.state.set_standalone_mode_chosen(True)
+            if not reg_mod.save(self.state):
+                return PipeResponse(Success=False, Error='Could not persist standalone provisioning; repair storage before restart.')
         return PipeResponse(Success=True)
 
     async def cmd_register(self, username: str) -> RegistrationResult:
@@ -498,8 +562,9 @@ class DaemonCore:
         long-poll loop) so admin actions apply identically regardless of which
         request delivered them."""
         self.state.set_backend_reachable(True)
-        is_active = resp.get('IsActive', resp.get('isActive', False))
-        self.state.update_registration(is_active)
+        self.state.apply_backend_status(resp)
+        reg_mod.save(self.state)
+        is_active = self.state.is_registration_active()
 
         # A standalone client that later configured a backend and got activated: bulk-
         # transfer its local unmanaged profiles once. Mirrors Windows
@@ -522,15 +587,13 @@ class DaemonCore:
         self.persist_auto_connect()
 
         self.state.set_heartbeat_interval(resp.get('HeartbeatIntervalMinutes', resp.get('heartbeatIntervalMinutes', 5)))
-        server_profile_name = resp.get('ServerProfileName', resp.get('serverProfileName'))
-        self.state.set_server_profile_name(server_profile_name)
+        server_profile_name = self.state.get_server_profile_name()
         # Device tunnel: connect the native profile before any login (root daemon, not tied
         # to a session). Runs on every heartbeat/poll regardless of login state, so the
         # machine-level config store (config_manager.DEVICE_DIR) stays populated even on a
         # never-logged-into machine. Mirrors Windows ClientRegistrationService's
         # EnsureDeviceTunnelConfigAsync call site.
-        device_tunnel_enabled = resp.get('DeviceTunnelEnabled', resp.get('deviceTunnelEnabled', False))
-        self.state.set_device_tunnel_enabled(device_tunnel_enabled)
+        device_tunnel_enabled = self.state.get_device_tunnel_enabled()
         if device_tunnel_enabled and server_profile_name:
             asyncio.create_task(self._ensure_device_tunnel_config(server_profile_name))
         # Auto-update channel (stable|beta) — the updater polls the matching Linux release stream.
@@ -540,30 +603,8 @@ class DaemonCore:
         # authenticate with it. Only present while this client is still on the previous key.
         self.backend.set_api_key(resp.get('ClientApiKey', resp.get('clientApiKey')))
 
-        # Gateway /health target for the native server tunnel — used to re-verify the
-        # tunnel through the VPN after a network change.
-        server_vpn_ip = resp.get('ServerVpnIp', resp.get('serverVpnIp'))
-        server_health_url = resp.get('ServerHealthUrl', resp.get('serverHealthUrl'))
-        self.state.set_server_gateway(server_vpn_ip, _health_port_from_url(server_health_url))
-
-        # Per-profile remote LAN CIDR(s) behind each profile's own sidecar, for the
-        # pre-connect LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case).
-        self.state.set_remote_lan_cidrs(resp.get('RemoteLanCidrsByProfile', resp.get('remoteLanCidrsByProfile')))
-
-        # Per-profile UDP fallback port + trigger window (docs/design/port-443-fallback.md).
-        # Present only when the serving sidecar has confirmed the redirect is active.
-        self.state.set_fallback_ports(resp.get('FallbackEndpoints', resp.get('fallbackEndpoints')))
-
-        # MFA state — pass through to tray via build_tunnel_status.
-        mfa_expires_raw = resp.get('MfaSessionExpiresAt', resp.get('mfaSessionExpiresAt'))
-        self.state.set_mfa_state(
-            required=resp.get('MfaRequired', resp.get('mfaRequired', False)),
-            authorize_url=resp.get('MfaAuthorizeUrl', resp.get('mfaAuthorizeUrl')),
-            session_expires_at=mfa_expires_raw.isoformat() if isinstance(mfa_expires_raw, datetime) else mfa_expires_raw,
-            enrollment_open=resp.get('MfaEnrollmentOpen', resp.get('mfaEnrollmentOpen', False)),
-            enrollment_uri=resp.get('MfaEnrollmentUri', resp.get('mfaEnrollmentUri')),
-            approve_number=resp.get('MfaApproveNumber', resp.get('mfaApproveNumber')),
-        )
+        # Gateway, route/fallback metadata and MFA were applied atomically with
+        # activation above, before persistence or any network operation.
 
         # Admin pressed "Update now" — run the check immediately.
         if resp.get('ForceUpdate', resp.get('forceUpdate', False)):
@@ -591,12 +632,12 @@ class DaemonCore:
         if resp.get('PendingConnect', resp.get('pendingConnect', False)):
             server_profile = self.state.get_server_profile_name()
             if server_profile and not self.state.is_connected(server_profile):
-                asyncio.create_task(self.cmd_connect('PendingConnect', server_profile))
+                asyncio.create_task(self.cmd_connect('PendingConnect', server_profile, privileged=True))
 
         if resp.get('PendingDisconnect', resp.get('pendingDisconnect', False)):
             server_profile = self.state.get_server_profile_name()
             if server_profile and self.state.is_connected(server_profile):
-                asyncio.create_task(self.cmd_disconnect('PendingDisconnect', server_profile))
+                asyncio.create_task(self.cmd_disconnect('PendingDisconnect', server_profile, privileged=True))
 
         # MFA session expired (the gate returned) while the gated tunnel is still up: the sidecar
         # already dropped the peer server-side, so the local tunnel is dead but still active and
@@ -605,7 +646,7 @@ class DaemonCore:
         if resp.get('MfaRequired', resp.get('mfaRequired', False)):
             server_profile = self.state.get_server_profile_name()
             if server_profile and self.state.is_connected(server_profile):
-                asyncio.create_task(self.cmd_disconnect('MfaSessionExpired', server_profile))
+                asyncio.create_task(self.cmd_disconnect('MfaSessionExpired', server_profile, privileged=True))
 
         # Handle pending delete.
         delete_name = resp.get('PendingDeleteProfileName', resp.get('pendingDeleteProfileName'))
@@ -858,17 +899,7 @@ class DaemonCore:
                 if was_via_gateway:
                     log.warning(
                         "Re-verify: tunnel '%s' gateway unreachable after network change — disconnecting", name)
-                    ok, output = await self._wg_down(name)
-                    if not ok:
-                        log.warning("Re-verify: disconnect of '%s' failed: %s", name, output)
-                        continue
-                    self.state.set_disconnected(name)
-                    asyncio.create_task(
-                        self.backend.log_event(
-                            self.state.get_client_id(), 'Disconnect',
-                            tunnel.ConnectedUser or 'ConnectionLost', name,
-                        )
-                    )
+                    await self.cmd_disconnect(tunnel.ConnectedUser or 'ConnectionLost', name, privileged=True)
                     continue
                 log.debug(
                     "Re-verify: gateway probe for '%s' failed but it was never gateway-verified "
@@ -912,11 +943,11 @@ class DaemonCore:
             if not is_up and not in_trusted:
                 log.info("Auto-connect (%s): outside trusted network, connecting", label)
                 self._last_auto_action[label] = now
-                await self.cmd_connect(label, profile)
+                await self.cmd_connect(label, profile, privileged=True)
             elif is_up and in_trusted:
                 log.info("Auto-connect (%s): inside trusted network, disconnecting", label)
                 self._last_auto_action[label] = now
-                await self.cmd_disconnect(label, profile)
+                await self.cmd_disconnect(label, profile, privileged=True)
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
@@ -934,10 +965,8 @@ class DaemonCore:
             if resp is None:
                 self.state.set_backend_reachable(False)
                 return None, "Registration server unreachable."
-            self.state.set_backend_reachable(True)
-            active = resp.get('IsActive', resp.get('isActive', False))
-            self.state.update_registration(active)
-            return active, None
+            await self._process_status_response(resp, username)
+            return self.state.is_registration_active(), None
         except Exception as e:
             self.state.set_backend_reachable(False)
             return None, str(e)
@@ -953,23 +982,27 @@ class DaemonCore:
             log.info("Staged config: %s", filename)
 
     def _handle_pending_delete(self, profile_name: str) -> None:
-        try:
-            if self.state.is_connected(profile_name):
-                asyncio.create_task(self._disconnect_and_delete(profile_name))
-            else:
-                configs_mod.delete_profile(profile_name)
-        except Exception as e:
-            log.error("Pending delete failed: %s", e)
+        asyncio.create_task(self._disconnect_and_delete(profile_name))
 
     async def _disconnect_and_delete(self, profile_name: str) -> None:
-        await self._wg_down(profile_name)
-        self.state.set_disconnected(profile_name)
-        configs_mod.delete_profile(profile_name)
+        async with self._tunnel_mutation:
+            if self.state.is_connected(profile_name):
+                ok, _ = await self._wg_down(profile_name)
+                if not ok:
+                    return
+                self.state.set_disconnected(profile_name)
+            configs_mod.delete_profile(profile_name)
 
-    async def _reconnect_if_replaced(self, username: str, staged_names: list[str]) -> None:
+    async def _reconnect_if_replaced(self, username: str, staged_names: list[str], *, privileged: bool = False) -> None:
+        async with self._tunnel_mutation:
+            await self._reconnect_replaced(username, staged_names, privileged=privileged)
+
+    async def _reconnect_replaced(self, username: str, staged_names: list[str], *, privileged: bool) -> None:
         """If an active tunnel's config was just replaced, reconnect to pick up new keys."""
         for staged_name in staged_names:
             if not self.state.is_connected(staged_name):
+                continue
+            if not privileged and not self.state.can_control_tunnel(staged_name, username):
                 continue
             ok, _ = await self._wg_down(staged_name)
             if not ok:
@@ -979,14 +1012,12 @@ class DaemonCore:
             if config_path:
                 wan_ip = await self.backend.get_wan_ip()
                 try:
-                    wg_path = configs_mod.prepare_config_path(config_path)
+                    ok, _ = await self._start_tunnel(config_path, staged_name)
                 except ValueError as e:
                     log.warning("Not reconnecting '%s': %s", staged_name, e)
                     continue
-                ok, _ = await self.wg.connect(wg_path)
-                configs_mod.cleanup_temp_config(staged_name)
                 if ok:
-                    self.state.set_connected(staged_name, username)
+                    self.state.set_connected(staged_name, username, system_owned=privileged)
                     asyncio.create_task(
                         self.backend.log_event(
                             self.state.get_client_id(), 'Connect',

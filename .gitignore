@@ -43,3 +43,6 @@ Server/sidecar/sidecar
 
 # Jobs
 jobs/
+
+# Local security validation reports, SBOMs and candidate binaries
+/tmp/security-*/

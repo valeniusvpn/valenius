@@ -1,13 +1,16 @@
 namespace Valenius.Service;
 
-public class RegistrationState
+public sealed record RegistrationState
 {
-    public bool IsActive { get; set; }
-    public DateTime LastCheckedUtc { get; set; }
-    public Guid ClientId { get; set; }
+    public bool IsActive { get; init; }
+    public DateTime LastCheckedUtc { get; init; }
+    public Guid ClientId { get; init; }
+
+    /// <summary>DPAPI-protected, reusable connection policy; never pending actions or credentials.</summary>
+    public string? ProtectedConnectionPolicy { get; init; }
 
     /// <summary>True once the user chose "Use standalone" in the first-run setup dialog.</summary>
-    public bool StandaloneModeChosen { get; set; }
+    public bool StandaloneModeChosen { get; init; }
 
     /// <summary>
     /// True once every local profile that existed when this (previously standalone) client was
@@ -15,5 +18,5 @@ public class RegistrationState
     /// the next heartbeat/poll retries the whole batch — see
     /// <see cref="ClientRegistrationService.TransferLocalProfilesAsync"/>.
     /// </summary>
-    public bool ProfilesTransferredToBackend { get; set; }
+    public bool ProfilesTransferredToBackend { get; init; }
 }

@@ -94,7 +94,9 @@ nav:
       - MFA session gating: working/mfa.md
       - Traffic dashboard: working/traffic.md
       - Testing a server (Pro): working/server-testing.md
+      - Appliance update hold (Pro): working/appliances.md
       - Audit log: working/audit-log.md
+      - Backup & restore: working/backup-restore.md
       - Device pairing (QR): working/device-pairing.md
       - API tokens (Pro): working/api-tokens.md
       - Connect an AI assistant or automation tool (Pro): working/ai-integrations.md

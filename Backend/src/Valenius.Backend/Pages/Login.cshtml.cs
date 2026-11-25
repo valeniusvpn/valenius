@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
@@ -8,8 +10,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
-using OtpNet;
 using Valenius.Backend.Data;
 using Valenius.Backend.Models;
 using Valenius.Backend.Services;
@@ -17,14 +17,15 @@ using Valenius.Backend.Services;
 namespace Valenius.Backend.Pages;
 
 [AllowAnonymous]
+[EnableRateLimiting("login")]
 public class LoginModel(
     ApplicationDbContext db,
     IAuthenticationSchemeProvider schemeProvider,
     IDataProtectionProvider dataProtection,
-    IMemoryCache cache,
     IAuditService audit) : PageModel
 {
     private const string PendingTotpCookie = ".Valenius.PendingTotp";
+    private const string PendingTotpPurpose = "Valenius.PendingTotp.v2";
 
     public bool   OidcEnabled      { get; private set; }
     public bool   LocalAuthEnabled { get; private set; }
@@ -79,7 +80,6 @@ public class LoginModel(
 
     // ── Local email + password login ─────────────────────────────────────────
 
-    [EnableRateLimiting("login")]
     public async Task<IActionResult> OnPostLocalAsync(string? returnUrl)
     {
         var settings   = await db.ServerSettings.FirstAsync();
@@ -95,7 +95,7 @@ public class LoginModel(
         if (user is null || string.IsNullOrEmpty(user.PasswordHash)
             || !PasswordHasher.Verify(Password, user.PasswordHash))
         {
-            _ = audit.LogAsync(Audit.Auth, "Login failed", $"Email: {Email.Trim()}");
+            await audit.LogAsync(Audit.Auth, "Login failed", $"Email: {Email.Trim()}");
             OidcEnabled      = settings.OidcEnabled;
             LocalAuthEnabled = true;
             ReturnUrl        = safeReturn;
@@ -107,8 +107,9 @@ public class LoginModel(
         if (user.TotpEnabled && !string.IsNullOrEmpty(user.TotpSecret))
         {
             // Store userId in a short-lived protected cookie; redirect to TOTP step.
-            var protector = dataProtection.CreateProtector("Valenius.PendingTotp");
-            Response.Cookies.Append(PendingTotpCookie, protector.Protect(user.Id.ToString()),
+            var protector = dataProtection.CreateProtector(PendingTotpPurpose).ToTimeLimitedDataProtector();
+            Response.Cookies.Append(PendingTotpCookie,
+                protector.Protect($"{user.Id}|{CredentialStamp(user)}", TimeSpan.FromMinutes(5)),
                 new CookieOptions
                 {
                     HttpOnly  = true,
@@ -124,12 +125,11 @@ public class LoginModel(
 
     // ── TOTP second factor ────────────────────────────────────────────────────
 
-    [EnableRateLimiting("login")]
     public async Task<IActionResult> OnPostTotpAsync(string? returnUrl, string code)
     {
         var safeReturn = SafeReturn(returnUrl);
 
-        if (!TryGetPendingUserId(out var userId))
+        if (!TryGetPendingChallenge(out var userId, out var stamp))
         {
             // Cookie missing or tampered — restart
             Response.Cookies.Delete(PendingTotpCookie);
@@ -137,52 +137,30 @@ public class LoginModel(
         }
 
         var user = await db.AppUsers.FindAsync(userId);
-        if (user is null || string.IsNullOrEmpty(user.TotpSecret))
+        if (user is null || !user.IsLocalUser || !user.TotpEnabled
+            || string.IsNullOrEmpty(user.TotpSecret) || string.IsNullOrEmpty(user.PasswordHash)
+            || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(stamp), Encoding.ASCII.GetBytes(CredentialStamp(user))))
         {
             Response.Cookies.Delete(PendingTotpCookie);
             return RedirectToPage(new { returnUrl = safeReturn });
         }
 
-        // Validate the 6-digit code (RFC 4226 / RFC 6238).
-        // VerificationWindow.RfcSpecifiedNetworkDelay = ±1 time step (±30 s) for clock drift.
-        var totp  = new Totp(Base32Encoding.ToBytes(user.TotpSecret));
-        bool valid = totp.VerifyTotp(
-            code?.Trim() ?? "",
-            out long usedInterval,
-            VerificationWindow.RfcSpecifiedNetworkDelay);
-
-        // Replay protection: reject a code whose time-step was already used.
-        if (valid && user.TotpLastUsedInterval.HasValue && usedInterval <= user.TotpLastUsedInterval.Value)
-            valid = false;
-
-        // Track TOTP failures per user to prevent brute-force of the 6-digit code.
-        var totpKey = $"totp_fail:{user.Id}";
-        if (!valid)
-        {
-            var fails = (cache.GetOrCreate<int>(totpKey, e => { e.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15); return 0; })) + 1;
-            cache.Set(totpKey, fails, TimeSpan.FromMinutes(15));
-            if (fails >= 5)
-                Error = "Too many failed attempts. Please wait 15 minutes before trying again.";
-            else
-            {
-                IsTotpStep = true;
-                ReturnUrl  = safeReturn;
-                Error      = "Invalid authenticator code. Please try again.";
-            }
-            return Page();
-        }
-
-        if (cache.TryGetValue<int>(totpKey, out var currentFails) && currentFails >= 5)
+        var secret = user.TotpSecret;
+        var passwordHash = user.PasswordHash;
+        var subject = user.Subject;
+        var eligible = db.AppUsers.Where(u => u.Id == userId && u.Subject == subject
+            && u.TotpEnabled && u.TotpSecret == secret && u.PasswordHash == passwordHash
+            && (u.Subject == "local:bootstrap" || db.ServerSettings.Any(s => s.LocalAuthEnabled)));
+        var result = await TotpAttemptGuard.VerifyAsync(eligible, secret, code, nameof(AppUser.TotpLastUsedInterval));
+        if (result != TotpAttemptResult.Accepted)
         {
             IsTotpStep = true;
-            ReturnUrl  = safeReturn;
-            Error      = "Too many failed attempts. Please wait 15 minutes before trying again.";
+            ReturnUrl = safeReturn;
+            Error = result == TotpAttemptResult.Locked
+                ? "Too many failed attempts. Please wait 15 minutes before trying again."
+                : "Invalid authenticator code. Please try again.";
             return Page();
         }
-
-        cache.Remove(totpKey);
-        user.TotpLastUsedInterval = usedInterval;
-        await db.SaveChangesAsync();
 
         Response.Cookies.Delete(PendingTotpCookie);
         return await SignInAndRedirect(user, safeReturn);
@@ -190,7 +168,6 @@ public class LoginModel(
 
     // ── OIDC challenge ────────────────────────────────────────────────────────
 
-    [EnableRateLimiting("login")]
     public async Task<IActionResult> OnPostOidcAsync(string? returnUrl)
     {
         var settings = await db.ServerSettings.FirstAsync();
@@ -205,7 +182,7 @@ public class LoginModel(
 
     private async Task<IActionResult> SignInAndRedirect(Models.AppUser user, string returnUrl)
     {
-        _ = audit.LogAsync(Audit.Auth, "Login", $"User: {user.DisplayName} ({user.Email})");
+        await audit.LogAsync(Audit.Auth, "Login", $"User: {user.DisplayName} ({user.Email})");
         var claims = new[]
         {
             new Claim(ClaimTypes.NameIdentifier, user.Subject),
@@ -219,18 +196,26 @@ public class LoginModel(
         return Redirect("/Admin/Overview");
     }
 
-    private bool TryGetPendingUserId(out int userId)
+    private static string CredentialStamp(AppUser user) => Convert.ToHexString(
+        SHA256.HashData(Encoding.UTF8.GetBytes($"{user.PasswordHash}\0{user.TotpSecret}")));
+
+    private bool TryGetPendingUserId(out int userId) => TryGetPendingChallenge(out userId, out _);
+
+    private bool TryGetPendingChallenge(out int userId, out string stamp)
     {
         userId = 0;
-        if (!Request.Cookies.TryGetValue(PendingTotpCookie, out var token))
-            return false;
+        stamp = "";
+        if (!Request.Cookies.TryGetValue(PendingTotpCookie, out var token)) return false;
         try
         {
-            var protector = dataProtection.CreateProtector("Valenius.PendingTotp");
-            userId = int.Parse(protector.Unprotect(token));
+            var protector = dataProtection.CreateProtector(PendingTotpPurpose).ToTimeLimitedDataProtector();
+            var parts = protector.Unprotect(token, out _).Split('|');
+            if (parts.Length != 2 || !int.TryParse(parts[0], out userId) || userId <= 0
+                || parts[1].Length != 64 || !parts[1].All(char.IsAsciiHexDigit)) return false;
+            stamp = parts[1];
             return true;
         }
-        catch { return false; }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or ArgumentException) { return false; }
     }
 
     private string SafeReturn(string? url)

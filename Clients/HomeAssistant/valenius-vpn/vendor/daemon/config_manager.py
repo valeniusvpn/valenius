@@ -145,7 +145,7 @@ def migrate_plain_configs() -> None:
 # ── Name / path helpers ───────────────────────────────────────────────────────
 
 def is_valid_profile_name(name: Optional[str]) -> bool:
-    return bool(name and _VALID_NAME.match(name))
+    return isinstance(name, str) and bool(_VALID_NAME.fullmatch(name))
 
 
 def sanitize_profile_name(filename: str) -> str:

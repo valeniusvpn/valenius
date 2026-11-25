@@ -58,9 +58,7 @@ public class CreateModel(ApplicationDbContext db, IAuditService audit) : PageMod
 
         // Replace temporary subject with the stable "local:{id}" identifier.
         user.Subject = $"local:{user.Id}";
-        await db.SaveChangesAsync();
-
-        _ = audit.LogAsync(Audit.User, "Created", $"User: {user.DisplayName} ({user.Email})", $"Role: {user.Role}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.User, "Created", $"User: {user.DisplayName} ({user.Email})", $"Role: {user.Role}");
         TempData["Success"] = $"User \"{user.DisplayName}\" created.";
         return RedirectToPage("Index");
     }

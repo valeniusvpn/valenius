@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: exclude all app data from cloud backup AND device-to-device transfer.
+     Everything the app keeps (ClientKey, device credential, encrypted configs) is
+     encrypted with an Android Keystore key that never leaves the device, so a restored
+     copy can't be decrypted on the new phone anyway; restoring it only produces a store
+     that fails to open. A moved phone gets set up again (recovery QR), never a clone. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

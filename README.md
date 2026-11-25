@@ -2,8 +2,8 @@
 
 **Valenius** is a centrally managed platform for WireGuard® VPN access. Its free, self-hosted
 Community Edition lets administrators distribute VPN configurations while users connect from
-**Windows, Linux, macOS, or Android**. After the Windows client is installed, users do not need
-local administrator privileges to connect. Valenius is designed for business and MSP environments.
+**Windows, Linux, macOS, or Android** — plus an always-on **Home Assistant** add-on. After the
+desktop client is installed, users do not need local administrator privileges to connect. Valenius is designed for business and MSP environments.
 
 <img src="https://www.valenius.com/images/screenshots/dashboard-full.webp" alt="Valenius admin dashboard" width="800">
 
@@ -87,10 +87,14 @@ Pull the latest source, rebuild, and restart the deployment:
 ## Editions
 
 - **Community Edition** — free, self-hosted, **AGPLv3**. Full admin panel, manual `.conf` upload,
-  QR device pairing, OIDC/TOTP sign-in, per-OS auto-update, client diagnostics, audit log,
-  configuration encryption at rest, and simultaneous multi-VPN on the desktop clients.
-- **Pro** — commercial. Adds automated WireGuard peer provisioning, MFA session gating,
-  per-client traffic accounting, multi-tenant / MSP features, and appliance fleet management.
+  QR device pairing, OIDC/TOTP sign-in, per-OS auto-update with stable/beta channels, client
+  diagnostics and remote service restart, audit log, configuration encryption at rest,
+  simultaneous multi-VPN, standalone mode (no backend) and connect-before-login device tunnels on
+  the desktop clients, and a Prometheus/Zabbix monitoring endpoint.
+- **Pro** — commercial. Adds automated WireGuard peer provisioning through a managed WireGuard
+  server, MFA session gating (TOTP and push-to-approve), server-side tunnel liveness detection,
+  per-client traffic accounting, server connectivity testing, a Management API with an MCP server
+  for AI assistants, multi-tenant / MSP features, and appliance fleet reporting.
 
 ## Documentation
 
@@ -111,8 +115,10 @@ The Community Edition is licensed under the **GNU Affero General Public License 
 | Path | Contents |
 |------|----------|
 | `Backend/` | ASP.NET Core backend |
-| `Clients/` | Windows, Linux, macOS, and mobile (Flutter) clients |
+| `Clients/` | Windows, Linux, macOS, mobile (Flutter), and Home Assistant clients |
 | `Shared/`  | Shared IPC wire types |
+| `integrations/` | Official Zabbix template for the monitoring endpoint |
+| `install.sh`, `update.sh` | Community Edition installer and upgrade script |
 
 ---
 

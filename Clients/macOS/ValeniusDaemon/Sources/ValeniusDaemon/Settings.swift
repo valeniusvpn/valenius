@@ -9,6 +9,7 @@ let settingsPath = "\(appSupportDir)/appsettings.json"
 struct Settings {
     var backendUrl: String
     var apiKey: String
+    var offlineAccessDays: Int = 7
 
     private struct Root: Decodable {
         var valenius: Inner
@@ -21,10 +22,18 @@ struct Settings {
     private struct Inner: Decodable {
         var backendUrl: String
         var apiKey: String
+        var offlineAccessDays: Int?
 
         enum CodingKeys: String, CodingKey {
             case backendUrl = "BackendUrl"
             case apiKey = "ApiKey"
+            case offlineAccessDays = "OfflineAccessDays"
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            backendUrl = try c.decode(String.self, forKey: .backendUrl)
+            apiKey = try c.decode(String.self, forKey: .apiKey)
+            offlineAccessDays = c.contains(.offlineAccessDays) ? try c.decode(Int.self, forKey: .offlineAccessDays) : nil
         }
     }
 
@@ -54,10 +63,14 @@ struct Settings {
         }
         do {
             let root = try JSONDecoder().decode(Root.self, from: data)
+            let days = root.valenius.offlineAccessDays ?? 7
+            guard (1...365).contains(days) else {
+                throw LoadError.malformed("Valenius.OfflineAccessDays must be an integer from 1 to 365.")
+            }
             let backendUrl = root.valenius.backendUrl.hasSuffix("/")
                 ? String(root.valenius.backendUrl.dropLast())
                 : root.valenius.backendUrl
-            return Settings(backendUrl: backendUrl, apiKey: root.valenius.apiKey)
+            return Settings(backendUrl: backendUrl, apiKey: root.valenius.apiKey, offlineAccessDays: days)
         } catch {
             throw LoadError.malformed("\(error)")
         }

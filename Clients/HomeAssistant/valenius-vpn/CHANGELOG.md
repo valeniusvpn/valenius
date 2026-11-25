@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.8
+
+- Automatically migrate existing devices to an individual credential when the backend
+  operator enables a temporary legacy migration window. Save the credential privately
+  before using it; a failed save leaves legacy access available for another attempt.
+- Preserve existing registration, profiles and encryption keys during the update.
+
+## 1.0.7
+
+- Bound backend response sizes in the shared daemon. Preserve existing identity,
+  credentials and encrypted profiles; Supervisor remains the update mechanism.
+
+## 1.0.6
+
+- Allow initial pending registration without a shared API key. The backend issues
+  and the add-on persists an individual device credential.
+- An administrator-provided `vlnd_` credential in `api_key` replaces the persisted
+  legacy key on startup for migration/recovery. Keep existing identity and profiles.
+  Clear the option after a successful check-in; the private persistent store retains it.
+
+## 1.0.5
+
+- Updated the shared daemon to persist backend approval and connection policy with
+  a seven-day default offline window, configurable with `offline_access_days` (1–365).
+  Restarts preserve the original deadline; explicit denial and MFA expiry block
+  new connections, including always-on reconnects.
+- Preserved unreadable/corrupt identities by refusing startup, and checked that
+  daemon state uses persistent `/data` storage. Keep existing identity and keys;
+  upgrade with the backend reachable for the first policy refresh.
+- Corrected startup wiring and made Supervisor the exclusive update mechanism.
+  Missing backend settings now stop startup instead of allowing local-only access.
+
 ## 1.0.4
 
 - Fixed the add-on always showing **offline** in the backend even while connected and

@@ -5,6 +5,10 @@ import Darwin
 import Dispatch
 import Foundation
 
+if CommandLine.arguments.dropFirst().first?.hasPrefix("--provision") == true {
+    exit(ProvisioningCommand.run(Array(CommandLine.arguments.dropFirst())))
+}
+
 guard geteuid() == 0 else {
     FileHandle.standardError.write("valeniusd must be run as root\n".data(using: .utf8)!)
     exit(1)
@@ -23,10 +27,24 @@ try? FileManager.default.createDirectory(
     attributes: [.posixPermissions: 0o700]
 )
 
-let (clientId, wasActive, wasStandalone) = RegistrationStore.loadClientId()
-let state = DaemonState(clientId: clientId, isActive: wasActive)
+let registration: CachedRegistration
+let state: DaemonState
+do {
+    registration = try RegistrationStore.load()
+    state = try DaemonState(registration: registration, offlineAccessDays: settings.offlineAccessDays)
+} catch {
+    FileHandle.standardError.write("Registration state is unreadable or invalid; refusing to replace the client identity: \(error)\n".data(using: .utf8)!)
+    exit(1)
+}
+let clientId = registration.clientId
+let wasStandalone = registration.standaloneModeChosen
 
-let backend = BackendClient(baseUrl: settings.backendUrl, apiKey: settings.apiKey)
+let backend: BackendClient
+do { backend = try BackendClient(baseUrl: settings.backendUrl, apiKey: settings.apiKey) }
+catch {
+    FileHandle.standardError.write(Data("Cannot read saved backend origin; refusing to change trust: \(error)\n".utf8))
+    exit(1)
+}
 let configs = ConfigManager()
 let engine = TunnelEngine()
 let autoConnect = AutoConnectConfig()

@@ -155,6 +155,7 @@ class TunnelStatus:
     MfaApproveNumber: Optional[int] = None
     BackendUrl: Optional[str] = None
     BackendReachable: Optional[bool] = None
+    OfflineAccessExpiresAt: Optional[str] = None
     DaemonVersion: Optional[str] = None
     BackendUnconfigured: bool = False
     # True once the user explicitly chose "Use standalone" at first run. Default false
@@ -184,6 +185,7 @@ class TunnelStatus:
             'MfaApproveNumber': self.MfaApproveNumber,
             'BackendUrl': self.BackendUrl,
             'BackendReachable': self.BackendReachable,
+            'OfflineAccessExpiresAt': self.OfflineAccessExpiresAt,
             'DaemonVersion': self.DaemonVersion,
             'BackendUnconfigured': self.BackendUnconfigured,
             'StandaloneMode': self.StandaloneMode,
@@ -214,6 +216,7 @@ class TunnelStatus:
             MfaApproveNumber=d.get('MfaApproveNumber'),
             BackendUrl=d.get('BackendUrl'),
             BackendReachable=d.get('BackendReachable'),
+            OfflineAccessExpiresAt=d.get('OfflineAccessExpiresAt'),
             DaemonVersion=d.get('DaemonVersion'),
             BackendUnconfigured=d.get('BackendUnconfigured', False),
             StandaloneMode=d.get('StandaloneMode', False),

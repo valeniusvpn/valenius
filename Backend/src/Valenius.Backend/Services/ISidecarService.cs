@@ -68,11 +68,13 @@ public sealed record SidecarGrantInfo(
 
 public interface ISidecarService
 {
-    Task<ServerInfo?> GetInfoAsync(string sidecarUrl, int customerId = 0);
-    Task<List<PeerStats>?> GetPeersAsync(string sidecarUrl);
-    Task<(bool Ok, string Message, ServerInfo? Info)> TestConnectionAsync(string sidecarUrl, int customerId = 0);
-    Task<bool> AddPeerAsync(string sidecarUrl, string publicKey, string allowedIp);
-    Task<bool> RemovePeerAsync(string sidecarUrl, string publicKey);
+    // customerId is the owner of the destination sidecar, including for foreign
+    // profiles. Never infer it from the URL or use an unbound/default identity.
+    Task<ServerInfo?> GetInfoAsync(string sidecarUrl, int customerId, bool cacheInfo = true);
+    Task<List<PeerStats>?> GetPeersAsync(string sidecarUrl, int customerId);
+    Task<(bool Ok, string Message, ServerInfo? Info)> TestConnectionAsync(string sidecarUrl, int customerId);
+    Task<bool> AddPeerAsync(string sidecarUrl, int customerId, string publicKey, string allowedIp);
+    Task<bool> RemovePeerAsync(string sidecarUrl, int customerId, string publicKey);
 
     /// <summary>
     /// Enables or disables the sidecar's UDP port-fallback redirect (PUT /fallback) — a
@@ -86,7 +88,7 @@ public interface ISidecarService
     /// <c>Active</c> is the sidecar's own confirmation that the rule is installed — never
     /// assume the write took effect.
     /// </returns>
-    Task<(bool Ok, string Message, bool Active)> SetFallbackAsync(string sidecarUrl, bool enabled, int port);
+    Task<(bool Ok, string Message, bool Active)> SetFallbackAsync(string sidecarUrl, int customerId, bool enabled, int port);
 
     /// <summary>
     /// Runs the sidecar's own host self-diagnosis (GET /selftest) — IP forwarding, NAT, FORWARD
@@ -94,16 +96,16 @@ public interface ISidecarService
     /// invisible from outside: the tunnel connects and then carries no traffic. Null when the
     /// sidecar is unreachable or predates the endpoint.
     /// </summary>
-    Task<SidecarSelfTest?> GetSelfTestAsync(string sidecarUrl);
+    Task<SidecarSelfTest?> GetSelfTestAsync(string sidecarUrl, int customerId);
 
     // ── MFA grants (Pro) ─────────────────────────────────────────────────────────
 
     /// <summary>Pushes a CA-signed grant (POST /grants). <paramref name="grantJson"/> is the exact signed string.</summary>
-    Task<bool> PushGrantAsync(string sidecarUrl, string grantJson, string signatureBase64);
+    Task<bool> PushGrantAsync(string sidecarUrl, int customerId, string grantJson, string signatureBase64);
 
     /// <summary>Revokes a grant by session id (DELETE /grants). Idempotent on the sidecar.</summary>
-    Task<bool> RevokeGrantAsync(string sidecarUrl, Guid sessionId);
+    Task<bool> RevokeGrantAsync(string sidecarUrl, int customerId, Guid sessionId);
 
     /// <summary>Lists active grants for reconciliation (GET /grants).</summary>
-    Task<List<SidecarGrantInfo>?> GetGrantsAsync(string sidecarUrl);
+    Task<List<SidecarGrantInfo>?> GetGrantsAsync(string sidecarUrl, int customerId);
 }

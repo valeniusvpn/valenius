@@ -1,0 +1,15 @@
+[
+  {"name":"approved before deadline","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-08T11:59:59Z","days":7,"activation":true,"native":true},
+  {"name":"exact deadline","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-08T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"stale active flag","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-31T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"fresh deactivation","active":false,"checked":"2026-10-01T12:00:00Z","now":"2026-10-01T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"inactive never gains grace","active":false,"checked":"2026-10-01T12:00:00Z","now":"2026-10-02T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"missing check","active":true,"checked":null,"now":"2026-10-01T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"large clock rollback","active":true,"checked":"2026-10-01T12:06:00Z","now":"2026-10-01T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"small clock skew","active":true,"checked":"2026-10-01T12:04:00Z","now":"2026-10-01T12:00:00Z","days":7,"activation":true,"native":true},
+  {"name":"configured one day","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-02T12:00:00Z","days":1,"activation":false,"native":false},
+  {"name":"UTC offset normalization","active":true,"checked":"2026-10-01T14:00:00+02:00","now":"2026-10-08T12:00:00Z","days":7,"activation":false,"native":false},
+  {"name":"pending MFA","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-01T12:00:00Z","days":7,"mfaRequired":true,"activation":true,"native":false},
+  {"name":"MFA absolute expiry","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-01T13:00:00Z","days":7,"mfaExpires":"2026-10-01T13:00:00Z","activation":true,"native":false},
+  {"name":"MFA unexpired lease","active":true,"checked":"2026-10-01T12:00:00Z","now":"2026-10-01T12:59:59Z","days":7,"mfaExpires":"2026-10-01T13:00:00Z","activation":true,"native":true}
+]

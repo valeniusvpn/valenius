@@ -3,7 +3,7 @@ using System.Text;
 namespace Valenius.Service;
 
 /// <summary>
-/// Holds the current backend server URL and lets the user set it at first run when the installer
+/// Holds the current backend server URL and permits administrator provisioning at first run when the installer
 /// did not provide one (interactive install without <c>/BACKENDURL=</c> or a valenius-setup.ini).
 ///
 /// The user-entered URL is persisted to <c>C:\ProgramData\Valenius\backend.dat</c> (SYSTEM+Administrators
@@ -17,17 +17,25 @@ namespace Valenius.Service;
 /// </summary>
 public sealed class BackendUrlProvider
 {
-    private static readonly string UrlFile = Path.Combine(
+    private static readonly string DefaultUrlFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "Valenius", "backend.dat");
 
     private readonly ILogger<BackendUrlProvider> _logger;
     private readonly object _lock = new();
     private string _current;
+    private readonly string _urlFile;
+    private readonly Action<string, string> _write;
 
     public BackendUrlProvider(IConfiguration config, ILogger<BackendUrlProvider> logger)
+        : this(config, logger, DefaultUrlFile) { }
+
+    internal BackendUrlProvider(IConfiguration config, ILogger<BackendUrlProvider> logger,
+        string urlFile, Action<string, string>? write = null)
     {
         _logger  = logger;
+        _urlFile = urlFile;
+        _write = write ?? StateFileWriter.WriteAllTextAtomic;
         _current = Normalize(Load(config["Valenius:BackendUrl"] ?? ""));
     }
 
@@ -41,25 +49,27 @@ public sealed class BackendUrlProvider
     public bool IsConfigured => !string.IsNullOrEmpty(Current);
 
     /// <summary>
-    /// Set the backend URL from a user-entered DNS host (scheme optional). Normalizes to
-    /// <c>https://host</c>, persists it, and switches. Returns the normalized URL, or null if the
-    /// input does not contain a usable host.
+    /// Provision an initial backend with explicit service-authorized administrator authority.
+    /// Persist before switching; reject a different existing origin. Return null for unusable input.
     /// </summary>
-    public string? Set(string? dnsOrUrl)
+    public string? Set(string? dnsOrUrl, bool privileged = false)
     {
+        if (!privileged)
+            throw new UnauthorizedAccessException("An administrator must provision the backend address.");
         var normalized = Normalize(dnsOrUrl ?? "");
         if (string.IsNullOrEmpty(normalized)) return null;
 
-        lock (_lock) { _current = normalized; }
-        try
+        lock (_lock)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(UrlFile)!);
-            File.WriteAllText(UrlFile, normalized, Encoding.UTF8);
+            if (!string.IsNullOrEmpty(_current))
+            {
+                if (string.Equals(_current, normalized, StringComparison.OrdinalIgnoreCase)) return _current;
+                throw new InvalidOperationException("Backend reassignment is not supported through IPC. Administrator migration is required.");
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(_urlFile)!);
+            _write(_urlFile, normalized);
+            _current = normalized;
             _logger.LogInformation("Backend URL set to {Url} and persisted.", normalized);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not persist backend URL; using it for this session only.");
         }
         return normalized;
     }
@@ -91,17 +101,16 @@ public sealed class BackendUrlProvider
     {
         try
         {
-            if (File.Exists(UrlFile))
-            {
-                var persisted = File.ReadAllText(UrlFile, Encoding.UTF8).Trim();
-                if (!string.IsNullOrEmpty(persisted))
-                    return persisted;
-            }
+            var persisted = File.ReadAllText(_urlFile, Encoding.UTF8).Trim();
+            if (string.IsNullOrEmpty(Normalize(persisted)))
+                throw new InvalidDataException("Persisted backend URL is empty or invalid.");
+            return persisted;
         }
+        catch (FileNotFoundException) when (new FileInfo(_urlFile).LinkTarget is null) { return fallback; }
+        catch (DirectoryNotFoundException) { return fallback; }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not read persisted backend URL; falling back to appsettings.");
+            throw new IOException("Could not read persisted backend URL; refusing to change backend trust.", ex);
         }
-        return fallback;
     }
 }

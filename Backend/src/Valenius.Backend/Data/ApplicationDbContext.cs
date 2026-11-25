@@ -31,9 +31,16 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<ClientTrafficSample>    ClientTrafficSamples  => Set<ClientTrafficSample>();
     public DbSet<ApiToken>               ApiTokens             => Set<ApiToken>();
     public DbSet<ManagementEvent>        ManagementEvents      => Set<ManagementEvent>();
+    public DbSet<PeerAddressReservation> PeerAddressReservations => Set<PeerAddressReservation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<AuditLog>().HasIndex(e => e.Timestamp);
+        modelBuilder.Entity<ConnectionLog>().HasIndex(e => e.OccurredAt);
+        modelBuilder.Entity<ErrorLog>().HasIndex(e => e.OccurredAt);
+        modelBuilder.Entity<ClientLogBundle>().HasIndex(e => e.UploadedAt);
+        modelBuilder.Entity<PeerAddressReservation>().HasIndex(p => new { p.CustomerId, p.Address }).IsUnique();
+        modelBuilder.Entity<PeerAddressReservation>().HasIndex(p => new { p.CustomerId, p.Owner }).IsUnique();
         // Filtered: allows multiple legacy rows with ClientKey = '' while enforcing uniqueness for real GUIDs.
         modelBuilder.Entity<Client>()
             .HasIndex(c => c.ClientKey)
@@ -48,6 +55,10 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<AppUser>().HasIndex(u => u.Subject).IsUnique();
+
+        // Match the existing startup index for both fresh and upgraded databases.
+        modelBuilder.Entity<PairingToken>().HasIndex(t => t.Token).IsUnique();
+        modelBuilder.Entity<Customer>().HasIndex(c => c.EnrollmentTokenHash).IsUnique();
 
         modelBuilder.Entity<Client>()
             .HasOne(c => c.Customer)

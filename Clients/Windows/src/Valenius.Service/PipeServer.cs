@@ -22,6 +22,7 @@ public class PipeServer : BackgroundService
     private readonly ILogger<PipeServer> _logger;
 
     private readonly BackendUrlProvider _backendUrl;
+    private readonly SemaphoreSlim _connections = new(32, 32);
 
     public PipeServer(
         WireGuardController wg,
@@ -50,11 +51,16 @@ public class PipeServer : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             NamedPipeServerStream? pipe = null;
+            var handedOff = false;
+            var admitted = false;
             try
             {
+                await _connections.WaitAsync(stoppingToken);
+                admitted = true;
                 pipe = CreatePipe();
                 await pipe.WaitForConnectionAsync(stoppingToken);
-                _ = Task.Run(() => HandleConnectionAsync(pipe, stoppingToken), stoppingToken);
+                handedOff = true;
+                _ = HandleBoundedConnectionAsync(pipe, stoppingToken);
             }
             catch (OperationCanceledException)
             {
@@ -67,7 +73,17 @@ public class PipeServer : BackgroundService
                 _logger.LogError(ex, "Pipe server error; restarting listener");
                 await Task.Delay(1000, stoppingToken);
             }
+            finally
+            {
+                if (admitted && !handedOff) _connections.Release();
+            }
         }
+    }
+
+    private async Task HandleBoundedConnectionAsync(NamedPipeServerStream pipe, CancellationToken ct)
+    {
+        try { await HandleConnectionAsync(pipe, ct); }
+        finally { _connections.Release(); }
     }
 
     private static NamedPipeServerStream CreatePipe()
@@ -102,14 +118,7 @@ public class PipeServer : BackgroundService
                 // RunAsClient requires data to have been read from the pipe first.
                 var commandJson = await ReadMessageAsync(pipe, ct);
 
-                string? callerUsername = null;
-                string? callerUserSid  = null;
-                pipe.RunAsClient(() =>
-                {
-                    var identity   = WindowsIdentity.GetCurrent();
-                    callerUsername = identity.Name;
-                    callerUserSid  = identity.User?.Value;
-                });
+                var (callerUsername, callerUserSid, privileged) = ReadCallerIdentity(pipe);
 
                 if (callerUsername is null)
                 {
@@ -134,7 +143,7 @@ public class PipeServer : BackgroundService
                 else
                     _logger.LogInformation("Command {Cmd} from {User}", command.Command, callerUsername);
 
-                var response = await ProcessAsync(command, callerUsername, callerUserSid, ct);
+                var response = await ProcessAsync(command, callerUsername, callerUserSid, ct, privileged);
                 var responseJson = JsonSerializer.Serialize(response, ValeniusJsonContext.Default.PipeResponse);
                 await WriteMessageAsync(pipe, responseJson, ct);
             }
@@ -145,8 +154,25 @@ public class PipeServer : BackgroundService
         }
     }
 
-    private async Task<PipeResponse> ProcessAsync(PipeCommand cmd, string username, string? userSid, CancellationToken ct)
+    internal static (string? Username, string? Sid, bool Privileged) ReadCallerIdentity(NamedPipeServerStream pipe)
     {
+        string? username = null, sid = null;
+        var privileged = false;
+        pipe.RunAsClient(() =>
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            username = identity.Name;
+            sid = identity.User?.Value;
+            privileged = identity.IsSystem || new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        });
+        return (username, sid, privileged);
+    }
+
+    internal async Task<PipeResponse> ProcessAsync(PipeCommand cmd, string username, string? userSid,
+        CancellationToken ct, bool privileged = false)
+    {
+        if ((cmd.Command is CommandType.SetBackendUrl or CommandType.SetStandaloneMode) && !privileged)
+            return Fail("An administrator must provision this machine. Use the administrator provisioning command or installer configuration.");
         try
         {
         switch (cmd.Command)
@@ -245,15 +271,26 @@ public class PipeServer : BackgroundService
                     // Cache is stale or missing — do a live backend check before rejecting.
                     // This lets a just-activated machine connect without waiting for the
                     // next 5-minute heartbeat, and also recovers from failed cache writes.
-                    var (isActive, dupPending, liveError) = await _registrationSvc.TryRegisterAsync(ct: ct);
-                    if (isActive != true)
+                    bool dupPending = false;
+                    string? liveError = null;
+                    try
                     {
-                        var clientId = _registration.GetCachedClientId();
+                        using var liveCheck = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        liveCheck.CancelAfter(TimeSpan.FromSeconds(5));
+                        (_, dupPending, liveError) = await _registrationSvc.TryRegisterAsync(ct: liveCheck.Token);
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        _registration.SetBackendReachable(false);
+                        liveError = "The management server did not respond in time.";
+                    }
+                    if (!await _registration.IsAllowedToConnectAsync())
+                    {
                         return Fail(dupPending
                             ? $"A client named '{Environment.MachineName}' already exists. Ask your administrator to reassign it to this machine."
                             : liveError is not null
-                                ? $"Not authorized (live check failed: {liveError})"
-                                : $"Not authorized yet — waiting for an admin to activate this device (key {clientId:D}) in the admin panel.");
+                                ? $"{_registration.GetConnectionDeniedReason()} Management server check failed: {liveError}"
+                                : _registration.GetConnectionDeniedReason());
                     }
                 }
 
@@ -483,7 +520,7 @@ public class PipeServer : BackgroundService
             case CommandType.SetBackendUrl:
             {
                 // First-run: the user provides the backend DNS (the service prepends https://).
-                var (saved, warning) = await _registrationSvc.SetBackendUrlAsync(cmd.BackendDns, ct);
+                var (saved, warning) = await _registrationSvc.SetBackendUrlAsync(cmd.BackendDns, ct, privileged);
                 if (!saved)
                     return Fail("Enter a valid server address, for example vpn.example.com");
                 // Success with an optional non-fatal advisory (e.g. server unreachable) in Error.
@@ -494,7 +531,7 @@ public class PipeServer : BackgroundService
             {
                 // First-run "Use standalone" choice: no backend contacted, just remember the
                 // decision so the tray stops prompting and shows the normal popup.
-                await _registration.SetStandaloneModeAsync(true);
+                await _registrationSvc.SetStandaloneModeAsync(privileged, ct);
                 return Ok();
             }
 
@@ -533,6 +570,8 @@ public class PipeServer : BackgroundService
             ConnectedUser        = primary?.ConnectedUser,
             ConnectedSince       = primary?.ConnectedSince,
             RegistrationIsActive = _registration.GetCachedIsActive(),
+            BackendReachable     = _registration.GetBackendReachable(),
+            OfflineAccessExpiresAt = _registration.GetOfflineAccessExpiresAt(),
             HasStagedConfig      = _configs.HasStagedConfig(),
             UpdateAvailable      = _updater.GetCachedResult()?.UpdateAvailable ?? false,
             BackendUnconfigured  = !_backendUrl.IsConfigured,
@@ -591,6 +630,9 @@ public class PipeServer : BackgroundService
 
     internal static async Task<string> ReadMessageAsync(PipeStream pipe, CancellationToken ct)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        ct = deadline.Token;
         var lenBuf = new byte[4];
         await pipe.ReadExactlyAsync(lenBuf, ct);
         var length = BitConverter.ToInt32(lenBuf, 0);
@@ -605,7 +647,11 @@ public class PipeServer : BackgroundService
 
     internal static async Task WriteMessageAsync(PipeStream pipe, string message, CancellationToken ct)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        ct = deadline.Token;
         var data = Encoding.UTF8.GetBytes(message);
+        if (data.Length > 1_048_576) throw new InvalidDataException("IPC response exceeds 1 MiB.");
         var lenBuf = BitConverter.GetBytes(data.Length);
         await pipe.WriteAsync(lenBuf, ct);
         await pipe.WriteAsync(data, ct);

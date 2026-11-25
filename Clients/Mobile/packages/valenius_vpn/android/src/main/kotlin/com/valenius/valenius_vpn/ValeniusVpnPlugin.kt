@@ -42,6 +42,7 @@ class ValeniusVpnPlugin :
     }
 
     private lateinit var methodChannel: MethodChannel
+    private lateinit var legacyStorageChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
 
@@ -51,6 +52,7 @@ class ValeniusVpnPlugin :
 
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
+    private val legacyIo = Executors.newSingleThreadExecutor()
     private val backend: GoBackend by lazy { GoBackend(context) }
 
     private var current: WgTunnel? = null
@@ -61,10 +63,31 @@ class ValeniusVpnPlugin :
         methodChannel.setMethodCallHandler(this)
         eventChannel = EventChannel(binding.binaryMessenger, "valenius_vpn/states")
         eventChannel.setStreamHandler(this)
+        // One-time flutter_secure_storage v9 -> v11 handover (LegacySecureStorage.kt). Keystore
+        // work runs off the main thread on its own executor so it never queues behind tunnel ops.
+        legacyStorageChannel = MethodChannel(binding.binaryMessenger, "valenius_vpn/legacy_storage")
+        legacyStorageChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "read" -> legacyIo.execute {
+                    val r = LegacySecureStorage.read(context)
+                    main.post { result.success(r) }
+                }
+                "delete" -> legacyIo.execute {
+                    try {
+                        LegacySecureStorage.delete(context)
+                        main.post { result.success(null) }
+                    } catch (e: Exception) {
+                        main.post { result.error("DELETE_FAILED", e.message, null) }
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
+        legacyStorageChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
     }
 

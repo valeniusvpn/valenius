@@ -23,6 +23,7 @@ public class ClientRegistrationService : BackgroundService
 
     /// <summary>Last heartbeat interval received from the backend (minutes). Default 5.</summary>
     private volatile int _heartbeatIntervalMinutes = 5;
+    private readonly SemaphoreSlim _provisioningLock = new(1, 1);
 
     public ClientRegistrationService(
         IHttpClientFactory httpFactory,
@@ -80,7 +81,7 @@ public class ClientRegistrationService : BackgroundService
     /// on within ~1 second of the admin clicking a button rather than waiting up to
     /// <see cref="_heartbeatIntervalMinutes"/> minutes.
     /// </summary>
-    private async Task RunLongPollLoopAsync(CancellationToken ct)
+    internal async Task RunLongPollLoopAsync(CancellationToken ct)
     {
         // Give the heartbeat a head start so the client is registered before we poll.
         await Task.Delay(TimeSpan.FromSeconds(5), ct);
@@ -100,8 +101,10 @@ public class ClientRegistrationService : BackgroundService
                 var http       = _httpFactory.CreateClient("LongPoll");
                 var trayActive = IsTrayRunning();
 
-                var response = await http.GetAsync(
+                using var response = await http.GetAsync(
                     $"{backendUrl}/api/clients/poll?clientKey={clientId}&trayRunning={trayActive}", ct);
+
+                _registration.SetBackendReachable((int)response.StatusCode < 500);
 
                 if (response.IsSuccessStatusCode)
                 {
@@ -110,18 +113,18 @@ public class ClientRegistrationService : BackgroundService
                     if (result is not null)
                         await ProcessStatusResponseAsync(result, backendUrl, clientId, ct);
                 }
-                else if ((int)response.StatusCode >= 500)
+                else
                 {
-                    // Server-side error — back off before retrying.
+                    // Also back off for authorization/enrollment failures. A migration
+                    // awaiting administrator provisioning must not become a hot 401 loop.
                     _logger.LogDebug("Long poll returned {Status}; backing off.", (int)response.StatusCode);
                     await Task.Delay(TimeSpan.FromSeconds(15), ct);
                 }
-                // 404 (not yet registered) or other 4xx: reconnect immediately;
-                // the next heartbeat will handle re-registration.
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
+                _registration.SetBackendReachable(false);
                 _logger.LogDebug(ex, "Long poll failed; will retry in 15 s.");
                 await Task.Delay(TimeSpan.FromSeconds(15), ct);
             }
@@ -156,11 +159,13 @@ public class ClientRegistrationService : BackgroundService
                 Profiles:    _configs.GetAllProfiles(),
                 Platform:    "Windows");
 
-            var response = await http.PostAsJsonAsync(
+            using var response = await http.PostAsJsonAsync(
                 $"{backendUrl}/api/clients/register",
                 request,
                 ServiceJsonContext.Default.RegisterClientRequest,
                 ct);
+
+            _registration.SetBackendReachable((int)response.StatusCode < 500);
 
             if (response.IsSuccessStatusCode)
             {
@@ -177,12 +182,13 @@ public class ClientRegistrationService : BackgroundService
             _logger.LogWarning("Registration server returned {Status}", (int)response.StatusCode);
             return (null, false, $"Server returned HTTP {(int)response.StatusCode}.");
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
         }
         catch (Exception ex)
         {
+            _registration.SetBackendReachable(false);
             _logger.LogWarning(ex, "Registration heartbeat failed; cached state will be used.");
             return (null, false, ex.Message);
         }
@@ -358,21 +364,20 @@ public class ClientRegistrationService : BackgroundService
         Guid clientId,
         CancellationToken ct)
     {
-        // Backend key rotation: adopt the new key (persisted for next boot) so subsequent
-        // requests authenticate with it. Only sent while this client is still on the old key.
-        _apiKeys.Update(result.ClientApiKey);
-
         try
         {
-            await _registration.UpdateAsync(result.IsActive);
+            await _registration.UpdateAsync(result);
         }
         catch (Exception ex)
         {
-            // Non-fatal: this is a cache of IsActive/LastChecked; the service runs fine from the
-            // heartbeat + in-memory state without it. Debug, not Warning — a persistent ACL problem
-            // is surfaced once (actionably) by DataDirSelfHeal, not re-logged every heartbeat.
+            // RegistrationManager applies the response in memory before persistence and logs
+            // a storage failure once. Revocation still blocks new connections in this process.
             _logger.LogDebug(ex, "Could not persist registration state to local cache.");
         }
+
+        // Persist-before-use may retain the old key after a disk failure. Still apply
+        // authorization/denial from this response; a legacy migration offer can retry.
+        _apiKeys.Update(result.ClientApiKey);
 
         // A previously-standalone client just got activated for the first time: hand its local
         // profiles to the backend so it behaves like an always-connected client from now on.
@@ -382,35 +387,12 @@ public class ClientRegistrationService : BackgroundService
         if (result.IsActive && _registration.GetStandaloneModeChosen() && !_registration.GetProfilesTransferred())
             _ = TransferLocalProfilesAsync(ct);
 
-        _registration.SetServerProfileName(result.ServerProfileName);
-        _registration.SetServerHealthUrl(result.ServerHealthUrl);
-        _registration.SetServerVpnIp(result.ServerVpnIp);
-        _registration.SetRemoteLanCidrs(
-            (result.RemoteLanCidrsByProfile ?? [])
-            .Select(e => (e.ProfileName, e.Cidrs)));
-        _registration.SetSkipConnectivityCheck(result.SkipConnectivityCheck);
-        _registration.SetGatewayProfiles(
-            (result.GatewayProfiles ?? [])
-            .Select(g => (g.ProfileName, g.GatewayIp, g.HealthPort)));
-        _registration.SetFallbackPorts(
-            (result.FallbackEndpoints ?? [])
-            .Select(f => (f.ProfileName, f.Port, f.TriggerSeconds)));
-        _registration.SetDeviceTunnelEnabled(result.DeviceTunnelEnabled);
         if (result.DeviceTunnelEnabled && !string.IsNullOrEmpty(result.ServerProfileName))
         {
             // Runs unconditionally regardless of any OS user login, so the machine-level device-tunnel
             // config is fresh before AutoConnectService's boot-time check needs it (see ConfigManager.SaveDeviceTunnelConfig).
             await EnsureDeviceTunnelConfigAsync(result.ServerProfileName, backendUrl, clientId, ct);
         }
-        _registration.SetMfaState(
-            result.MfaRequired,
-            result.MfaAuthorizeUrl,
-            result.MfaSessionExpiresAt,
-            result.MfaEnrollmentOpen,
-            result.MfaEnrollmentUri,
-            result.MfaApproveNumber);
-        _registration.SetUpdateChannel(result.UpdateChannel);
-
         if (result.HeartbeatIntervalMinutes is >= 1 and <= 60)
             _heartbeatIntervalMinutes = result.HeartbeatIntervalMinutes;
 
@@ -824,8 +806,12 @@ public class ClientRegistrationService : BackgroundService
     {
         try
         {
+            // Optional telemetry must not hold up a cached VPN connection for the
+            // HttpClient default timeout when Internet services are unavailable.
+            using var probe = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            probe.CancelAfter(TimeSpan.FromSeconds(2));
             var http = _httpFactory.CreateClient();
-            var ip   = await http.GetStringAsync("https://api4.ipify.org", ct);
+            var ip   = await http.GetStringAsync("https://api4.ipify.org", probe.Token);
             return ip.Trim();
         }
         catch { return ""; }
@@ -877,9 +863,14 @@ public class ClientRegistrationService : BackgroundService
     /// Returns (Saved, Warning): Saved is false only when the DNS is unusable; Warning is a non-fatal note
     /// (e.g. the server could not be reached) to surface to the user.
     /// </summary>
-    public async Task<(bool Saved, string? Warning)> SetBackendUrlAsync(string? dns, CancellationToken ct = default)
+    public async Task<(bool Saved, string? Warning)> SetBackendUrlAsync(string? dns, CancellationToken ct = default,
+        bool privileged = false)
     {
-        var normalized = _backendUrl.Set(dns);
+        if (!privileged) throw new UnauthorizedAccessException("An administrator must provision this machine.");
+        string? normalized;
+        await _provisioningLock.WaitAsync(ct);
+        try { normalized = _backendUrl.Set(dns, privileged: true); }
+        finally { _provisioningLock.Release(); }
         if (normalized is null)
             return (false, null);
 
@@ -904,6 +895,19 @@ public class ClientRegistrationService : BackgroundService
         // Start registering right away rather than waiting for the next heartbeat cycle.
         _ = TryRegisterAsync(ct: ct);
         return (true, warning);
+    }
+
+    public async Task SetStandaloneModeAsync(bool privileged, CancellationToken ct = default)
+    {
+        if (!privileged) throw new UnauthorizedAccessException("An administrator must provision this machine.");
+        await _provisioningLock.WaitAsync(ct);
+        try
+        {
+            if (_backendUrl.IsConfigured)
+                throw new InvalidOperationException("A managed client cannot switch to standalone mode through IPC.");
+            await _registration.SetStandaloneModeAsync(true);
+        }
+        finally { _provisioningLock.Release(); }
     }
 
     /// <summary>

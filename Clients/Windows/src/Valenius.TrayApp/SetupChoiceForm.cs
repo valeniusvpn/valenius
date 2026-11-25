@@ -38,7 +38,7 @@ internal sealed class SetupChoiceForm : Form
         {
             Text      = "Does your organization have a Valenius server? Connect to it now, or use " +
                         "Valenius standalone with your own WireGuard configs — you can connect to a " +
-                        "server later from the About dialog.",
+                        "server later from the About dialog. An administrator must provision the initial choice.",
             AutoSize  = true,
             TextAlign = ContentAlignment.TopLeft
         };

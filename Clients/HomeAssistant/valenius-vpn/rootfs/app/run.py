@@ -9,8 +9,8 @@ not a roaming laptop). See Clients/HomeAssistant/CLAUDE.md for the full rational
 What's reused verbatim from Clients/Linux/daemon/: core.py, backend.py,
 config_manager.py, wg_manager.py, state.py, auto_connect.py (only its AutoConnectConfig
 dataclass -- DaemonCore's constructor requires one, but its trusted-network policy is
-never invoked here), updater.py (likewise required by the constructor but effectively
-inert -- Home Assistant Supervisor owns image updates, not this app).
+never invoked here), updater.py (imported by core.py; image updates are handled by
+SupervisorUpdater).
 
 What's new: this file (options loading, the always-on supervising loop replacing
 auto_connect.py's trusted-network policy) and mqtt_status.py (HA MQTT-discovery entity,
@@ -49,9 +49,10 @@ USERNAME = 'homeassistant'
 # always sees that vendored file's hardcoded source-tree default ('1.0.0') no matter what
 # actually shipped, which makes Admin -> Clients useless for telling installs apart by
 # version. See _install_version_override below for how this gets applied.
-ADDON_VERSION = '1.0.4'
+ADDON_VERSION = '1.0.8'
 
 DATA_ROOT = Path('/data')
+DAEMON_DATA_DIR = Path('/var/lib/valenius')
 CHECK_INTERVAL_S = 20
 
 
@@ -63,10 +64,23 @@ def _load_options() -> dict:
     below, which exist only for an external/non-Supervisor broker."""
     options_path = DATA_ROOT / 'options.json'
     try:
-        return json.loads(options_path.read_text())
+        options = json.loads(options_path.read_text())
     except FileNotFoundError:
-        log.warning("No /data/options.json found -- running with empty options (local dev?).")
-        return {}
+        raise ValueError('Configure backend_url before starting the add-on') from None
+    if not isinstance(options, dict):
+        raise ValueError('Add-on options must be a JSON object')
+    for name in ('backend_url',):
+        if not isinstance(options.get(name), str) or not options[name].strip():
+            raise ValueError(f'Configure {name} before starting the add-on')
+    if not isinstance(options.get('api_key', ''), str):
+        raise ValueError('api_key must be a string')
+    from daemon.backend import normalize_backend_url
+    if not normalize_backend_url(options['backend_url']):
+        raise ValueError('Configure a valid backend_url before starting the add-on')
+    days = options.get('offline_access_days', 7)
+    if type(days) is not int or not 1 <= days <= 365:
+        raise ValueError('offline_access_days must be an integer between 1 and 365')
+    return options
 
 
 def _ensure_persistent_data_dir() -> None:
@@ -75,10 +89,15 @@ def _ensure_persistent_data_dir() -> None:
     /data across add-on restarts/updates, so symlink the unmodified path onto it --
     this is the ONLY accommodation config_manager.py needs; no code there changes."""
     target = DATA_ROOT / 'valenius'
-    target.mkdir(parents=True, exist_ok=True)
-    link = Path('/var/lib/valenius')
-    if link.is_symlink() or link.exists():
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target.chmod(0o700)
+    link = DAEMON_DATA_DIR
+    if link.is_symlink():
+        if link.resolve() != target.resolve():
+            raise RuntimeError(f'{link} must point to {target}; refusing to use another identity/cache location')
         return
+    if link.exists():
+        raise RuntimeError(f'{link} already exists outside persistent storage; preserve its data and repair the mount')
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(target)
 
@@ -161,7 +180,7 @@ def _mqtt_settings(options: dict) -> dict | None:
 
 async def _always_on_loop(core, mqtt, profile_hint: str | None) -> None:
     """Replaces daemon/auto_connect.py's trusted-network policy: this box has no
-    "back in the office" case, so just keep asserting "connected" unconditionally.
+    "back in the office" case. Activation and MFA gates still apply on every start.
 
     core.cmd_connect() is already idempotent -- it no-ops quickly once the target
     tunnel is up -- so calling it every tick is cheap and doubles as the
@@ -194,6 +213,16 @@ async def _always_on_loop(core, mqtt, profile_hint: str | None) -> None:
         await asyncio.sleep(CHECK_INTERVAL_S)
 
 
+class SupervisorUpdater:
+    """DaemonCore's update interface; only Supervisor may replace this add-on."""
+
+    async def check(self):
+        return False, ADDON_VERSION, None, None
+
+    async def check_and_apply(self) -> None:
+        log.info('Update request ignored: use Home Assistant Supervisor to update this add-on')
+
+
 async def _main() -> None:
     options = _load_options()
     _ensure_persistent_data_dir()
@@ -204,15 +233,14 @@ async def _main() -> None:
     from daemon.backend import BackendClient
     from daemon.core import DaemonCore
     from daemon.state import DaemonState
-    from daemon.updater import Updater
     from daemon.wg_manager import WgManager
 
+    state = DaemonState(offline_access_days=options.get('offline_access_days', 7))
+    reg_mod.load(state)
     configs_mod.ensure_dirs()
     configs_mod.init_temp_dir()
     configs_mod.migrate_plain_configs()
 
-    state = DaemonState()
-    reg_mod.load(state)
     _install_hostname_override(str(state.get_client_id()), options.get('display_name'))
     _install_version_override(ADDON_VERSION)
     _install_platform_override()
@@ -222,16 +250,17 @@ async def _main() -> None:
     backend_url = options.get('backend_url', '')
     api_key = options.get('api_key', '')
     backend = BackendClient(backend_url, api_key, loop)
+    # Supervisor configuration is an administrator-controlled migration path. An
+    # explicitly supplied individual credential replaces the persisted legacy key.
+    if api_key.startswith('vlnd_'):
+        backend.set_api_key(api_key)
+    if not backend.is_configured:
+        raise ValueError('The effective backend URL is empty; repair the persisted backend_url before starting')
     wg = WgManager()
 
-    # DaemonCore's constructor requires an AutoConnectConfig/Updater -- _process_status_response
-    # mirrors the backend's generic AutoConnectEnabled/Profile fields into the former and can
-    # invoke the latter on a ForceUpdate push, but this add-on never reads/gates on either: no
-    # trusted-network policy is ever evaluated, and there is no matching Linux-style release
-    # stream for this platform, so a stray ForceUpdate just logs a harmless failure. Home
-    # Assistant Supervisor owns image updates instead.
+    # Reuse connection policy but leave image replacement exclusively to Supervisor.
     auto_connect = AutoConnectConfig()
-    updater = Updater(backend, loop)
+    updater = SupervisorUpdater()
     core = DaemonCore(backend, state, wg, auto_connect, updater, loop)
     await core.reconcile_active_tunnels()
 

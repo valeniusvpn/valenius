@@ -96,6 +96,7 @@ internal record ArchiveProfileRequest(string ClientKey, string ProfileName, stri
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(RegistrationState))]
+[JsonSerializable(typeof(CachedConnectionPolicy))]
 [JsonSerializable(typeof(RegisterClientRequest))]
 [JsonSerializable(typeof(ClientStatusResponse))]
 [JsonSerializable(typeof(LogEventRequest))]

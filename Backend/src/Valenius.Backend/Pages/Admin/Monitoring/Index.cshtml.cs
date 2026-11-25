@@ -80,9 +80,7 @@ public class IndexModel(ApplicationDbContext db, IAuditService audit) : PageMode
         };
 
         db.ApiTokens.Add(token);
-        await db.SaveChangesAsync();
-
-        _ = audit.LogAsync(Audit.Api, "Monitoring token created", $"Token: {token.Name} ({token.TokenId})");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Api, "Monitoring token created", $"Token: {token.Name} ({token.TokenId})");
 
         TempData["MintedToken"] = minted.FullToken;
         TempData["MintedTokenName"] = token.Name;
@@ -95,9 +93,7 @@ public class IndexModel(ApplicationDbContext db, IAuditService audit) : PageMode
         if (token is null) return NotFound();
 
         token.RevokedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
-
-        _ = audit.LogAsync(Audit.Api, "Monitoring token revoked", $"Token: {token.Name} ({token.TokenId})");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Api, "Monitoring token revoked", $"Token: {token.Name} ({token.TokenId})");
         TempData["Success"] = $"Token \"{token.Name}\" revoked.";
         return RedirectToPage();
     }

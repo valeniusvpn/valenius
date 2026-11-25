@@ -1,5 +1,6 @@
 @page "{id:int}"
 @model Valenius.Backend.Pages.Admin.DetailsModel
+@inject Valenius.Backend.Services.DeviceAuthenticationPolicy DeviceAuthenticationPolicy
 @{
     ViewData["Title"] = $"Client - {Model.Client.EffectiveName}";
     var _customer        = Model.Client.Customer;
@@ -430,6 +431,30 @@
          TAB 2 — ACCESS  (membership & lifecycle)
     ================================================================ -->
     <div class="tab-pane fade" id="tab-access" role="tabpanel">
+        @if (_isAdmin)
+        {
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-key me-2"></i>Device API credential</div>
+                <div class="card-body">
+                    <p class="small mb-2">@(Model.Client.DeviceCredentialHash is not null ? "This device has an individual API credential; shared-key authentication is disabled for it." : Model.Client.LegacyAuthenticationEligible && DeviceAuthenticationPolicy.LegacyEnabled ? "Temporary shared-key access is enabled. Update this client to migrate automatically." : "Administrator credential recovery is required.")
+                        Downloading a replacement immediately revokes the previous credential. Install the file in this device's protected credential store; it is shown only in this download.</p>
+                    <form method="post" asp-page-handler="IssueDeviceCredential" asp-route-id="@Model.Client.Id" class="d-inline">
+                        <button type="submit" class="btn btn-outline-primary btn-sm">Download replacement credential</button>
+                    </form>
+                    @if (Model.Client.CustomerId is int recoveryCustomer)
+                    {
+                        <a asp-page="/Admin/PairDevice" asp-route-customerId="@recoveryCustomer" asp-route-clientId="@Model.Client.Id" class="btn btn-outline-secondary btn-sm">Mobile recovery QR</a>
+                    }
+                    @if (Model.Client.LegacyAuthenticationEligible && Model.Client.DeviceCredentialHash is null && DeviceAuthenticationPolicy.LegacyEnabled)
+                    {
+                        <div class="alert alert-warning small mt-2 mb-2">Shared-key access expires @DeviceAuthenticationPolicy.LegacyUntilUtc?.ToString("u").
+                            @(Model.Client.PendingDeviceCredentialHash is null ? "Waiting for a client update." : "Waiting for the client to save and use its individual credential.")
+                            Unmigrated devices remain exposed to impersonation by another holder of the shared key.</div>
+                    }
+                    <div class="form-text">Keep the credential and recovery QR private. A device ID alone never grants access.</div>
+                </div>
+            </div>
+        }
         <div class="row g-3">
 
             <!-- Left column — settings -->

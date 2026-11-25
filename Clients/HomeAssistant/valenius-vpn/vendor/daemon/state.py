@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import threading
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID, uuid4
 
 from shared.messages import ConnectedTunnelInfo
-
-_GRACE_PERIOD = timedelta(days=1)
+from daemon.connection_policy import normalize_policy, utc_datetime
 
 # The tray polls the daemon over IPC every 5 s (see tray/app.py POLL_INTERVAL_MS).
 # Anything we've heard from within 3x that interval counts as "tray running" --
@@ -31,6 +31,7 @@ class _TunnelState:
 class _TunnelEntry:
     user: str
     since: datetime
+    system_owned: bool = False
     verified: bool = False
     verified_via_gateway: bool = False
     verification_failed: bool = False
@@ -50,21 +51,17 @@ class _RegistrationState:
         return {
             'ClientId': str(self.client_id),
             'IsActive': self.is_active,
-            'LastCheckedUtc': self.last_checked_utc.isoformat() if self.last_checked_utc else None,
+            'LastCheckedUtc': self.last_checked_utc.isoformat() + 'Z' if self.last_checked_utc else None,
         }
-
-    @staticmethod
-    def from_dict(d: dict) -> _RegistrationState:
-        s = _RegistrationState()
-        s.client_id = UUID(d['ClientId'])
-        s.is_active = d.get('IsActive', False)
-        raw = d.get('LastCheckedUtc')
-        s.last_checked_utc = datetime.fromisoformat(raw) if raw else None
-        return s
 
 
 class DaemonState:
-    def __init__(self):
+    def __init__(self, offline_access_days: int = 7, *, clock=None):
+        if type(offline_access_days) is not int or not 1 <= offline_access_days <= 365:
+            raise ValueError('Valenius:OfflineAccessDays must be between 1 and 365')
+        self._offline_access_period = timedelta(days=offline_access_days)
+        self._clock = clock or datetime.utcnow
+        self._connection_policy: Optional[dict] = None
         self._lock = threading.Lock()
         self._active: dict[str, _TunnelEntry] = {}   # keyed by tunnel name
         self._reg = _RegistrationState()
@@ -75,7 +72,7 @@ class DaemonState:
         # Per-profile physical LAN CIDR(s) behind that profile's own sidecar, self-reported
         # via /info and relayed by the backend. Refreshed on every heartbeat/poll. Used by
         # the pre-connect LAN-conflict check to detect the remote network for full-tunnel
-        # profiles. Keyed by profile name — see set_remote_lan_cidrs.
+        # profiles. Keyed by profile name — refreshed with connection policy.
         self._remote_lan_cidrs_by_profile: dict[str, list[str]] = {}
         # Per-profile UDP fallback port + trigger window (seconds), refreshed on every
         # heartbeat/poll. Present only when the serving sidecar has confirmed the redirect is
@@ -102,16 +99,24 @@ class DaemonState:
         # later configures a backend and activates. Guards against re-transferring on
         # every heartbeat once done. Mirrors Windows RegistrationState.ProfilesTransferredToBackend.
         self._profiles_transferred = False
-        # Device tunnel (see root CLAUDE.md / Windows AutoConnectService): in-memory only,
-        # refreshed on every heartbeat/poll like _server_profile_name — never persisted,
-        # matches Windows RegistrationManager's volatile field.
+        # Refreshed with backend policy; persisted together with its activation lease.
         self._device_tunnel_enabled = False
 
     # ── Multi-tunnel state ───────────────────────────────────────────────────
 
-    def set_connected(self, tunnel_name: str, user: str) -> None:
+    def set_connected(self, tunnel_name: str, user: str, *, system_owned: bool = False) -> None:
         with self._lock:
-            self._active[tunnel_name] = _TunnelEntry(user=user, since=datetime.utcnow())
+            self._active[tunnel_name] = _TunnelEntry(user=user, since=datetime.utcnow(), system_owned=system_owned)
+
+    def can_control_tunnel(self, tunnel_name: str, username: str) -> bool:
+        with self._lock:
+            entry = self._active.get(tunnel_name)
+            return bool(entry and not entry.system_owned and entry.user == username)
+
+    def is_system_owned(self, tunnel_name: str) -> bool:
+        with self._lock:
+            entry = self._active.get(tunnel_name)
+            return bool(entry and entry.system_owned)
 
     def set_disconnected(self, tunnel_name: Optional[str] = None) -> None:
         """Remove one tunnel by name, or clear all if tunnel_name is None."""
@@ -206,19 +211,72 @@ class DaemonState:
         with self._lock:
             return self._reg.client_id
 
-    def set_client_id(self, uid: UUID) -> None:
-        with self._lock:
-            self._reg.client_id = uid
 
-    def get_registration(self) -> _RegistrationState:
-        with self._lock:
-            r = self._reg
-            return _RegistrationState(r.client_id, r.is_active, r.last_checked_utc)
+    def _now(self) -> datetime:
+        return utc_datetime(self._clock().isoformat())
 
-    def update_registration(self, is_active: bool) -> None:
+    def apply_backend_status(self, response: dict) -> None:
+        """Apply activation and its policy together, before persistence or any await."""
+        try:
+            policy = normalize_policy(response)
+        except (ValueError, TypeError, OverflowError):
+            policy = None
+        active = response.get('IsActive', response.get('isActive'))
         with self._lock:
-            self._reg.is_active = is_active
-            self._reg.last_checked_utc = datetime.utcnow()
+            self._reg.is_active = active is True
+            self._reg.last_checked_utc = self._now()
+            self._apply_policy_locked(policy)
+            # These are deliberately volatile even though other MFA fields persist.
+            self._mfa_enrollment_uri = response.get('MfaEnrollmentUri', response.get('mfaEnrollmentUri'))
+            self._mfa_approve_number = response.get('MfaApproveNumber', response.get('mfaApproveNumber'))
+
+    def _apply_policy_locked(self, policy: Optional[dict]) -> None:
+        self._connection_policy = policy
+        p = policy or {}
+        self._server_profile_name = p.get('ServerProfileName')
+        self._server_vpn_ip = p.get('ServerVpnIp')
+        from urllib.parse import urlparse
+        try:
+            self._server_health_port = urlparse(p.get('ServerHealthUrl') or '').port or 8443
+        except ValueError:
+            self._server_health_port = 8443
+        self._device_tunnel_enabled = p.get('DeviceTunnelEnabled', False)
+        self._mfa_required = p.get('MfaRequired', False)
+        self._mfa_authorize_url = p.get('MfaAuthorizeUrl')
+        self._mfa_session_expires_at = p.get('MfaSessionExpiresAt')
+        self._mfa_enrollment_open = p.get('MfaEnrollmentOpen', False)
+        self._remote_lan_cidrs_by_profile = {r['ProfileName']: list(r['Cidrs']) for r in p.get('RemoteLanCidrsByProfile', [])}
+        self._fallback_ports = {r['ProfileName']: (r['Port'], r['TriggerSeconds']) for r in p.get('FallbackEndpoints', [])
+                                if r['Port'] > 0}
+
+    def registration_snapshot(self) -> dict:
+        with self._lock:
+            return {**self._reg.to_dict(), 'ConnectionPolicy': copy.deepcopy(self._connection_policy),
+                    'StandaloneModeChosen': self._standalone_mode_chosen,
+                    'ProfilesTransferredToBackend': self._profiles_transferred}
+
+    def restore_registration(self, data: dict) -> None:
+        # Read identity separately from authorization: missing/invalid legacy policy
+        # requires a live refresh, never a new client identity or a new lease.
+        reg = _RegistrationState()
+        reg.client_id = UUID(data.get('ClientId') or data['clientId'])
+        if reg.client_id.int == 0:
+            raise ValueError('Empty client identity')
+        reg.is_active = data.get('IsActive', data.get('isActive')) is True
+        try:
+            raw = data.get('LastCheckedUtc', data.get('lastCheckedUtc'))
+            reg.last_checked_utc = utc_datetime(raw) if isinstance(raw, str) else None
+            policy = normalize_policy(data['ConnectionPolicy'], cached=True)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            reg.last_checked_utc = None
+            policy = None
+        with self._lock:
+            self._reg = reg
+            self._apply_policy_locked(policy)
+            self._mfa_enrollment_uri = None
+            self._mfa_approve_number = None
+            self._standalone_mode_chosen = data.get('StandaloneModeChosen', data.get('standaloneModeChosen')) is True
+            self._profiles_transferred = data.get('ProfilesTransferredToBackend', data.get('profilesTransferredToBackend')) is True
 
     def is_registration_active(self) -> bool:
         with self._lock:
@@ -226,35 +284,49 @@ class DaemonState:
 
     def is_allowed_to_connect(self) -> bool:
         with self._lock:
-            if self._reg.is_active:
-                return True
-            if self._reg.last_checked_utc:
-                return datetime.utcnow() - self._reg.last_checked_utc < _GRACE_PERIOD
-            return False
+            return self._activation_allowed_locked()
+
+    def _activation_allowed_locked(self) -> bool:
+        checked = self._reg.last_checked_utc
+        now = self._now()
+        return bool(self._reg.is_active and self._connection_policy is not None and checked
+                    and checked <= now + timedelta(minutes=5)
+                    and now - checked < self._offline_access_period)
+
+    def _mfa_required_locked(self) -> bool:
+        return self._mfa_required or bool(self._mfa_session_expires_at
+            and self._now() >= utc_datetime(self._mfa_session_expires_at))
+
+    def is_profile_allowed_to_connect(self, profile_name: str) -> bool:
+        with self._lock:
+            return self._activation_allowed_locked() and not (self._mfa_required_locked()
+                and (not self._server_profile_name or profile_name == self._server_profile_name))
+
+    def connection_denied_reason(self, profile_name: Optional[str] = None) -> str:
+        with self._lock:
+            if not self._reg.is_active:
+                return 'This device is not activated. Contact your administrator.'
+            if not self._activation_allowed_locked():
+                return 'Cached VPN access expired or is unavailable. Reconnect to the management server to refresh access.'
+            return 'MFA authorization is required for this VPN. Unlock it through Valenius before connecting.'
+
+    def offline_access_expires_at(self) -> Optional[str]:
+        with self._lock:
+            checked = self._reg.last_checked_utc
+            if not self._reg.is_active or self._connection_policy is None or checked is None:
+                return None
+            try:
+                return (checked + self._offline_access_period).isoformat() + 'Z'
+            except OverflowError:
+                return None
 
     # ── MFA state ────────────────────────────────────────────────────────────
 
-    def set_mfa_state(
-        self,
-        required: bool,
-        authorize_url: Optional[str],
-        session_expires_at: Optional[str],
-        enrollment_open: bool,
-        enrollment_uri: Optional[str],
-        approve_number: Optional[int] = None,
-    ) -> None:
-        with self._lock:
-            self._mfa_required = required
-            self._mfa_authorize_url = authorize_url
-            self._mfa_session_expires_at = session_expires_at
-            self._mfa_enrollment_open = enrollment_open
-            self._mfa_enrollment_uri = enrollment_uri
-            self._mfa_approve_number = approve_number
 
     def get_mfa_state(self) -> tuple[bool, Optional[str], Optional[str], bool, Optional[str], Optional[int]]:
         with self._lock:
             return (
-                self._mfa_required,
+                self._mfa_required_locked(),
                 self._mfa_authorize_url,
                 self._mfa_session_expires_at,
                 self._mfa_enrollment_open,
@@ -294,9 +366,6 @@ class DaemonState:
         with self._lock:
             return self._device_tunnel_enabled
 
-    def set_device_tunnel_enabled(self, value: bool) -> None:
-        with self._lock:
-            self._device_tunnel_enabled = value
 
     # ── Tray presence ─────────────────────────────────────────────────────────
 
@@ -328,36 +397,11 @@ class DaemonState:
         with self._lock:
             return self._heartbeat_interval
 
-    def set_server_profile_name(self, name: Optional[str]) -> None:
-        with self._lock:
-            self._server_profile_name = name
 
     def get_server_profile_name(self) -> Optional[str]:
         with self._lock:
             return self._server_profile_name
 
-    def set_server_gateway(self, vpn_ip: Optional[str], health_port: int) -> None:
-        with self._lock:
-            self._server_vpn_ip = vpn_ip or None
-            self._server_health_port = health_port
-
-    def set_remote_lan_cidrs(self, entries: Optional[list[dict]]) -> None:
-        """entries: [{'ProfileName': ..., 'Cidrs': [...]}] from RemoteLanCidrsByProfile.
-
-        MUST stay keyed by profile name — the native server profile and each foreign
-        profile each report their OWN source customer's LAN CIDRs. Applying one profile's
-        entry to a different profile's connect would misattribute a conflict (a real bug
-        found in testing where a native sidecar's conflicting LAN wrongly blocked an
-        unrelated foreign profile).
-        """
-        with self._lock:
-            by_profile: dict[str, list[str]] = {}
-            for entry in entries or []:
-                name = entry.get('ProfileName') or entry.get('profileName')
-                cidrs = entry.get('Cidrs') or entry.get('cidrs') or []
-                if name and cidrs:
-                    by_profile[name] = list(cidrs)
-            self._remote_lan_cidrs_by_profile = by_profile
 
     def get_remote_lan_cidrs(self, profile_name: Optional[str]) -> list[str]:
         """The remote LAN CIDR(s) reported for profile_name's own sidecar, or [] when none
@@ -367,18 +411,6 @@ class DaemonState:
                 return []
             return list(self._remote_lan_cidrs_by_profile.get(profile_name, []))
 
-    def set_fallback_ports(self, entries: Optional[list[dict]]) -> None:
-        """entries: [{'ProfileName': ..., 'Port': ..., 'TriggerSeconds': ...}] from
-        StatusResponse.FallbackEndpoints. Mirrors Windows RegistrationManager.SetFallbackPorts."""
-        with self._lock:
-            by_profile: dict[str, tuple[int, int]] = {}
-            for entry in entries or []:
-                name = entry.get('ProfileName') or entry.get('profileName')
-                port = entry.get('Port', entry.get('port', 0))
-                trigger = entry.get('TriggerSeconds', entry.get('triggerSeconds', 20))
-                if name and port and port > 0:
-                    by_profile[name] = (port, trigger if trigger and trigger > 0 else 20)
-            self._fallback_ports = by_profile
 
     def get_fallback_config(self, profile_name: Optional[str]) -> Optional[tuple[int, int]]:
         """(port, trigger_seconds) advertised for profile_name, or None when no fallback is

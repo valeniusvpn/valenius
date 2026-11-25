@@ -9,6 +9,8 @@ public sealed class ApiKeyHandler(ApiKeyProvider keys) : DelegatingHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
+        request.Headers.Remove("X-Valenius-Device-Auth");
+        request.Headers.Add("X-Valenius-Device-Auth", "1");
         var key = keys.Current;
         if (!string.IsNullOrEmpty(key))
         {

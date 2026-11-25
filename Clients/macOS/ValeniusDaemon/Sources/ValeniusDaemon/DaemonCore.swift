@@ -7,29 +7,6 @@
 import Foundation
 import ValeniusShared
 
-/// Port from a ServerHealthUrl, defaulting to 8443 (mirrors the Windows/Linux clients).
-private func healthPort(from urlString: String?) -> Int {
-    guard let urlString, let url = URL(string: urlString), let port = url.port else { return 8443 }
-    return port
-}
-
-/// Case-insensitive access to a decoded JSON object. The backend (ASP.NET Core) serializes
-/// responses as **camelCase** (`isActive`, `heartbeatIntervalMinutes`), so a PascalCase-only
-/// lookup silently reads every field as nil and defaults it to false — exactly the trap the
-/// Linux client avoids by checking both `IsActive` and `isActive`. Look up by lowercased key.
-struct JsonObject {
-    private let byLowerKey: [String: Any]
-    init(_ raw: [String: Any]) {
-        var m = [String: Any](minimumCapacity: raw.count)
-        for (k, v) in raw { m[k.lowercased()] = v }
-        byLowerKey = m
-    }
-    func bool(_ key: String, _ fallback: Bool = false) -> Bool { byLowerKey[key.lowercased()] as? Bool ?? fallback }
-    func int(_ key: String) -> Int? { byLowerKey[key.lowercased()] as? Int }
-    func string(_ key: String) -> String? { byLowerKey[key.lowercased()] as? String }
-    func array(_ key: String) -> [Any]? { byLowerKey[key.lowercased()] as? [Any] }
-}
-
 /// After a network change, let the path settle before probing, then re-verify each active
 /// tunnel for up to the budget (mirrors Linux _REVERIFY_SETTLE_S / _REVERIFY_BUDGET_S).
 private let reverifySettleSeconds: TimeInterval = 5
@@ -55,6 +32,24 @@ actor DaemonCore {
     private var netMonitor: NetworkMonitor?
     private var powerMonitor: PowerMonitor?
     private var handlingNetworkChange = false
+    private var provisioningInProgress = false
+    // Actor methods suspend at awaits. Reserve lifecycle mutations across those gaps.
+    private var tunnelMutationInProgress = false
+    private var tunnelMutationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireTunnelMutation() async {
+        if !tunnelMutationInProgress {
+            tunnelMutationInProgress = true
+            return
+        }
+        await withCheckedContinuation { tunnelMutationWaiters.append($0) }
+    }
+
+    private func releaseTunnelMutation() {
+        if tunnelMutationWaiters.isEmpty { tunnelMutationInProgress = false }
+        else { tunnelMutationWaiters.removeFirst().resume() }
+    }
+    private var tunnelContents: [String: String] = [:]
     /// Per-target auto-connect action cooldown (mirrors Windows AutoConnectService's
     /// `_lastActionByTarget`) — tracked independently so one target's action never blocks the
     /// other's in the same check. Keys: "AutoConnect", "DeviceTunnel".
@@ -95,10 +90,10 @@ actor DaemonCore {
     }
 
     /// Adopt wireguard-go tunnels that outlived a daemon restart (mirrors Linux
-    /// reconcile_active_tunnels). Owner 'Unknown' → disconnectable by anyone.
+    /// reconcile_active_tunnels). Lost ownership requires privileged control.
     func reconcileActiveTunnels() async {
         for (profile, _) in engine.reconcile() {
-            await state.setConnected(tunnel: profile, user: "Unknown")
+            await state.setConnected(tunnel: profile, user: "Unknown", systemOwned: true)
         }
     }
 
@@ -122,8 +117,15 @@ actor DaemonCore {
     /// First-run: the user (app setup dialog) provides the backend DNS; the daemon prepends
     /// https://, persists it, and kicks off registration immediately instead of waiting for the
     /// next heartbeat cycle. Mirrors Windows ClientRegistrationService.SetBackendUrlAsync.
-    func cmdSetBackendUrl(dns: String?) async -> PipeResponse {
-        guard await backend.setBaseUrl(dns) != nil else {
+    func cmdSetBackendUrl(dns: String?, privileged: Bool = false) async -> PipeResponse {
+        guard privileged else { return .fail("An administrator must provision this machine. Use the root provisioning command or installer configuration.") }
+        guard !provisioningInProgress else { return .fail("Provisioning is already in progress. Try again.") }
+        provisioningInProgress = true
+        defer { provisioningInProgress = false }
+        guard !(await backend.isConfigured) else {
+            return .fail("Backend already provisioned. In-place reassignment is not supported; administrator migration is required.")
+        }
+        guard await backend.setBaseUrl(dns, privileged: true) != nil else {
             return .fail("Enter a valid server address, for example vpn.example.com")
         }
         Task { await heartbeatOnce() }
@@ -135,12 +137,14 @@ actor DaemonCore {
     /// nothing is ever contacted except, optionally, auto-update via `CloudUpdateSource`). No
     /// payload; persists the choice and stops the app from prompting again. Mirrors Windows
     /// RegistrationManager.SetStandaloneModeAsync / SetupChoiceForm's "Use standalone".
-    func cmdSetStandaloneMode() async -> PipeResponse {
+    func cmdSetStandaloneMode(privileged: Bool = false) async -> PipeResponse {
+        guard privileged else { return .fail("An administrator must provision this machine.") }
+        guard !provisioningInProgress else { return .fail("Provisioning is already in progress. Try again.") }
+        provisioningInProgress = true
+        defer { provisioningInProgress = false }
+        guard !(await backend.isConfigured) else { return .fail("A managed client cannot switch to standalone mode through IPC.") }
         await backend.setStandaloneModeChosen(true)
-        RegistrationStore.save(
-            clientId: await state.clientId, isActive: await state.isRegistrationActive(),
-            standaloneModeChosen: true
-        )
+        await state.setStandaloneModeChosen(true)
         return .ok()
     }
 
@@ -148,8 +152,8 @@ actor DaemonCore {
         let (ok, _) = await liveRegister(username: username)
         let message: String
         switch ok {
-        case true: message = "VPN access is active."
-        case false: message = "Registration submitted. Contact your administrator to activate this machine."
+        case .some(true): message = "VPN access is active."
+        case .some(false): message = "Registration submitted. Contact your administrator to activate this machine."
         case .none: message = "Could not reach the registration server. Please try again later."
         }
         return RegistrationResult(isActive: ok ?? false, message: message)
@@ -171,10 +175,10 @@ actor DaemonCore {
         }
     }
 
-    func cmdGetConfigInfo(username: String) async -> PipeResponse {
+    func cmdGetConfigInfo(username: String, privileged: Bool = false) async -> PipeResponse {
         let staged = await configs.stagedProfileNames()
         await configs.claimStagedConfig(username: username)
-        await reconnectIfReplaced(username: username, stagedNames: staged)
+        await reconnectIfReplaced(username: username, stagedNames: staged, privileged: privileged)
         let profiles = await configs.profiles(for: username)
         let info = ConfigInfo(
             hasConfig: !profiles.isEmpty,
@@ -185,15 +189,17 @@ actor DaemonCore {
         return .ok(info)
     }
 
-    func cmdConnect(username: String, profileName: String?) async -> PipeResponse {
+    func cmdConnect(username: String, profileName: String?, privileged: Bool = false) async -> PipeResponse {
+        await acquireTunnelMutation()
+        defer { releaseTunnelMutation() }
+        if let profileName, !ProfileNameHelper.isValid(profileName) { return .fail("Invalid profile name.") }
         // No backend configured (standalone, or mid first-run setup) — skip authorization
         // entirely, there is nothing to authorize against. Mirrors Windows: PipeServer's
         // Connect handler does the same when `!_backendUrl.IsConfigured`.
         if await backend.isConfigured, !(await state.isAllowedToConnect()) {
-            let (ok, error) = await liveRegister()
-            if ok != true {
-                let cid = await state.clientId
-                return .fail(error ?? "Not authorized — activate key \(cid) in the admin panel.")
+            let (_, error) = await liveRegister()
+            if !(await state.isAllowedToConnect()) {
+                return .fail(await state.connectionDeniedReason() + " " + (error ?? ""))
             }
         }
         await configs.claimStagedConfig(username: username)
@@ -211,7 +217,17 @@ actor DaemonCore {
             tunnelName = first
         }
 
-        if await state.isConnected(tunnel: tunnelName) { return .ok() }
+        if await state.isConnected(tunnel: tunnelName) {
+            let owned = await state.canControlTunnel(tunnelName, username: username)
+            guard privileged || owned else {
+                return .fail("Not authorized to control another user's tunnel.")
+            }
+            return .ok()
+        }
+
+        if await backend.isConfigured, !(await state.isProfileAllowedToConnect(tunnelName)) {
+            return .fail(await state.connectionDeniedReason())
+        }
 
         // AllowedIPs conflict check — mirrors Windows FindAllowedIpsConflict.
         let activeNames = await state.allConnected().map(\.name)
@@ -239,23 +255,52 @@ actor DaemonCore {
         }
         let wanIp = await backend.getWanIp()
         do {
-            _ = try engine.up(profile: tunnelName, config: content)
+            try await startTunnel(profile: tunnelName, content: content)
         } catch {
             return .fail("Failed to start tunnel: \(error)")
         }
 
-        await state.setConnected(tunnel: tunnelName, user: username)
+        await state.setConnected(tunnel: tunnelName, user: username, systemOwned: privileged)
         let clientId = await state.clientId
         Task { await backend.logEvent(clientId: clientId, eventType: "Connect", username: username, tunnelName: tunnelName, lanIp: getLanIp(), wanIp: wanIp) }
         Task { await verifyAfterConnect(tunnel: tunnelName) }
         return .ok()
     }
 
-    func cmdDisconnect(username: String, profileName: String?) async -> PipeResponse {
+    private func startTunnel(profile: String, content: String) async throws {
+        try await TunnelStartGuard.run(allowed: {
+            if !(await self.backend.isConfigured) { return true }
+            return await self.state.isProfileAllowedToConnect(profile)
+        }, reason: {
+            await self.state.connectionDeniedReason()
+        }, start: {
+            try self.performNativeStart(profile: profile, content: content)
+        }, compensate: {
+            await self.tunnelDown(profile)
+            await self.state.setDisconnected(tunnel: profile)
+        })
+    }
+
+    /// Keep the non-thread-safe native engine on the Core actor.
+    private func performNativeStart(profile: String, content: String) throws {
+        tunnelContents[profile] = content
+        _ = try engine.up(profile: profile, config: content)
+    }
+
+    func cmdDisconnect(username: String, profileName: String?, privileged: Bool = false) async -> PipeResponse {
+        await acquireTunnelMutation()
+        defer { releaseTunnelMutation() }
+        return await disconnect(username: username, profileName: profileName, privileged: privileged)
+    }
+
+    private func disconnect(username: String, profileName: String?, privileged: Bool) async -> PipeResponse {
         if let profileName {
+            guard ProfileNameHelper.isValid(profileName) else { return .fail("Invalid profile name.") }
             guard await state.isConnected(tunnel: profileName) else {
                 return .fail("Tunnel '\(profileName)' is not active.")
             }
+            let owned = await state.canControlTunnel(profileName, username: username)
+            guard privileged || owned else { return .fail("Not authorized to disconnect another user's tunnel.") }
             await tunnelDown(profileName)
             await state.setDisconnected(tunnel: profileName)
             let clientId = await state.clientId
@@ -268,8 +313,8 @@ actor DaemonCore {
             return .fail("No tunnel is currently active.")
         }
         let owner = primary.entry.user
-        let systemTunnel = ["AutoConnect", "PendingConnect", "Unknown"].contains(owner)
-        if !systemTunnel, owner.lowercased() != username.lowercased() {
+        let owned = await state.canControlTunnel(primary.name, username: username)
+        if !privileged && !owned {
             return .fail("Not authorized to disconnect another user's tunnel.")
         }
         await tunnelDown(primary.name)
@@ -279,18 +324,21 @@ actor DaemonCore {
         return .ok()
     }
 
-    func cmdDeleteProfile(username: String, profileName: String?) async -> PipeResponse {
+    func cmdDeleteProfile(username: String, profileName: String?, privileged: Bool = false) async -> PipeResponse {
+        await acquireTunnelMutation()
+        defer { releaseTunnelMutation() }
         guard ProfileNameHelper.isValid(profileName), let profileName else {
             return .fail("Invalid profile name.")
+        }
+        guard await configs.profiles(for: username).contains(profileName) else {
+            return .fail("Profile '\(profileName)' not found.")
         }
         if await configs.isManaged(username, profileName) {
             return .fail("'\(profileName)' is managed by the administrator.")
         }
         if await state.isConnected(tunnel: profileName) {
-            await tunnelDown(profileName)
-            await state.setDisconnected(tunnel: profileName)
-            let clientId = await state.clientId
-            Task { await backend.logEvent(clientId: clientId, eventType: "Disconnect", username: username, tunnelName: profileName) }
+            let result = await disconnect(username: username, profileName: profileName, privileged: privileged)
+            guard result.success else { return result }
         }
         if !(await configs.deleteUserProfile(username: username, profile: profileName)) {
             return .fail("Profile '\(profileName)' not found.")
@@ -317,13 +365,20 @@ actor DaemonCore {
         // Re-derive search domains from the stored config if we can (for scutil removal);
         // best-effort — teardown proceeds regardless.
         var searchDomains: [String] = []
-        if let content = try? await configs.decryptedContentByTunnel(tunnel),
+        let stored = await storedTunnelContent(tunnel)
+        if let content = stored,
            let cfg = try? WireGuardConfig.parse(content) {
             searchDomains = cfg.searchDomains
         }
         // The run marker's iface — without it, engine.down skips teardownNetwork entirely and
         // the scoped scutil DNS entry (State:/Network/Service/valenius-<iface>/DNS) is orphaned.
         engine.down(profile: tunnel, iface: engine.iface(for: tunnel), searchDomains: searchDomains)
+        tunnelContents.removeValue(forKey: tunnel)
+    }
+
+    private func storedTunnelContent(_ tunnel: String) async -> String? {
+        if let content = tunnelContents[tunnel] { return content }
+        return try? await configs.decryptedContentByTunnel(tunnel)
     }
 
     /// Post-connect verification (mirrors Linux _verify_after_connect / Windows TunnelVerifier):
@@ -407,14 +462,17 @@ actor DaemonCore {
     /// (best-effort). On failure the tunnel is put back on its primary port — see
     /// `restorePrimaryPort` — so a failed switch can never cost the client the tunnel it
     /// already had. Mirrors Windows TunnelVerifier.TrySwitchToFallbackPortAsync.
-    private func trySwitchToFallbackPort(tunnel: String, port: Int, triggerSeconds: Int) async {
-        guard let content = try? await configs.decryptedContentByTunnel(tunnel) else { return }
+    func trySwitchToFallbackPort(tunnel: String, port: Int, triggerSeconds: Int) async {
+        await acquireTunnelMutation()
+        defer { releaseTunnelMutation() }
+        guard await state.isConnected(tunnel: tunnel) else { return }
+        guard let content = await storedTunnelContent(tunnel) else { return }
         log("No successful verification for tunnel '\(tunnel)' after \(triggerSeconds)s — retrying via UDP fallback port \(port).")
 
         await tunnelDown(tunnel)
         let switched = rewriteEndpointPort(content, port: port)
         do {
-            _ = try engine.up(profile: tunnel, config: switched)
+            try await startTunnel(profile: tunnel, content: switched)
             await state.markUsedFallbackPort(tunnel: tunnel, port: port)
             let clientId = await state.clientId
             Task { await backend.logEvent(clientId: clientId, eventType: "PortFallback", username: "", tunnelName: tunnel) }
@@ -431,7 +489,7 @@ actor DaemonCore {
     /// TunnelVerifier.RestorePrimaryPortAsync.
     private func restorePrimaryPort(tunnel: String, content: String) async {
         do {
-            _ = try engine.up(profile: tunnel, config: content)
+            try await startTunnel(profile: tunnel, content: content)
             log("Restored tunnel '\(tunnel)' on its primary port after the fallback-port attempt failed.")
         } catch {
             logError("Could not restore tunnel '\(tunnel)' on its primary port: \(error)")
@@ -480,11 +538,8 @@ actor DaemonCore {
                 }
                 if wasViaGateway {
                     log("Re-verify: tunnel '\(name)' gateway unreachable after network change — disconnecting")
-                    await tunnelDown(name)
-                    await state.setDisconnected(tunnel: name)
-                    let clientId = await state.clientId
                     let user = tunnel.connectedUser ?? "ConnectionLost"
-                    Task { await backend.logEvent(clientId: clientId, eventType: "Disconnect", username: user, tunnelName: name) }
+                    _ = await cmdDisconnect(username: user, profileName: name, privileged: true)
                     continue
                 }
                 // Gateway probe failed but was never gateway-verified (health likely firewalled) — keep it.
@@ -504,7 +559,7 @@ actor DaemonCore {
     /// admin-configured profile, and — when the backend's device-tunnel flag is set — the
     /// customer's own native sidecar profile. Both share the same trusted-network detection;
     /// neither ever tears down a manually-connected foreign tunnel.
-    private func autoConnectAction() async {
+    func autoConnectAction() async {
         let networks = await autoConnect.getTrustedNetworks()
         guard !networks.isEmpty else { return }
         let inTrusted = TrustedNetworkDetector.isInTrustedNetwork(networks)
@@ -542,12 +597,12 @@ actor DaemonCore {
             // useful on the admin client list's "Last user" column, and it also isn't a real
             // per-user config directory, so cmdConnect couldn't find the profile without this.
             let connectedBy = await state.getLastKnownUsername() ?? label
-            if await cmdConnect(username: connectedBy, profileName: serverProfile).success {
+            if await cmdConnect(username: connectedBy, profileName: serverProfile, privileged: true).success {
                 lastAutoActionByTarget[label] = Date()
             }
         } else if isServerUp && inTrusted {
             log("Auto-connect: inside trusted network, disconnecting")
-            if await cmdDisconnect(username: label, profileName: serverProfile).success {
+            if await cmdDisconnect(username: label, profileName: serverProfile, privileged: true).success {
                 lastAutoActionByTarget[label] = Date()
             }
         }
@@ -573,7 +628,7 @@ actor DaemonCore {
             }
         } else if isUp && inTrusted {
             log("Device tunnel: inside trusted network, disconnecting '\(profile)'")
-            if await cmdDisconnect(username: label, profileName: profile).success {
+            if await cmdDisconnect(username: label, profileName: profile, privileged: true).success {
                 lastAutoActionByTarget[label] = Date()
             }
         }
@@ -589,7 +644,13 @@ actor DaemonCore {
     /// `cmdConnect` runs for interactive callers — mirrors Windows, where this path (like
     /// PendingConnect) is backend/policy-driven, not subject to the interactive guard.
     private func connectDeviceTunnel(profile: String) async -> Bool {
+        await acquireTunnelMutation()
+        defer { releaseTunnelMutation() }
         if await state.isConnected(tunnel: profile) { return true }
+        if await backend.isConfigured, !(await state.isAllowedToConnect()) {
+            _ = await liveRegister()
+            if !(await state.isAllowedToConnect()) { return false }
+        }
 
         let content: String
         if let crossUser = try? await configs.decryptedContentByTunnel(profile) {
@@ -602,14 +663,14 @@ actor DaemonCore {
 
         let wanIp = await backend.getWanIp()
         do {
-            _ = try engine.up(profile: profile, config: content)
+            try await startTunnel(profile: profile, content: content)
         } catch {
             logError("Device tunnel: failed to start tunnel '\(profile)': \(error)")
             return false
         }
 
         let connectedBy = await state.getLastKnownUsername() ?? "DeviceTunnel"
-        await state.setConnected(tunnel: profile, user: connectedBy)
+        await state.setConnected(tunnel: profile, user: connectedBy, systemOwned: true)
         let clientId = await state.clientId
         Task { await backend.logEvent(clientId: clientId, eventType: "Connect", username: connectedBy, tunnelName: profile, lanIp: getLanIp(), wanIp: wanIp) }
         Task { await verifyAfterConnect(tunnel: profile) }
@@ -683,11 +744,11 @@ actor DaemonCore {
 
     /// If a staged config replaced one that's currently connected, reconnect it so the new
     /// config takes effect (mirrors Linux _reconnect_if_replaced).
-    private func reconnectIfReplaced(username: String, stagedNames: [String]) async {
+    private func reconnectIfReplaced(username: String, stagedNames: [String], privileged: Bool) async {
         for name in stagedNames where await state.isConnected(tunnel: name) {
-            await tunnelDown(name)
-            await state.setDisconnected(tunnel: name)
-            _ = await cmdConnect(username: username, profileName: name)
+            let stopped = await cmdDisconnect(username: username, profileName: name, privileged: privileged)
+            guard stopped.success else { continue }
+            _ = await cmdConnect(username: username, profileName: name, privileged: privileged)
         }
     }
 
@@ -713,24 +774,20 @@ actor DaemonCore {
     /// which request delivered them.
     func processStatusResponse(_ resp: [String: Any]) async {
         let j = JsonObject(resp)
-        await state.setBackendReachable(true)
-        let isActive = j.bool("IsActive")
-        await state.updateRegistration(isActive: isActive)
-        RegistrationStore.save(clientId: await state.clientId, isActive: isActive, lastCheckedUtc: Date())
+        // One actor call applies and persists activation plus reusable policy before
+        // any other work can suspend this response's processing.
+        await state.applyBackendStatus(resp)
 
         await state.setHeartbeatInterval(minutes: j.int("HeartbeatIntervalMinutes") ?? 5)
-        let serverProfileName = j.string("ServerProfileName")
-        await state.setServerProfileName(serverProfileName)
+        let serverProfileName = await state.getServerProfileName()
         await backend.setChannel(j.string("UpdateChannel"))
         await backend.setApiKey(j.string("ClientApiKey"))
-        await state.setSkipConnectivityCheck(j.bool("SkipConnectivityCheck"))
 
         // Device tunnel (docs/design → root CLAUDE.md "Device tunnel — connect before login"):
         // gated on the backend flag AND a native profile actually existing. Refresh the
         // machine-level config copy on every heartbeat/poll, independent of any login, so the
         // startup auto-connect check can find it even on a machine nobody's logged into yet.
-        let deviceTunnelEnabled = j.bool("DeviceTunnelEnabled") && serverProfileName != nil
-        await state.setDeviceTunnelEnabled(deviceTunnelEnabled)
+        let deviceTunnelEnabled = await state.getDeviceTunnelEnabled() && serverProfileName != nil
         if deviceTunnelEnabled, let serverProfileName {
             Task { await ensureDeviceTunnelConfig(profile: serverProfileName) }
         }
@@ -749,45 +806,7 @@ actor DaemonCore {
                                             profileName: j.string("AutoConnectProfileName"), trustedNetworks: trusted)
         await autoConnect.persist()
 
-        // Gateway /health target for the native server tunnel — consumed by re-verify.
-        let serverVpnIp = j.string("ServerVpnIp")
-        let serverHealthUrl = j.string("ServerHealthUrl")
-        await state.setServerGateway(vpnIp: serverVpnIp, healthPort: healthPort(from: serverHealthUrl))
-
-        // Per-profile remote LAN CIDR(s) behind each profile's own sidecar, for the
-        // pre-connect LAN-conflict check (covers the full-tunnel/0.0.0.0/0 case). Stays
-        // scoped per profile — see DaemonState.setRemoteLanCidrs for why.
-        let lanCidrEntries: [(profileName: String, cidrs: [String])] =
-            (j.array("RemoteLanCidrsByProfile") ?? []).compactMap { raw in
-                guard let dict = raw as? [String: Any] else { return nil }
-                let e = JsonObject(dict)
-                guard let name = e.string("ProfileName"), !name.isEmpty else { return nil }
-                let cidrs = (e.array("Cidrs") ?? []).compactMap { $0 as? String }
-                return cidrs.isEmpty ? nil : (name, cidrs)
-            }
-        await state.setRemoteLanCidrs(lanCidrEntries)
-
-        // Per-profile UDP fallback port + trigger window (docs/design/port-443-fallback.md),
-        // consumed by verifyAfterConnect. Present only once the serving sidecar has confirmed
-        // the redirect is actually active — see DaemonState.setFallbackPorts.
-        let fallbackEntries: [(profileName: String, port: Int, triggerSeconds: Int)] =
-            (j.array("FallbackEndpoints") ?? []).compactMap { raw in
-                guard let dict = raw as? [String: Any] else { return nil }
-                let e = JsonObject(dict)
-                guard let name = e.string("ProfileName"), !name.isEmpty, let port = e.int("Port") else { return nil }
-                return (name, port, e.int("TriggerSeconds") ?? 20)
-            }
-        await state.setFallbackPorts(fallbackEntries)
-
-        // MFA state — passed through to the app via buildTunnelStatus; enroll/unlock UI is M5.
-        await state.setMfaState(
-            required: j.bool("MfaRequired"),
-            authorizeUrl: j.string("MfaAuthorizeUrl"),
-            sessionExpiresAt: j.string("MfaSessionExpiresAt"),
-            enrollmentOpen: j.bool("MfaEnrollmentOpen"),
-            enrollmentUri: j.string("MfaEnrollmentUri"),
-            approveNumber: j.int("MfaApproveNumber")
-        )
+        // Gateway, LAN/fallback and MFA metadata were applied atomically above.
 
         // Pending config (native sidecar): fetch + stage for the app to auto-claim.
         if j.bool("HasPendingConfig") {
@@ -806,30 +825,30 @@ actor DaemonCore {
         }
 
         // Backend-initiated connect/disconnect for the server/primary tunnel only.
-        if let pendingConnect = j.string("PendingConnect"), !pendingConnect.isEmpty,
+        if j.bool("PendingConnect"), let pendingConnect = serverProfileName,
            !(await state.isConnected(tunnel: pendingConnect)) {
             // Same last-known-username preference as auto-connect above — "PendingConnect" is
             // meaningless on the admin client list and isn't a real per-user config directory.
             Task {
                 let connectedBy = await state.getLastKnownUsername() ?? "PendingConnect"
-                _ = await cmdConnect(username: connectedBy, profileName: pendingConnect)
+                _ = await cmdConnect(username: connectedBy, profileName: pendingConnect, privileged: true)
             }
         }
-        if let pendingDisconnect = j.string("PendingDisconnect"), !pendingDisconnect.isEmpty,
+        if j.bool("PendingDisconnect"), let pendingDisconnect = serverProfileName,
            await state.isConnected(tunnel: pendingDisconnect) {
-            Task { _ = await cmdDisconnect(username: "PendingDisconnect", profileName: pendingDisconnect) }
+            Task { _ = await cmdDisconnect(username: "PendingDisconnect", profileName: pendingDisconnect, privileged: true) }
         }
 
         // MFA session expired while the gated tunnel is still up: the sidecar already dropped
         // the peer, so tear down the local server tunnel to match (mirrors Linux).
         if j.bool("MfaRequired"), let serverProfile = await state.getServerProfileName(),
            await state.isConnected(tunnel: serverProfile) {
-            Task { _ = await cmdDisconnect(username: "MfaSessionExpired", profileName: serverProfile) }
+            Task { _ = await cmdDisconnect(username: "MfaSessionExpired", profileName: serverProfile, privileged: true) }
         }
 
         // Admin-initiated cross-user delete.
         if let deleteName = j.string("PendingDeleteProfileName"), !deleteName.isEmpty {
-            await handlePendingDelete(deleteName)
+            Task { await handlePendingDelete(deleteName) }
         }
 
         // Admin requested a diagnostic log upload — collect + send (Valenius-only, redacted).
@@ -887,6 +906,8 @@ actor DaemonCore {
     }
 
     private func handlePendingDelete(_ profile: String) async {
+        await acquireTunnelMutation()
+        defer { releaseTunnelMutation() }
         if await state.isConnected(tunnel: profile) {
             await tunnelDown(profile)
             await state.setDisconnected(tunnel: profile)
@@ -932,7 +953,7 @@ actor DaemonCore {
 
     // MARK: IPC dispatch
 
-    func dispatch(_ cmd: PipeCommand, username: String) async -> PipeResponse {
+    func dispatch(_ cmd: PipeCommand, username: String, privileged: Bool = false) async -> PipeResponse {
         await state.markAppSeen()
         await state.setLastKnownUsername(username)
         switch cmd.command {
@@ -961,16 +982,16 @@ actor DaemonCore {
             return await cmdUploadConfig(username: username, profileName: cmd.profileName, content: cmd.configContent)
 
         case .getConfigInfo:
-            return await cmdGetConfigInfo(username: username)
+            return await cmdGetConfigInfo(username: username, privileged: privileged)
 
         case .connect:
-            return await cmdConnect(username: username, profileName: cmd.profileName)
+            return await cmdConnect(username: username, profileName: cmd.profileName, privileged: privileged)
 
         case .disconnect:
-            return await cmdDisconnect(username: username, profileName: cmd.profileName)
+            return await cmdDisconnect(username: username, profileName: cmd.profileName, privileged: privileged)
 
         case .deleteProfile:
-            return await cmdDeleteProfile(username: username, profileName: cmd.profileName)
+            return await cmdDeleteProfile(username: username, profileName: cmd.profileName, privileged: privileged)
 
         case .setAutoConnect:
             guard let enabled = cmd.autoConnectEnabled else {
@@ -994,10 +1015,10 @@ actor DaemonCore {
             return .ok()
 
         case .setBackendUrl:
-            return await cmdSetBackendUrl(dns: cmd.backendDns)
+            return await cmdSetBackendUrl(dns: cmd.backendDns, privileged: privileged)
 
         case .setStandaloneMode:
-            return await cmdSetStandaloneMode()
+            return await cmdSetStandaloneMode(privileged: privileged)
         }
     }
 
@@ -1015,10 +1036,7 @@ actor DaemonCore {
             await state.setBackendReachable(false)
             return (nil, "Registration server unreachable.")
         }
-        await state.setBackendReachable(true)
-        let active = JsonObject(resp).bool("IsActive")
-        await state.updateRegistration(isActive: active)
-        RegistrationStore.save(clientId: clientId, isActive: active, lastCheckedUtc: Date())
-        return (active, nil)
+        await processStatusResponse(resp)
+        return (await state.isRegistrationActive(), nil)
     }
 }

@@ -11,6 +11,7 @@ SETTINGS_PATH = '/etc/valenius/appsettings.json'
 class Settings:
     backend_url: str
     api_key: str
+    offline_access_days: int = 7
 
     @staticmethod
     def load(path: str = SETTINGS_PATH) -> Settings:
@@ -23,7 +24,11 @@ class Settings:
         except (FileNotFoundError, ValueError):
             return Settings(backend_url='', api_key='')
         wt = raw.get('Valenius', raw)
+        days = wt.get('OfflineAccessDays', 7)
+        if type(days) is not int or not 1 <= days <= 365:
+            raise ValueError('Valenius:OfflineAccessDays must be between 1 and 365')
         return Settings(
             backend_url=(wt.get('BackendUrl') or '').rstrip('/'),
             api_key=wt.get('ApiKey') or '',
+            offline_access_days=days,
         )

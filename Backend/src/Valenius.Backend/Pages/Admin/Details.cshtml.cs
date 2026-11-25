@@ -197,6 +197,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         GeneratedConfig = await BuildGeneratedConfigAsync(client);
         if (GeneratedConfig is not null)
         {
+            await audit.LogRequiredAsync(Audit.Client, "Config displayed", $"Client ID: {id}");
             using var qrGen = new QRCodeGenerator();
             var qrData = qrGen.CreateQrCode(GeneratedConfig, QRCodeGenerator.ECCLevel.M);
             GeneratedConfigQr = Convert.ToBase64String(new PngByteQRCode(qrData).GetGraphic(8));
@@ -316,8 +317,14 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         }
 
         client.IsActive = activating;
-        _ = audit.LogAsync(Audit.Client, activating ? "Activated" : "Deactivated",
-            $"Client: {client.Hostname}", $"Customer: {client.Customer?.Name}");
+        if (activating)
+            await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Activated", $"Client: {client.Hostname}", $"Customer: {client.Customer?.Name}");
+        else
+        {
+            // Security withdrawal must not wait for audit availability.
+            await db.SaveChangesAsync();
+            await audit.LogAsync(Audit.Client, "Deactivated", $"Client: {client.Hostname}", $"Customer: {client.Customer?.Name}");
+        }
 
         if (client.Customer?.ServerMode == "Valenius")
         {
@@ -332,6 +339,28 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         return RedirectToPage(new { id });
     }
 
+    /// <summary>Explicit out-of-band provisioning/rotation for retained desktop and
+    /// appliance identities. No automatic migration using the compromised fleet key.</summary>
+    public async Task<IActionResult> OnPostIssueDeviceCredentialAsync(int id)
+    {
+        if (!User.IsInRole("Admin")) return Forbid();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var credential = DeviceCredential.Mint();
+        var hash = DeviceCredential.Hash(credential);
+        var changed = await db.Clients.Where(c => c.Id == id && !c.IsDeleted)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.DeviceCredentialHash, hash)
+                .SetProperty(c => c.LegacyAuthenticationEligible, false)
+                .SetProperty(c => c.PendingDeviceCredentialHash, (string?)null)
+                .SetProperty(c => c.PendingDeviceCredentialProtected, (string?)null));
+        if (changed != 1) return NotFound();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Device credential issued", $"Client ID: {id}");
+        await transaction.CommitAsync();
+        notifier.Notify((await db.Clients.AsNoTracking().SingleAsync(c => c.Id == id)).ClientKey);
+        Response.Headers.CacheControl = "no-store";
+        Response.Headers.Pragma = "no-cache";
+        return File(Encoding.UTF8.GetBytes(credential), "text/plain", $"valenius-device-{id}.key");
+    }
+
     // ── Diagnostics: client log collection ─────────────────────────────────────
 
     /// <summary>Ask the client to collect its (Valenius-only, redacted) logs and upload them
@@ -342,9 +371,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (client is null) return NotFound();
         if (!CanAccess(client)) return Forbid();
         client.PendingLogRequest = true;
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Log upload requested", $"Client: {client.Hostname}");
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Log upload requested", $"Client: {client.Hostname}");
         TempData["Success"] = "Log upload requested — the client uploads its Valenius logs on its next check-in.";
         return RedirectToPage(new { id });
     }
@@ -356,7 +384,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (!CanAccess(client)) return Forbid();
         var bundle = await db.ClientLogBundles.FirstOrDefaultAsync(b => b.Id == bundleId && b.ClientId == id);
         if (bundle is null) return NotFound();
-        _ = audit.LogAsync(Audit.Client, "Log bundle downloaded", $"Client: {client.Hostname}", bundle.FileName);
+        await audit.LogAsync(Audit.Client, "Log bundle downloaded", $"Client: {client.Hostname}", bundle.FileName);
         return File(bundle.Content, bundle.ContentType, bundle.FileName);
     }
 
@@ -369,8 +397,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (bundle is not null)
         {
             db.ClientLogBundles.Remove(bundle);
-            await db.SaveChangesAsync();
-            _ = audit.LogAsync(Audit.Client, "Log bundle deleted", $"Client: {client.Hostname}", bundle.FileName);
+            await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Log bundle deleted", $"Client: {client.Hostname}", bundle.FileName);
         }
         TempData["Success"] = "Log bundle deleted.";
         return RedirectToPage(new { id });
@@ -426,11 +453,14 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
     /// </summary>
     public async Task<IActionResult> OnPostReassignAsync(int id)
     {
+        if (!User.IsInRole("Admin")) return Forbid();
         var duplicate = await db.Clients.FindAsync(id);
         if (duplicate is null) return NotFound();
         if (!CanAccess(duplicate)) return Forbid();
         if (!duplicate.IsDuplicatePending)
             return RedirectToPage(new { id });
+        if (duplicate.DeviceCredentialHash is null)
+            return BadRequest("Provision a device credential before reassigning this registration.");
 
         var original = await db.Clients
             .Include(c => c.Customer)
@@ -457,17 +487,24 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var newUsername    = duplicate.Username;
         var newUserSid     = duplicate.UserSid;
         var newVersion     = duplicate.ClientVersion;
+        var newCredentialHash = duplicate.DeviceCredentialHash;
 
+        await using var identityTransaction = await db.Database.BeginTransactionAsync();
         db.Clients.Remove(duplicate);
         await db.SaveChangesAsync();
 
         original.ClientKey     = newKey;
+        original.DeviceCredentialHash = newCredentialHash;
+        original.LegacyAuthenticationEligible = false;
+        original.PendingDeviceCredentialHash = null;
+        original.PendingDeviceCredentialProtected = null;
         original.HostSid       = newHostSid;
         if (!string.IsNullOrEmpty(newUsername)) original.Username = newUsername;
         if (!string.IsNullOrEmpty(newUserSid))  original.UserSid  = newUserSid;
         if (!string.IsNullOrEmpty(newVersion))  original.ClientVersion = newVersion;
         original.LastSeenAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
+        await identityTransaction.CommitAsync();
 
         // The fresh install starts with an empty local config store and no authenticator, so
         // re-stage every profile the record already had and re-arm MFA if the peer is gated.
@@ -504,11 +541,9 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
             await mfa.ResetEnrollmentAsync(original, original.Customer);
         }
 
-        await db.SaveChangesAsync();
-
-        notifier.Notify(original.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Reassigned to reinstall",
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Reassigned to reinstall",
             $"Client: {original.Hostname}", $"New ClientKey: {newKey}");
+        notifier.Notify(original.ClientKey);
         TempData["Success"] = mfaReEnroll
             ? $"Reassigned '{original.Hostname}' to the new installation — re-staging its profiles; the user must re-enroll MFA on the device."
             : $"Reassigned '{original.Hostname}' to the new installation — re-staging its profiles.";
@@ -526,8 +561,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (client is null) return NotFound();
         if (!CanAccess(client)) return Forbid();
         client.IsDuplicatePending = false;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Client, "Duplicate kept as separate client", $"Client: {client.Hostname}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Duplicate kept as separate client", $"Client: {client.Hostname}");
         TempData["Success"] = "Kept as a separate client. You can now activate it.";
         return RedirectToPage(new { id });
     }
@@ -632,7 +666,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         await mfa.ApplyPolicyChangeAsync(client, client.Customer, tunnels.IsConnected(client.ClientKey));
         notifier.Notify(client.ClientKey);
 
-        _ = audit.LogAsync(Audit.Mfa, "Policy changed", $"Client: {client.Hostname}",
+        await audit.LogAsync(Audit.Mfa, "Policy changed", $"Client: {client.Hostname}",
             $"peerType={client.PeerType}, policy={mfaPolicy}");
         TempData["Success"] = "MFA policy updated.";
         return RedirectToPage(new { id });
@@ -652,7 +686,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
 
         await mfa.ResetEnrollmentAsync(client, client.Customer);
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Mfa, "Enrollment reset (admin)", $"Client: {client.Hostname}");
+        await audit.LogAsync(Audit.Mfa, "Enrollment reset (admin)", $"Client: {client.Hostname}");
         TempData["Success"] = "MFA enrollment reset — the user must re-enroll on their device.";
         return RedirectToPage(new { id });
     }
@@ -673,9 +707,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
         client.PendingConnect = true;
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Connect triggered", $"Client: {client.Hostname}");
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Connect triggered", $"Client: {client.Hostname}");
         return RedirectToPage(new { id });
     }
 
@@ -685,9 +718,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
         client.PendingDisconnect = true;
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Disconnect triggered", $"Client: {client.Hostname}");
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Disconnect triggered", $"Client: {client.Hostname}");
         return RedirectToPage(new { id });
     }
 
@@ -708,13 +740,13 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (string.IsNullOrEmpty(client.WgPublicKey))
             return BadRequest("Client has no WireGuard peer to remove.");
 
-        var removed = await sidecar.RemovePeerAsync(client.Customer.SidecarBaseUrl, client.WgPublicKey);
+        var removed = await sidecar.RemovePeerAsync(client.Customer.SidecarBaseUrl, client.Customer.Id, client.WgPublicKey);
         client.WgPeerKilled = true;
         await db.SaveChangesAsync();
         // Native peer only — a foreign profile's tunnel is untouched by Kill Tunnel.
         tunnels.MarkDisconnected(client.ClientKey, WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name));
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Tunnel killed", $"Client: {client.Hostname}",
+        await audit.LogAsync(Audit.Client, "Tunnel killed", $"Client: {client.Hostname}",
             removed ? "Peer removed from sidecar." : "Peer removal request failed or sidecar unreachable.");
 
         TempData[removed ? "Success" : "Warning"] = removed
@@ -729,9 +761,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
         client.ForceUpdate = true;
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Force update", $"Client: {client.Hostname}");
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Force update", $"Client: {client.Hostname}");
         TempData["Success"] = "Update triggered — the client will download and install the latest version.";
         return RedirectToPage(new { id });
     }
@@ -742,9 +773,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
         client.UpdateChannel = ReleaseChannel.Normalize(channel);
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Update channel changed", $"Client: {client.Hostname}", client.UpdateChannel);
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Update channel changed", $"Client: {client.Hostname}", client.UpdateChannel);
         TempData["Success"] = $"Update channel set to {client.UpdateChannel}.";
         return RedirectToPage(new { id });
     }
@@ -755,8 +785,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
         client.SkipConnectivityCheck = !client.SkipConnectivityCheck;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Client,
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client,
             client.SkipConnectivityCheck ? "Connectivity check disabled" : "Connectivity check enabled",
             $"Client: {client.Hostname}");
         TempData["Success"] = client.SkipConnectivityCheck
@@ -942,10 +971,9 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
 
         var result = await provisioner.ProvisionForeignAsync(client, sourceCustomer);
         await provisioner.ReconcileStaleProfilesAsync(client);
-        await db.SaveChangesAsync();
-        notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Foreign profile provisioned", $"Client: {client.Hostname}",
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Foreign profile provisioned", $"Client: {client.Hostname}",
             $"Source customer: {sourceCustomer.Name}");
+        notifier.Notify(client.ClientKey);
 
         if (result.StartsWith("Provisioned"))
             TempData["Success"] = result;
@@ -966,10 +994,9 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (sourceCustomer is null) return NotFound();
 
         var result = await provisioner.DeprovisionForeignAsync(client, sourceCustomer);
-        await db.SaveChangesAsync();
-        notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Foreign profile deprovisioned", $"Client: {client.Hostname}",
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Foreign profile deprovisioned", $"Client: {client.Hostname}",
             $"Source customer: {sourceCustomer.Name}");
+        notifier.Notify(client.ClientKey);
 
         TempData["Warning"] = result;
         return RedirectToPage(new { id });
@@ -998,7 +1025,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
             {
                 var foreignResult = await provisioner.ProvisionForeignAsync(client, fp.SourceCustomer);
                 messages.Add($"{fp.SourceCustomer.Name}: {foreignResult}");
-                _ = audit.LogAsync(Audit.Client, "Foreign profile provisioned", $"Client: {client.Hostname}",
+                await audit.LogAsync(Audit.Client, "Foreign profile provisioned", $"Client: {client.Hostname}",
                     $"Source customer: {fp.SourceCustomer.Name}");
             }
         }
@@ -1035,9 +1062,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (client is null) return NotFound();
 
         client.PendingConfigRepair = true;
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Client config repair requested", $"Client: {client.Hostname}");
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Client config repair requested", $"Client: {client.Hostname}");
 
         TempData["Success"] = "Config repair requested — it will run on the client's next heartbeat.";
         return RedirectToPage(new { id });
@@ -1056,9 +1082,8 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         if (client is null) return NotFound();
 
         client.PendingServiceRestart = true;
-        await db.SaveChangesAsync();
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Client service restart requested", $"Client: {client.Hostname}");
         notifier.Notify(client.ClientKey);
-        _ = audit.LogAsync(Audit.Client, "Client service restart requested", $"Client: {client.Hostname}");
 
         TempData["Success"] = "Service restart requested — the client will restart its service on its "
                             + "next heartbeat. Any active tunnel will be disconnected.";
@@ -1071,8 +1096,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var client = await db.Clients.FindAsync(id);
         if (client is null) return NotFound();
         client.IsDeleted = true;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Client, "Deleted", $"Client: {client.Hostname}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Client, "Deleted", $"Client: {client.Hostname}");
         return RedirectToPage("Index");
     }
 
@@ -1086,6 +1110,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         var fileName = client.Customer is not null
             ? WireGuardHelper.ProfileName(client.Customer.VpnPrefix, client.Customer.Name) + ".conf"
             : "wireguard.conf";
+        await audit.LogRequiredAsync(Audit.Client, "Config downloaded", $"Client ID: {id}");
         return File(Encoding.UTF8.GetBytes(config), "text/plain", fileName);
     }
 
@@ -1099,6 +1124,7 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
         using var qrGenerator = new QRCodeGenerator();
         var qrData = qrGenerator.CreateQrCode(config, QRCodeGenerator.ECCLevel.M);
         var png = new PngByteQRCode(qrData).GetGraphic(10);
+        await audit.LogRequiredAsync(Audit.Client, "Config QR downloaded", $"Client ID: {id}");
         return File(png, "image/png", $"{client.Hostname}-vpn-qr.png");
     }
 
@@ -1172,8 +1198,9 @@ public class DetailsModel(ApplicationDbContext db, ClientNotifier notifier, Clie
 
         try
         {
+            await audit.LogRequiredAsync(Audit.Email, "Config email requested", $"Client ID: {id}", $"To: {recipientEmail.Trim()}");
             await email.SendAsync(recipientEmail.Trim(), $"WireGuard VPN — {customerName}", htmlBody, attachments);
-            _ = audit.LogAsync(Audit.Email, "Config email sent",
+            await audit.LogRequiredAsync(Audit.Email, "Config email sent",
                 $"Client: {client.Hostname}", $"To: {recipientEmail.Trim()}");
             TempData["Success"] = $"Configuration sent to {recipientEmail}.";
         }

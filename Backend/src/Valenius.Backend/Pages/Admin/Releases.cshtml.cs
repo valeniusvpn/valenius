@@ -111,9 +111,7 @@ public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAudi
             UploadedAt   = DateTime.UtcNow,
             IsPublished  = true,
         });
-        await db.SaveChangesAsync();
-
-        _ = audit.LogAsync(Models.Audit.Release, "Release published",
+        await audit.SaveChangesWithAuditAsync(db, Models.Audit.Release, "Release published",
             $"{stream.Label} {channel} {Version.Trim()}", safeName);
         TempData["Success"] = $"{stream.Label} ({channel}) {Version.Trim()} published — {safeName} (SHA-256: {sha256[..16]}…).";
         return RedirectToPage();
@@ -128,9 +126,7 @@ public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAudi
         foreach (var r in await db.ClientReleases.Where(r => r.Os == rel.Os && r.Channel == rel.Channel && r.IsPublished).ToListAsync())
             r.IsPublished = false;
         rel.IsPublished = true;
-        await db.SaveChangesAsync();
-
-        _ = audit.LogAsync(Models.Audit.Release, "Release activated", $"{rel.Os} {rel.Channel} {rel.Version}", rel.FileName);
+        await audit.SaveChangesWithAuditAsync(db, Models.Audit.Release, "Release activated", $"{rel.Os} {rel.Channel} {rel.Version}", rel.FileName);
         TempData["Success"] = $"{rel.Os} ({rel.Channel}) {rel.Version} is now the published release.";
         return RedirectToPage();
     }
@@ -161,9 +157,7 @@ public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAudi
             UploadedAt   = DateTime.UtcNow,
             IsPublished  = true,
         });
-        await db.SaveChangesAsync();
-
-        _ = audit.LogAsync(Models.Audit.Release, "Beta promoted to stable", $"{beta.Os} {beta.Version}", beta.FileName);
+        await audit.SaveChangesWithAuditAsync(db, Models.Audit.Release, "Beta promoted to stable", $"{beta.Os} {beta.Version}", beta.FileName);
         TempData["Success"] = $"{beta.Os} {beta.Version} promoted to stable.";
         return RedirectToPage();
     }
@@ -185,7 +179,7 @@ public class ReleasesModel(ApplicationDbContext db, IConfiguration config, IAudi
             if (System.IO.File.Exists(filePath)) System.IO.File.Delete(filePath);
         }
 
-        _ = audit.LogAsync(Models.Audit.Release, "Release deleted", $"{rel.Os} {rel.Version}", rel.FileName);
+        await audit.LogAsync(Models.Audit.Release, "Release deleted", $"{rel.Os} {rel.Version}", rel.FileName);
         TempData["Success"] = $"{rel.Os} {rel.Version} deleted.";
         return RedirectToPage();
     }

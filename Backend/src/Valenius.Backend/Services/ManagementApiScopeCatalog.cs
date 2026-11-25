@@ -20,8 +20,8 @@ public static class ManagementApiScopeCatalog
             new("clients:actions", "Actions", "Connect, disconnect, kill tunnel, force update, request logs, repair, (de)provision"),
         ]),
         new("Configs", [
-            new("configs:read", "Read", "Download a client .conf / QR — contains the WireGuard private key", Dangerous: true),
-            new("configs:write", "Write", "Upload an external .conf, resend an archived profile, delete a profile"),
+            new("configs:read", "Read", "Download a client .conf / QR; email export also needs configs:write — contains the WireGuard private key", Dangerous: true),
+            new("configs:write", "Write", "Upload an external .conf, resend or delete a profile; email export also needs configs:read"),
         ]),
         new("Customers", [
             new("customers:read", "Read", "List/get customers, trusted networks, sharing + sidecar settings"),

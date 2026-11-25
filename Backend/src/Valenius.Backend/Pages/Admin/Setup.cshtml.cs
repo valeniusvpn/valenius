@@ -9,7 +9,9 @@ using Valenius.Backend.Services;
 namespace Valenius.Backend.Pages.Admin;
 
 [Authorize(Policy = "AdminOnly")]
-public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAuditService audit) : PageModel
+[ResponseCache(Location = ResponseCacheLocation.None, NoStore = true)]
+public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAuditService audit,
+    ISidecarEnrollmentTokens enrollmentTokens) : PageModel
 {
     public bool    IsProEdition      => sidecar is not NullSidecarService;
     public string  Step              { get; private set; } = "welcome";
@@ -17,7 +19,6 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
     public string? CarriedName       { get; private set; }
     public string? CarriedPrefix     { get; private set; }
     public string? CarriedNotes      { get; private set; }
-    public string? CarriedToken      { get; private set; }
     public string? Error             { get; private set; }
     public string? EnrollmentToken   { get; private set; }
 
@@ -27,7 +28,9 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
         {
             Step = "done";
             CreatedCustomerId = customerId;
-            EnrollmentToken   = TempData["SetupEnrollmentToken"] as string;
+            var token = TempData[$"SetupEnrollmentToken:{customerId}"] as string;
+            var customer = customerId is { } id ? await db.Customers.FindAsync(id) : null;
+            EnrollmentToken = customer is not null && enrollmentTokens.Matches(customer, token) ? token : null;
             return Page();
         }
 
@@ -41,7 +44,6 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
             CarriedName   = TempData["SetupName"]   as string;
             CarriedPrefix = TempData["SetupPrefix"] as string;
             CarriedNotes  = TempData["SetupNotes"]  as string;
-            CarriedToken  = TempData["SetupToken"]  as string;
             if (string.IsNullOrEmpty(CarriedName))
                 return RedirectToPage(); // TempData expired — restart
         }
@@ -70,22 +72,18 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
         {
             var customer = BuildCustomer(name, clientPrefix, notes, "External");
             db.Customers.Add(customer);
-            await db.SaveChangesAsync();
-            _ = audit.LogAsync(Audit.Customer, "Created via setup wizard", customer.Name);
+            await audit.SaveChangesWithAuditAsync(db, Audit.Customer, "Created via setup wizard", customer.Name);
             return RedirectToPage(new { step = "done", customerId = customer.Id });
         }
-
-        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24));
 
         TempData["SetupName"]   = name.Trim();
         TempData["SetupPrefix"] = clientPrefix;
         TempData["SetupNotes"]  = notes;
-        TempData["SetupToken"]  = token;
         return RedirectToPage(new { step = "wireguard" });
     }
 
     public async Task<IActionResult> OnPostWireGuardAsync(
-        string? setupName, string? setupPrefix, string? setupNotes, string? setupToken,
+        string? setupName, string? setupPrefix, string? setupNotes,
         string? sidecarUrl, int sidecarManagementPort, int sidecarHealthPort,
         string? serverEndpoint, string? vpnPrefix, string? dnsServer, string? allowedIPs)
     {
@@ -106,7 +104,6 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
             CarriedName   = setupName;
             CarriedPrefix = setupPrefix;
             CarriedNotes  = setupNotes;
-            CarriedToken  = setupToken;
             return Page();
         }
 
@@ -117,15 +114,8 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
             CarriedName   = setupName;
             CarriedPrefix = setupPrefix;
             CarriedNotes  = setupNotes;
-            CarriedToken  = setupToken;
             return Page();
         }
-
-        // Re-use the token generated at the customer step; fall back to a new one
-        // if TempData expired (e.g. user took too long).
-        var enrollmentToken = string.IsNullOrWhiteSpace(setupToken)
-            ? Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24))
-            : setupToken;
 
         var customer = BuildCustomer(setupName, setupPrefix, setupNotes, "Valenius");
         customer.SidecarUrl            = string.IsNullOrWhiteSpace(sidecarUrl)               ? null : StripToHost(sidecarUrl);
@@ -135,23 +125,21 @@ public class SetupModel(ApplicationDbContext db, ISidecarService sidecar, IAudit
         customer.VpnPrefix             = NormalizeVpnPrefix(vpnPrefix);
         customer.DnsServer             = string.IsNullOrWhiteSpace(dnsServer)                 ? null : dnsServer.Trim();
         customer.AllowedIPs            = string.IsNullOrWhiteSpace(allowedIPs)                ? null : allowedIPs.Trim();
-        customer.EnrollmentToken       = enrollmentToken;
+        // Generate only when setup completes. Never accept a caller-selected secret.
+        var enrollmentToken = enrollmentTokens.Issue(customer);
 
         db.Customers.Add(customer);
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Customer, "Created via setup wizard", customer.Name);
+        await audit.SaveChangesWithAuditAsync(db, Audit.Customer, "Created via setup wizard", customer.Name);
 
-        TempData["SetupEnrollmentToken"] = enrollmentToken;
+        TempData[$"SetupEnrollmentToken:{customer.Id}"] = enrollmentToken;
         return RedirectToPage(new { step = "done", customerId = customer.Id });
     }
 
-    public async Task<IActionResult> OnGetTestSidecarAsync(string? host, int port = 8443)
+    public IActionResult OnGetTestSidecar(string? host, int port = 8443)
     {
-        if (string.IsNullOrWhiteSpace(host))
-            return new JsonResult(new { ok = false, message = "No host provided." });
-        var url = $"https://{StripToHost(host)}:{(port > 0 ? port : 8443)}";
-        var (ok, msg, _) = await sidecar.TestConnectionAsync(url);
-        return new JsonResult(new { ok, message = msg });
+        // An open old wizard must not send mTLS without an enrolled customer identity.
+        return new JsonResult(new { ok = false,
+            message = "Finish setup and enroll the server, then use Test connection on the customer's Integrated Server page." });
     }
 
     private static Customer BuildCustomer(string name, string? prefix, string? notes, string serverMode)

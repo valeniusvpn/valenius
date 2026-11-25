@@ -201,6 +201,7 @@ public struct TunnelStatus: Codable, Sendable {
     /// Daemon-derived (the app can't read the root-owned appsettings.json).
     public var backendUrl: String?
     public var backendReachable: Bool?
+    public var offlineAccessExpiresAt: String?
     /// True when no backend server address is configured yet (fresh install/dev-run with an
     /// empty appsettings.json BackendUrl and no persisted backend.dat override) — the app
     /// prompts for the server address instead of showing the normal popover. Mirrors Windows
@@ -239,6 +240,7 @@ public struct TunnelStatus: Codable, Sendable {
         case mfaApproveNumber = "MfaApproveNumber"
         case backendUrl = "BackendUrl"
         case backendReachable = "BackendReachable"
+        case offlineAccessExpiresAt = "OfflineAccessExpiresAt"
         case backendUnconfigured = "BackendUnconfigured"
         case standaloneMode = "StandaloneMode"
     }

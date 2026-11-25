@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import socket
 import struct
 from pathlib import Path
@@ -26,6 +27,8 @@ from shared.protocol import read_message, write_message
 log = logging.getLogger(__name__)
 
 SOCKET_PATH = '/run/valenius.sock'
+MAX_CONNECTIONS = 32
+FRAME_TIMEOUT = 5.0
 
 
 class IpcServer:
@@ -33,6 +36,7 @@ class IpcServer:
         # daemon is the DaemonCore instance (avoids circular import)
         self._d = daemon
         self._server: Optional[asyncio.AbstractServer] = None
+        self._active = 0
 
     async def start(self) -> None:
         if Path(SOCKET_PATH).exists():
@@ -57,31 +61,42 @@ class IpcServer:
             pass
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._active >= MAX_CONNECTIONS:
+            writer.close()
+            return
+        self._active += 1
+        try:
+            await self._serve(reader, writer)
+        finally:
+            self._active -= 1
+            writer.close()
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         sock: socket.socket = writer.get_extra_info('socket')
         try:
-            username = _get_peer_username(sock)
+            username, uid = _get_peer_identity(sock)
         except Exception as e:
             log.warning("Could not identify peer: %s", e)
             writer.close()
             return
 
         try:
-            raw = await read_message(reader)
+            raw = await asyncio.wait_for(read_message(reader), FRAME_TIMEOUT)
             cmd = PipeCommand.from_json(raw)
             log.info("Command %s from %s", cmd.Command.name, username)
-            response = await self._dispatch(cmd, username)
+            response = await self._dispatch(cmd, username, privileged=uid == 0)
         except Exception as e:
             log.error("IPC error from %s: %s", username, e)
             response = PipeResponse(Success=False, Error=str(e))
 
         try:
-            await write_message(writer, response.to_json())
+            await asyncio.wait_for(write_message(writer, response.to_json()), FRAME_TIMEOUT)
         except Exception:
             pass
         finally:
             writer.close()
 
-    async def _dispatch(self, cmd: PipeCommand, username: str) -> PipeResponse:
+    async def _dispatch(self, cmd: PipeCommand, username: str, *, privileged: bool = False) -> PipeResponse:
         d = self._d
         # Any IPC traffic means the tray is open and talking to us -- this is the
         # Linux equivalent of the Windows service checking for TrayApp.exe in the
@@ -96,7 +111,7 @@ class IpcServer:
                 case CommandType.GetConfigInfo:
                     staged = d.configs.get_staged_profile_names()
                     d.configs.claim_staged_config(username)
-                    await d._reconnect_if_replaced(username, staged)
+                    await d._reconnect_if_replaced(username, staged, privileged=privileged)
                     profiles = d.configs.get_profiles(username)
                     info = ConfigInfo(
                         HasConfig=bool(profiles),
@@ -118,10 +133,10 @@ class IpcServer:
                     return _ok()
 
                 case CommandType.Connect:
-                    return await d.cmd_connect(username, cmd.ProfileName)
+                    return await d.cmd_connect(username, cmd.ProfileName, privileged=privileged)
 
                 case CommandType.Disconnect:
-                    return await d.cmd_disconnect(username, cmd.ProfileName)
+                    return await d.cmd_disconnect(username, cmd.ProfileName, privileged=privileged)
 
                 case CommandType.MfaEnrollConfirm:
                     if not cmd.MfaCode:
@@ -147,11 +162,11 @@ class IpcServer:
 
                 case CommandType.SetBackendUrl:
                     # First-run: the user provides the backend DNS (the daemon prepends https://).
-                    return await d.cmd_set_backend_url(cmd.BackendDns)
+                    return await d.cmd_set_backend_url(cmd.BackendDns, privileged=privileged)
 
                 case CommandType.SetStandaloneMode:
                     # First-run: the user chose "Use standalone" instead of a backend URL.
-                    return await d.cmd_set_standalone_mode()
+                    return await d.cmd_set_standalone_mode(privileged=privileged)
 
                 case CommandType.SyncStatus:
                     try:
@@ -175,23 +190,7 @@ class IpcServer:
                     return _ok()
 
                 case CommandType.DeleteProfile:
-                    if not d.configs.is_valid_profile_name(cmd.ProfileName):
-                        return _fail("Invalid profile name.")
-                    if d.configs.is_managed(username, cmd.ProfileName):
-                        return _fail(f"'{cmd.ProfileName}' is managed by the administrator.")
-                    if d.state.is_connected(cmd.ProfileName):
-                        ok, _ = await d.wg.disconnect(cmd.ProfileName)
-                        if ok:
-                            d.state.set_disconnected(cmd.ProfileName)
-                            asyncio.create_task(
-                                d.backend.log_event(
-                                    d.state.get_client_id(), 'Disconnect',
-                                    username, cmd.ProfileName,
-                                )
-                            )
-                    if not d.configs.delete_user_profile(username, cmd.ProfileName):
-                        return _fail(f"Profile '{cmd.ProfileName}' not found.")
-                    return _ok()
+                    return await d.cmd_delete_profile(username, cmd.ProfileName, privileged=privileged)
 
                 case _:
                     return _fail(f"Unknown command: {cmd.Command}")
@@ -205,11 +204,14 @@ class IpcServer:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _get_peer_username(sock: socket.socket) -> str:
+def _get_peer_identity(sock: socket.socket) -> tuple[str, int]:
     # struct ucred { pid_t pid; uid_t uid; gid_t gid; }  (3 × uint32 on Linux)
     raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     _pid, uid, _gid = struct.unpack('3I', raw)
-    return pwd.getpwuid(uid).pw_name
+    username = pwd.getpwuid(uid).pw_name
+    if username in ('.', '..') or not re.fullmatch(r'[A-Za-z0-9_.-]+', username):
+        raise ValueError('OS account name cannot be represented by the per-user profile store')
+    return username, uid
 
 
 def _ok() -> PipeResponse:

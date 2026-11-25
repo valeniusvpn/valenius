@@ -24,6 +24,7 @@ final class IpcServer {
     private var listenFd: Int32 = -1
     private var acceptThread: Thread?
     private var running = false
+    private let connections = DispatchSemaphore(value: 32)
 
     init(core: DaemonCore) {
         self.core = core
@@ -87,44 +88,48 @@ final class IpcServer {
                 if running { logError("accept() failed: \(errno)") }
                 continue
             }
-            let thread = Thread { [weak self] in self?.handle(clientFd: clientFd) }
+            guard connections.wait(timeout: .now()) == .success else {
+                close(clientFd)
+                continue
+            }
+            let thread = Thread { self.handle(clientFd: clientFd) }
             thread.name = "valeniusd.ipc.conn"
             thread.start()
         }
     }
 
     private func handle(clientFd: Int32) {
-        defer { close(clientFd) }
+        defer { close(clientFd); connections.signal() }
 
-        guard let username = peerUsername(fd: clientFd) else {
+        guard let peer = peerIdentity(fd: clientFd) else {
             logError("Could not identify IPC peer")
             return
         }
+        let username = peer.username
 
         let response: PipeResponse
         do {
-            let raw = try IpcProtocol.readMessage(fd: clientFd)
+            let raw = try IpcProtocol.readMessage(fd: clientFd, timeout: 5)
             let cmd = try JSONDecoder().decode(PipeCommand.self, from: raw)
             log("Command \(cmd.command) from \(username)")
-            response = runBlocking { await self.core.dispatch(cmd, username: username) }
+            response = runBlocking { await self.core.dispatch(cmd, username: username, privileged: peer.privileged) }
         } catch {
             logError("IPC error from \(username): \(error)")
             response = .fail("\(error)")
         }
 
         guard let data = try? JSONEncoder().encode(response) else { return }
-        try? IpcProtocol.writeMessage(fd: clientFd, data: data)
+        try? IpcProtocol.writeMessage(fd: clientFd, data: data, timeout: 5)
     }
 
     /// getsockopt(LOCAL_PEERCRED) -> uid -> username. macOS's equivalent of Linux's
     /// SO_PEERCRED / struct ucred.
-    private func peerUsername(fd: Int32) -> String? {
+    private func peerIdentity(fd: Int32) -> LocalPeerIdentity? {
         var cred = xucred()
         var len = socklen_t(MemoryLayout<xucred>.size)
         let result = getsockopt(fd, 0 /* SOL_LOCAL */, LOCAL_PEERCRED, &cred, &len)
         guard result == 0 else { return nil }
-        guard let pw = getpwuid(cred.cr_uid) else { return nil }
-        return String(cString: pw.pointee.pw_name)
+        return LocalPeerIdentity.lookup(uid: cred.cr_uid)
     }
 }
 

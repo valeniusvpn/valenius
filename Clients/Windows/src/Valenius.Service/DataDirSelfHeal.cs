@@ -17,10 +17,9 @@ namespace Valenius.Service;
 /// The DACL-only repair works because the installer sets SYSTEM as the OWNER of the tree, and
 /// the owner retains READ_CONTROL + WRITE_DAC even when the DACL itself denies SYSTEM — so the
 /// service can rewrite the DACL. It re-establishes SYSTEM + Administrators FullControl on the
-/// folder (kept protected, so children never inherit <c>Users:(RX)</c> from
-/// <c>C:\ProgramData</c>) and re-enables inheritance on every child so each picks up that DACL.
-/// It never sets a protected DACL on a child (that is the trap that caused the breakage in the
-/// first place).
+/// folder and re-enables inheritance on ordinary children. Credentials are the exception:
+/// they receive an explicit, protected SYSTEM/Administrators file DACL, never the folder's
+/// inherited Users read access. Each credential ACE applies to the file itself.
 ///
 /// That assumption breaks down when an individual FILE's OWNER (not just its DACL) drifts away
 /// from SYSTEM — e.g. an AV product quarantining and restoring a file, a backup/sync agent, or a
@@ -60,6 +59,13 @@ internal static class DataDirSelfHeal
     /// meaningful additional risk beyond what SYSTEM can already do.
     /// </param>
     public static Result EnsureAccessible(string dataDir, ILogger logger, bool allowOwnershipTakeover = false)
+    {
+        var result = Result.Failed;
+        ServiceFileAccess.Run(() => result = EnsureAccessibleCore(dataDir, logger, allowOwnershipTakeover));
+        return result;
+    }
+
+    private static Result EnsureAccessibleCore(string dataDir, ILogger logger, bool allowOwnershipTakeover)
     {
         bool needHeal;
         try
@@ -141,10 +147,9 @@ internal static class DataDirSelfHeal
 
     private static void LogAndRecordFailure(string dataDir, ILogger logger, Exception ex)
     {
-        FailureDetail = $"ACL self-heal failed for {dataDir}: {ex.Message}. Repair from an elevated " +
-            "prompt (takeown seizes ownership first), then restart the Valenius service: " +
-            $"takeown /f \"{dataDir}\" /r /d y && icacls \"{dataDir}\" /reset /T /C && " +
-            $"icacls \"{dataDir}\" /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C";
+        FailureDetail = $"ACL self-heal failed for {dataDir}: {ex.Message}. Re-run the signed Valenius " +
+            "installer as administrator to repair permissions while preserving private credential ACLs. " +
+            "Do not delete device credentials or registration state, or apply a blanket recursive ACL reset.";
         logger.LogError(ex, "ACL self-heal FAILED for {Dir}. {RepairCommand}", dataDir, FailureDetail);
     }
 
@@ -155,7 +160,7 @@ internal static class DataDirSelfHeal
         {
             try
             {
-                using var _ = File.Open(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var _ = File.Open(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             }
             catch (UnauthorizedAccessException)
             {
@@ -205,7 +210,7 @@ internal static class DataDirSelfHeal
             if (!File.Exists(p)) continue; // absent (or fully denied -> the read probe covers it)
             try
             {
-                using var _ = File.Open(p, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+                using var _ = File.Open(p, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
             }
             catch (UnauthorizedAccessException)
             {
@@ -254,6 +259,12 @@ internal static class DataDirSelfHeal
                 }
                 else
                 {
+                    if (ServiceFileAccess.IsCredentialFile(path))
+                    {
+                        ServiceFileAccess.ProtectCredential(path);
+                        healed++;
+                        continue;
+                    }
                     // Clear ReadOnly first — nothing under this tree should ever carry it, and
                     // AV/security software is known to leave files here read-only (see
                     // StateFileWriter), which File.Open/File.Delete reject with the identical

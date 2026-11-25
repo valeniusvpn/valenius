@@ -26,6 +26,17 @@
     <p class="page-description density-comfort-only">Trace administrative actions, authentication events and system changes.</p>
 </div></header>
 
+@if (Model.WriteFailures > 0)
+{
+    <div class="alert alert-danger" role="alert">
+        <strong>Audit writes have failed.</strong>
+        @Model.WriteFailures failure(s) on this backend process since startup; last failure
+        @Model.LastWriteFailureUtc?.ToString("yyyy-MM-dd HH:mm:ss 'UTC'").
+        Records may be missing. Review server logs and database availability/permissions.
+        Successful later writes do not recover missing records. Other replicas have their own counters.
+    </div>
+}
+
 @if (TempData["Success"] is string ok)
 {
     <div class="alert alert-success alert-dismissible fade show py-2" role="alert">

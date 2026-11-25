@@ -1,306 +1,270 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace Valenius.Service;
 
 public class RegistrationManager
 {
-    private static readonly string StatePath = Path.Combine(
+    private static readonly string DefaultStatePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "Valenius", "registration.json");
+    private static readonly byte[] PolicyEntropy = "Valenius.ConnectionPolicy.v1"u8.ToArray();
 
-    private static readonly TimeSpan GracePeriod = TimeSpan.FromDays(1);
+    private readonly object _lock = new();
+    private readonly string _statePath;
+    private readonly TimeSpan _offlineAccessPeriod;
+    private readonly TimeProvider _time;
+    private readonly ILogger<RegistrationManager> _logger;
+    private readonly Action<string, string> _writeState;
+    private RegistrationState? _state;
+    private CachedConnectionPolicy _policy = new();
+    private bool _readFailed;
+    private bool _policyInvalid;
+    private bool _writeFailed;
+    private bool? _backendReachable;
+    private string? _lastKnownUsername;
+    // Enrollment secrets and push challenges are intentionally never persisted.
+    private string? _mfaEnrollmentUri;
+    private int? _mfaApproveNumber;
 
-    private readonly SemaphoreSlim _lock = new(1, 1);
+    public RegistrationManager(IConfiguration config, ILogger<RegistrationManager> logger, TimeProvider time)
+        : this(config, logger, time, DefaultStatePath) { }
 
-    // In-memory only — refreshed on every successful heartbeat.
-    private volatile string? _serverProfileName;
-    public string? GetServerProfileName() => _serverProfileName;
-    public void SetServerProfileName(string? name) => _serverProfileName = name;
+    internal RegistrationManager(IConfiguration config, ILogger<RegistrationManager> logger,
+        TimeProvider time, string statePath, Action<string, string>? writeState = null)
+    {
+        var days = config.GetValue<int?>("Valenius:OfflineAccessDays") ?? 7;
+        if (days is < 1 or > 365)
+            throw new InvalidOperationException("Valenius:OfflineAccessDays must be between 1 and 365.");
+        _offlineAccessPeriod = TimeSpan.FromDays(days);
+        _statePath = statePath;
+        _time = time;
+        _logger = logger;
+        _writeState = writeState ?? StateFileWriter.WriteAllTextAtomic;
+    }
 
-    // Last real interactive Windows username seen on any pipe call (PipeServer refreshes this on
-    // every command, including the tray's 5s Status poll, so it's rarely more than a few seconds
-    // stale). Used so admin/system-triggered connect events (PendingConnect, AutoConnect, etc.) log
-    // who was actually using the machine instead of the internal trigger-source label — that label
-    // alone was showing up as "Last user" on the admin client list, which isn't useful there.
-    private volatile string? _lastKnownUsername;
-    public string? GetLastKnownUsername() => _lastKnownUsername;
+    private CachedConnectionPolicy Policy
+    {
+        get { lock (_lock) { Load(); return _policy; } }
+    }
+
+    public string? GetServerProfileName() => Policy.ServerProfileName;
+    public string? GetServerHealthUrl() => Policy.ServerHealthUrl;
+    public string? GetServerVpnIp() => Policy.ServerVpnIp;
+    public bool GetSkipConnectivityCheck() => Policy.SkipConnectivityCheck;
+    public bool GetDeviceTunnelEnabled() => Policy.DeviceTunnelEnabled;
+    public string GetUpdateChannel() => Policy.UpdateChannel;
+    public string? GetMfaAuthorizeUrl() => Policy.MfaAuthorizeUrl;
+    public DateTime? GetMfaSessionExpiresAt() => Policy.MfaSessionExpiresAt;
+    public bool GetMfaEnrollmentOpen() => Policy.MfaEnrollmentOpen;
+    public string? GetMfaEnrollmentUri() { lock (_lock) return _mfaEnrollmentUri; }
+    public int? GetMfaApproveNumber() { lock (_lock) return _mfaApproveNumber; }
+
+    public bool GetMfaRequired()
+    {
+        var policy = Policy;
+        // An offline restart must not revive an expired MFA session. The sidecar still
+        // independently enforces its signed grant; offline activation never renews one.
+        return policy.MfaRequired || policy.MfaSessionExpiresAt is { } expiresAt && expiresAt <= UtcNow;
+    }
+
+    public string? GetLastKnownUsername() { lock (_lock) return _lastKnownUsername; }
     public void SetLastKnownUsername(string? username)
     {
-        if (!string.IsNullOrEmpty(username)) _lastKnownUsername = username;
+        if (!string.IsNullOrEmpty(username))
+            lock (_lock) _lastKnownUsername = username;
     }
 
-    // Health probe URLs for connectivity verification (spec §3).
-    // ServerVpnIp is kept in memory only and never written to disk — it is
-    // internal network topology that should not be persisted locally.
-    private volatile string? _serverHealthUrl;
-    private volatile string? _serverVpnIp;
-    public string? GetServerHealthUrl() => _serverHealthUrl;
-    public string? GetServerVpnIp()     => _serverVpnIp;
-    public void SetServerHealthUrl(string? url) => _serverHealthUrl = url;
-    public void SetServerVpnIp(string? ip)      => _serverVpnIp     = ip;
-
-    // Per-profile physical LAN CIDR(s) behind that profile's own sidecar, self-reported via
-    // /info and relayed by the backend. In-memory only, refreshed on every heartbeat. Used by
-    // the pre-connect LAN-conflict check to detect the remote network for full-tunnel profiles.
-    // MUST stay keyed by profile name — the native server profile and each foreign profile each
-    // report their OWN source customer's LAN; applying one profile's CIDRs to a different
-    // profile's connect would misattribute a conflict (a real bug found in testing).
-    private volatile Dictionary<string, string[]> _remoteLanCidrsByProfile =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    public void SetRemoteLanCidrs(IEnumerable<(string ProfileName, string[] Cidrs)>? entries)
-    {
-        var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (name, cidrs) in entries ?? [])
-            if (!string.IsNullOrEmpty(name) && cidrs.Length > 0)
-                map[name] = cidrs;
-        _remoteLanCidrsByProfile = map;
-    }
-
-    /// <summary>The remote LAN CIDR(s) reported for <paramref name="profileName"/>'s own sidecar,
-    /// or an empty array when none are known for that specific profile.</summary>
     public string[] GetRemoteLanCidrs(string profileName) =>
-        _remoteLanCidrsByProfile.TryGetValue(profileName, out var cidrs) ? cidrs : [];
+        Policy.RemoteLanCidrsByProfile.FirstOrDefault(p =>
+            string.Equals(p.ProfileName, profileName, StringComparison.OrdinalIgnoreCase))?.Cidrs ?? [];
 
-    private volatile bool _skipConnectivityCheck;
-    public bool GetSkipConnectivityCheck()       => _skipConnectivityCheck;
-    public void SetSkipConnectivityCheck(bool v) => _skipConnectivityCheck = v;
-
-    /// <summary>Whether to connect <see cref="GetServerProfileName"/> automatically at boot, before
-    /// any user logs on. Refreshed on every heartbeat like the other fields here — see
-    /// AutoConnectService's "DeviceTunnel" target.</summary>
-    private volatile bool _deviceTunnelEnabled;
-    public bool GetDeviceTunnelEnabled()       => _deviceTunnelEnabled;
-    public void SetDeviceTunnelEnabled(bool v) => _deviceTunnelEnabled = v;
-
-    // Per-profile gateway-probe targets (sidecar VPNs whose transit network is globally unique),
-    // refreshed on every heartbeat. A profile present here uses the HTTP /health gateway check;
-    // a profile absent here (plain uploads, OSS) uses the handshake check only.
-    private volatile Dictionary<string, (string Ip, int Port)> _gatewayProfiles =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    public void SetGatewayProfiles(IEnumerable<(string Name, string Ip, int Port)> profiles)
-    {
-        var map = new Dictionary<string, (string, int)>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (name, ip, port) in profiles)
-            if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(ip))
-                map[name] = (ip, port);
-        _gatewayProfiles = map;
-    }
-
-    /// <summary>
-    /// The gateway probe target (IP + health port) for <paramref name="profileName"/>, or null
-    /// when the profile should be handshake-verified. Falls back to the native ServerVpnIp for
-    /// the server profile, so a new client still verifies natively against an older backend that
-    /// doesn't send GatewayProfiles.
-    /// </summary>
     public (string Ip, int Port)? GetGatewayProbe(string profileName)
     {
-        if (_gatewayProfiles.TryGetValue(profileName, out var entry))
-            return entry;
-        if (!string.IsNullOrEmpty(_serverVpnIp) &&
-            string.Equals(profileName, _serverProfileName, StringComparison.OrdinalIgnoreCase))
-        {
-            var port = 8443;
-            if (!string.IsNullOrEmpty(_serverHealthUrl) && Uri.TryCreate(_serverHealthUrl, UriKind.Absolute, out var u))
-                port = u.Port;
-            return (_serverVpnIp!, port);
-        }
-        return null;
+        var policy = Policy;
+        var target = policy.GatewayProfiles.FirstOrDefault(p =>
+            string.Equals(p.ProfileName, profileName, StringComparison.OrdinalIgnoreCase));
+        if (target is not null) return (target.GatewayIp, target.HealthPort);
+        if (string.IsNullOrEmpty(policy.ServerVpnIp) ||
+            !string.Equals(profileName, policy.ServerProfileName, StringComparison.OrdinalIgnoreCase))
+            return null;
+        var port = Uri.TryCreate(policy.ServerHealthUrl, UriKind.Absolute, out var url) ? url.Port : 8443;
+        return (policy.ServerVpnIp, port);
     }
 
-    // Per-profile UDP fallback port + trigger window, refreshed on every heartbeat. Present only
-    // when the serving sidecar has confirmed the redirect is actually active — see
-    // docs/design/port-443-fallback.md §4.4 — so a profile absent here means "no fallback offered",
-    // never "fallback offered but unconfirmed".
-    private volatile Dictionary<string, (int Port, int TriggerSeconds)> _fallbackPorts =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    public void SetFallbackPorts(IEnumerable<(string ProfileName, int Port, int TriggerSeconds)> entries)
+    public (int Port, int TriggerSeconds)? GetFallbackConfig(string profileName)
     {
-        var map = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (name, port, triggerSeconds) in entries)
-            if (!string.IsNullOrEmpty(name) && port > 0)
-                map[name] = (port, triggerSeconds > 0 ? triggerSeconds : 20);
-        _fallbackPorts = map;
+        var target = Policy.FallbackEndpoints.FirstOrDefault(p =>
+            string.Equals(p.ProfileName, profileName, StringComparison.OrdinalIgnoreCase));
+        return target is { Port: > 0 } ? (target.Port, target.TriggerSeconds > 0 ? target.TriggerSeconds : 20) : null;
     }
 
-    /// <summary>The UDP fallback port + trigger window (seconds of no successful verification
-    /// before trying it) advertised for <paramref name="profileName"/>, or null when none is
-    /// offered (no customer opt-in, or opted-in but not confirmed active).</summary>
-    public (int Port, int TriggerSeconds)? GetFallbackConfig(string profileName) =>
-        _fallbackPorts.TryGetValue(profileName, out var entry) ? entry : null;
+    public bool? GetCachedIsActive() { lock (_lock) return Load()?.IsActive; }
+    public Guid GetCachedClientId() { lock (_lock) return Load()?.ClientId ?? Guid.Empty; }
+    public bool GetStandaloneModeChosen() { lock (_lock) return Load()?.StandaloneModeChosen ?? false; }
+    public bool GetProfilesTransferred() { lock (_lock) return Load()?.ProfilesTransferredToBackend ?? false; }
+    public bool? GetBackendReachable() { lock (_lock) return _backendReachable; }
+    public void SetBackendReachable(bool reachable) { lock (_lock) _backendReachable = reachable; }
 
-    // MFA session gating state, refreshed on every heartbeat/poll (in-memory only).
-    private volatile bool _mfaRequired;
-    private volatile string? _mfaAuthorizeUrl;
-    private DateTime? _mfaSessionExpiresAt;
-    private volatile bool _mfaEnrollmentOpen;
-    private volatile string? _mfaEnrollmentUri;
-    private int? _mfaApproveNumber;
-    public bool      GetMfaRequired()         => _mfaRequired;
-    public string?   GetMfaAuthorizeUrl()     => _mfaAuthorizeUrl;
-    public DateTime? GetMfaSessionExpiresAt() => _mfaSessionExpiresAt;
-    public bool      GetMfaEnrollmentOpen()   => _mfaEnrollmentOpen;
-    public string?   GetMfaEnrollmentUri()    => _mfaEnrollmentUri;
-    public int?      GetMfaApproveNumber()    => _mfaApproveNumber;
-    public void SetMfaState(bool required, string? authorizeUrl, DateTime? expiresAt, bool enrollmentOpen, string? enrollmentUri, int? approveNumber)
+    public DateTime? GetOfflineAccessExpiresAt()
     {
-        _mfaRequired         = required;
-        _mfaAuthorizeUrl     = authorizeUrl;
-        _mfaSessionExpiresAt = expiresAt;
-        _mfaEnrollmentOpen   = enrollmentOpen;
-        _mfaEnrollmentUri    = enrollmentUri;
-        _mfaApproveNumber    = approveNumber;
-    }
-
-    // Auto-update channel ("stable"|"beta"), refreshed from the heartbeat. The UpdateChecker
-    // polls the matching release stream (…/api/version?channel=<this>).
-    private volatile string _updateChannel = "stable";
-    public string GetUpdateChannel() => _updateChannel;
-    public void SetUpdateChannel(string? channel) =>
-        _updateChannel = string.Equals(channel, "beta", StringComparison.OrdinalIgnoreCase) ? "beta" : "stable";
-
-    public bool? GetCachedIsActive()
-    {
-        var state = Load();
-        return state?.IsActive;
-    }
-
-    public Guid GetCachedClientId()
-    {
-        var state = Load();
-        return state?.ClientId ?? Guid.Empty;
-    }
-
-    public async Task<bool> IsAllowedToConnectAsync()
-    {
-        await _lock.WaitAsync();
-        try
+        lock (_lock)
         {
             var state = Load();
-            if (state is null) return false;
-            if (!state.IsActive) return false;
-            return DateTime.UtcNow - state.LastCheckedUtc <= GracePeriod;
-        }
-        finally
-        {
-            _lock.Release();
+            return _policyInvalid ? null : OfflineAccessExpiresAt(state);
         }
     }
 
-    public async Task<Guid> GetOrCreateClientIdAsync()
+    public Task<bool> IsAllowedToConnectAsync()
     {
-        await _lock.WaitAsync();
-        try
+        lock (_lock)
         {
-            var (state, denied) = LoadDetailed();
-            if (denied)
-                // registration.json EXISTS but is unreadable (e.g. a broken data-dir ACL).
-                // Do NOT mint a new identity here — that would re-register this machine as a
-                // brand-new "pending" client and orphan the real, already-activated one. Surface
-                // the error so the heartbeat fails and retries after the ACL self-heal, preserving
-                // the persistent ClientId.
-                throw new UnauthorizedAccessException(
-                    $"registration.json is not readable ({StatePath}); refusing to generate a new ClientId.");
+            var state = Load();
+            var expiry = OfflineAccessExpiresAt(state);
+            return Task.FromResult(!_policyInvalid && expiry is not null &&
+                // Reject large backwards clock changes instead of extending a cached lease.
+                state!.LastCheckedUtc <= UtcNow.AddMinutes(5) && UtcNow < expiry);
+        }
+    }
 
-            state ??= new RegistrationState();
-            if (state.ClientId == Guid.Empty)
+    public string GetConnectionDeniedReason()
+    {
+        lock (_lock)
+        {
+            var state = Load();
+            if (_readFailed || _policyInvalid || state is null || state.ClientId == Guid.Empty)
+                return "Cached VPN authorization is unavailable. Contact your administrator to restore access.";
+            if (!state.IsActive)
+                return "This device is not activated. Contact your administrator.";
+            if (OfflineAccessExpiresAt(state) is { } expiry && UtcNow >= expiry)
+                return $"Cached VPN access expired on {expiry.ToLocalTime():g}. Reconnect to the management server to refresh access.";
+            return "Cached VPN authorization could not be validated. Reconnect to the management server to refresh access.";
+        }
+    }
+
+    public Task<Guid> GetOrCreateClientIdAsync()
+    {
+        lock (_lock)
+        {
+            var state = Load();
+            if (_readFailed || state is { ClientId: var id } && id == Guid.Empty)
+                throw new InvalidOperationException("Registration state is unreadable or invalid; refusing to replace the existing client identity.");
+            if (state is null)
             {
-                state.ClientId = Guid.NewGuid();
+                state = new RegistrationState { ClientId = Guid.NewGuid() };
                 Save(state);
             }
-            return state.ClientId;
-        }
-        finally
-        {
-            _lock.Release();
+            return Task.FromResult(state.ClientId);
         }
     }
 
-    public async Task UpdateAsync(bool isActive)
+    internal Task UpdateAsync(ClientStatusResponse status)
     {
-        await _lock.WaitAsync();
+        lock (_lock)
+        {
+            var state = Load() ?? throw new InvalidOperationException("A client identity is required before applying backend authorization.");
+            _policy = CachedConnectionPolicy.FromStatus(status);
+            _policyInvalid = false;
+            _mfaEnrollmentUri = status.MfaEnrollmentUri;
+            _mfaApproveNumber = status.MfaApproveNumber;
+            _backendReachable = true;
+            // Update memory BEFORE any disk operation. In particular, a received revocation
+            // must take effect even if an AV lock or broken ACL prevents persistence.
+            _state = state with { IsActive = status.IsActive, LastCheckedUtc = UtcNow };
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(_policy, ServiceJsonContext.Default.CachedConnectionPolicy);
+            var protectedPolicy = Convert.ToBase64String(ProtectedData.Protect(bytes, PolicyEntropy, DataProtectionScope.LocalMachine));
+            Save(_state with { ProtectedConnectionPolicy = protectedPolicy });
+            return Task.CompletedTask;
+        }
+    }
+
+    public Task SetStandaloneModeAsync(bool value)
+    {
+        lock (_lock)
+        {
+            Save(RequireState() with { StandaloneModeChosen = value });
+            return Task.CompletedTask;
+        }
+    }
+
+    public Task SetProfilesTransferredAsync(bool value)
+    {
+        lock (_lock)
+        {
+            Save(RequireState() with { ProfilesTransferredToBackend = value });
+            return Task.CompletedTask;
+        }
+    }
+
+    private DateTime UtcNow => _time.GetUtcNow().UtcDateTime;
+    private RegistrationState RequireState()
+    {
+        var state = Load();
+        if (_readFailed)
+            throw new InvalidOperationException("Registration state is unreadable; refusing to replace the existing client identity.");
+        return state ?? new RegistrationState { ClientId = Guid.NewGuid() };
+    }
+
+    private DateTime? OfflineAccessExpiresAt(RegistrationState? state) =>
+        state is { IsActive: true } && state.ClientId != Guid.Empty && state.LastCheckedUtc != default &&
+        state.LastCheckedUtc <= DateTime.MaxValue - _offlineAccessPeriod
+            ? state.LastCheckedUtc + _offlineAccessPeriod : null;
+
+    // Caller holds _lock. Only read disk until a complete state has loaded; subsequent
+    // decisions use the latest backend response in memory even when persistence fails.
+    private RegistrationState? Load()
+    {
+        if (_state is not null) return _state;
         try
         {
-            var state = Load() ?? new RegistrationState();
-            state.IsActive = isActive;
-            state.LastCheckedUtc = DateTime.UtcNow;
-            Save(state);
+            using var stream = new FileStream(_statePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            _state = JsonSerializer.Deserialize(stream, ServiceJsonContext.Default.RegistrationState)
+                ?? throw new JsonException("Empty registration state.");
+            _readFailed = false;
+            if (_state.ProtectedConnectionPolicy is { } protectedPolicy)
+            {
+                try
+                {
+                    var bytes = ProtectedData.Unprotect(Convert.FromBase64String(protectedPolicy), PolicyEntropy, DataProtectionScope.LocalMachine);
+                    _policy = JsonSerializer.Deserialize(bytes, ServiceJsonContext.Default.CachedConnectionPolicy)
+                        ?? throw new JsonException("Empty connection policy.");
+                    if (_policy.Version != 1) throw new JsonException("Unsupported connection policy version.");
+                }
+                catch (Exception ex) when (ex is CryptographicException or FormatException or JsonException)
+                {
+                    _policyInvalid = true;
+                    _policy = new();
+                    _logger.LogWarning(ex, "Cached connection policy is unreadable; a successful backend check is required.");
+                }
+            }
+            return _state;
         }
-        finally
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or JsonException)
         {
-            _lock.Release();
+            if (!_readFailed)
+                _logger.LogWarning(ex, "Registration cache is unreadable; preserving the existing client identity.");
+            _readFailed = true;
+            return null;
         }
     }
 
-    /// <summary>True once the user chose "Use standalone" in the first-run setup dialog.</summary>
-    public bool GetStandaloneModeChosen() => Load()?.StandaloneModeChosen ?? false;
-
-    public async Task SetStandaloneModeAsync(bool value)
+    private void Save(RegistrationState state)
     {
-        await _lock.WaitAsync();
+        _state = state;
         try
         {
-            var state = Load() ?? new RegistrationState();
-            state.StandaloneModeChosen = value;
-            Save(state);
+            _writeState(_statePath, JsonSerializer.Serialize(state, ServiceJsonContext.Default.RegistrationState));
+            if (_writeFailed) _logger.LogInformation("Registration cache persistence recovered.");
+            _writeFailed = false;
         }
-        finally
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
-            _lock.Release();
+            if (!_writeFailed)
+                _logger.LogWarning(ex, "Could not persist registration cache. Current authorization remains in memory; repair storage before restarting the service.");
+            _writeFailed = true;
+            throw;
         }
-    }
-
-    /// <summary>True once this (previously standalone) client's local profiles have all been
-    /// successfully archived to the backend after activation. See
-    /// <see cref="ClientRegistrationService.TransferLocalProfilesAsync"/>.</summary>
-    public bool GetProfilesTransferred() => Load()?.ProfilesTransferredToBackend ?? false;
-
-    public async Task SetProfilesTransferredAsync(bool value)
-    {
-        await _lock.WaitAsync();
-        try
-        {
-            var state = Load() ?? new RegistrationState();
-            state.ProfilesTransferredToBackend = value;
-            Save(state);
-        }
-        finally
-        {
-            _lock.Release();
-        }
-    }
-
-    private static RegistrationState? Load() => LoadDetailed().State;
-
-    /// <summary>
-    /// Loads the persisted state. <c>Denied</c> is true when the file EXISTS but could not be
-    /// read due to permissions — the caller must distinguish that from "absent" (fresh install)
-    /// so it never mints a new identity over an existing-but-locked one. Note <c>File.Exists</c>
-    /// returns false on access-denied, so we detect it from the open exception, not Exists.
-    /// </summary>
-    private static (RegistrationState? State, bool Denied) LoadDetailed()
-    {
-        try
-        {
-            using var fs = new FileStream(StatePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new StreamReader(fs);
-            var json = reader.ReadToEnd();
-            return (JsonSerializer.Deserialize(json, ServiceJsonContext.Default.RegistrationState), false);
-        }
-        catch (FileNotFoundException)       { return (null, false); } // genuinely absent -> fresh
-        catch (DirectoryNotFoundException)  { return (null, false); }
-        catch (UnauthorizedAccessException) { return (null, true);  } // exists but denied -> do NOT mint
-        catch                               { return (null, false); } // corrupt/other -> treat as fresh
-    }
-
-    private static void Save(RegistrationState state)
-    {
-        // No per-file ACLs: the file inherits SYSTEM FullControl from C:\ProgramData\Valenius
-        // (set once by install-service.ps1). StateFileWriter retries transient AV-scanner
-        // write collisions so they don't surface as spurious persist failures.
-        var json = JsonSerializer.Serialize(state, ServiceJsonContext.Default.RegistrationState);
-        StateFileWriter.WriteAllText(StatePath, json);
     }
 }

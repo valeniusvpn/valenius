@@ -40,7 +40,7 @@ async def _main() -> None:
     configs_mod.init_temp_dir()
     configs_mod.migrate_plain_configs()
 
-    state = DaemonState()
+    state = DaemonState(offline_access_days=settings.offline_access_days)
     reg_mod.load(state)
 
     loop = asyncio.get_running_loop()

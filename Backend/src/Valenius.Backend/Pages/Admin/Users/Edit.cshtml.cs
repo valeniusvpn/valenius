@@ -9,12 +9,13 @@ using Valenius.Backend.Services;
 
 namespace Valenius.Backend.Pages.Admin.Users;
 
+[ResponseCache(Location = ResponseCacheLocation.None, NoStore = true)]
 public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
 {
     public AppUser        AppUser      { get; private set; } = null!;
     public List<Customer> AllCustomers { get; private set; } = [];
 
-    /// <summary>Pending (not yet saved) TOTP secret shown after "Generate" click — only present once.</summary>
+    /// <summary>Pending disabled factor, shown after "Generate" through protected TempData.</summary>
     public string? PendingTotpSecret  { get; private set; }
     /// <summary>Base64 PNG of the QR code for the pending secret.</summary>
     public string? TotpQrBase64       { get; private set; }
@@ -27,7 +28,8 @@ public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
         AllCustomers = await db.Customers.OrderBy(c => c.Name).ToListAsync();
 
         // Restore pending secret after "Generate" redirect (TempData is one-shot).
-        if (TempData["PendingTotpSecret"] is string secret && !string.IsNullOrEmpty(user.Email))
+        if (TempData[$"PendingTotpSecret:{id}"] is string secret && !user.TotpEnabled
+            && secret == user.TotpSecret && !string.IsNullOrEmpty(user.Email))
         {
             PendingTotpSecret = secret;
             TotpQrBase64      = BuildQrBase64(secret, user.Email, user.DisplayName);
@@ -47,8 +49,7 @@ public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
             user.Role = role;
         user.CustomerId = customerId;
 
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.User, "Role updated", $"User: {user.DisplayName}", $"Role: {user.Role}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.User, "Role updated", $"User: {user.DisplayName}", $"Role: {user.Role}");
         TempData["Success"] = "User saved.";
         return RedirectToPage(new { id });
     }
@@ -109,8 +110,7 @@ public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
         }
 
         user.PasswordHash = PasswordHasher.Hash(newPassword);
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.User, "Password changed", $"User: {user.DisplayName}");
+        await audit.SaveChangesWithAuditAsync(db, Audit.User, "Password changed", $"User: {user.DisplayName}");
         TempData["Success"] = "Password updated.";
         return RedirectToPage(new { id });
     }
@@ -138,8 +138,18 @@ public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
         if (user is null) return NotFound();
         if (!user.IsLocalUser) return Forbid();
 
-        var secretBytes = KeyGeneration.GenerateRandomKey(20);  // 160-bit secret (RFC recommendation)
-        TempData["PendingTotpSecret"] = Base32Encoding.ToString(secretBytes);
+        var secret = Base32Encoding.ToString(KeyGeneration.GenerateRandomKey(20));
+        var changed = await db.AppUsers.Where(u => u.Id == id && !u.TotpEnabled).ExecuteUpdateAsync(set => set
+            .SetProperty(u => u.TotpSecret, secret)
+            .SetProperty(u => u.TotpLastUsedInterval, (long?)null)
+            .SetProperty(u => u.TotpFailureCount, 0)
+            .SetProperty(u => u.TotpFailureWindowEndsAt, (DateTime?)null));
+        if (changed != 1)
+        {
+            TempData["Error"] = "Disable the existing authenticator before generating a new one.";
+            return RedirectToPage(new { id });
+        }
+        TempData[$"PendingTotpSecret:{id}"] = secret;
         return RedirectToPage(new { id });
     }
 
@@ -153,34 +163,26 @@ public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
         if (user is null) return NotFound();
         if (!user.IsLocalUser) return Forbid();
 
-        if (string.IsNullOrWhiteSpace(secret) || string.IsNullOrWhiteSpace(code))
+        if (string.IsNullOrWhiteSpace(secret) || secret != user.TotpSecret || user.TotpEnabled)
         {
-            TempData["Error"] = "Missing secret or code.";
+            TempData["Error"] = "This setup is no longer current. Generate a new QR code.";
             return RedirectToPage(new { id });
         }
 
-        byte[] secretBytes;
-        try { secretBytes = Base32Encoding.ToBytes(secret); }
-        catch
-        {
-            TempData["Error"] = "Invalid secret — please generate a new one.";
-            return RedirectToPage(new { id });
-        }
-
-        var totp  = new Totp(secretBytes);
-        bool valid = totp.VerifyTotp(code.Trim(), out _, VerificationWindow.RfcSpecifiedNetworkDelay);
-        if (!valid)
+        var eligible = db.AppUsers.Where(u => u.Id == id && !u.TotpEnabled && u.TotpSecret == secret);
+        var result = await TotpAttemptGuard.VerifyAsync(eligible, secret, code,
+            nameof(Models.AppUser.TotpLastUsedInterval), set => set.SetProperty(u => u.TotpEnabled, true));
+        if (result != TotpAttemptResult.Accepted)
         {
             // Return the QR code so the user can try again without regenerating.
-            TempData["PendingTotpSecret"] = secret;
-            TempData["Error"] = "Code incorrect — please check the time on your device and try again.";
+            TempData[$"PendingTotpSecret:{id}"] = secret;
+            TempData["Error"] = result == TotpAttemptResult.Locked
+                ? "Too many failed attempts. Please wait 15 minutes before trying again."
+                : "Code incorrect — please check the time on your device and try again.";
             return RedirectToPage(new { id });
         }
 
-        user.TotpSecret  = secret;
-        user.TotpEnabled = true;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.User, "2FA enabled", $"User: {user.DisplayName}");
+        await audit.LogAsync(Audit.User, "2FA enabled", $"User: {user.DisplayName}");
         TempData["Success"] = "Authenticator app enabled. Two-factor authentication is now active for this user.";
         return RedirectToPage(new { id });
     }
@@ -192,10 +194,11 @@ public class EditModel(ApplicationDbContext db, IAuditService audit) : PageModel
         if (user is null) return NotFound();
         if (!user.IsLocalUser) return Forbid();
 
-        user.TotpSecret  = null;
-        user.TotpEnabled = false;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.User, "2FA disabled", $"User: {user.DisplayName}");
+        await db.AppUsers.Where(u => u.Id == id).ExecuteUpdateAsync(set => set
+            .SetProperty(u => u.TotpSecret, (string?)null)
+            .SetProperty(u => u.TotpEnabled, false));
+        TempData.Remove($"PendingTotpSecret:{id}");
+        await audit.LogAsync(Audit.User, "2FA disabled", $"User: {user.DisplayName}");
         TempData["Success"] = "Two-factor authentication disabled.";
         return RedirectToPage(new { id });
     }

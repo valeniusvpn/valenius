@@ -10,8 +10,9 @@ namespace Valenius.Backend.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[ServiceFilter(typeof(ApiKeyFilter))]
-public class ClientsController(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker wgTunnels, ILicenseEnforcement enforcement, IMfaSessionService mfa, IMfaChallengeService challenge, ISidecarService sidecar, ApiKeyStore apiKeyStore, HeartbeatSettingsStore heartbeatSettings, IManagementEventLog eventLog) : ControllerBase
+[ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+[ServiceFilter(typeof(DeviceCredentialFilter))]
+public class ClientsController(ApplicationDbContext db, ClientNotifier notifier, ClientPresenceTracker presence, WgTunnelTracker wgTunnels, ILicenseEnforcement enforcement, IMfaSessionService mfa, IMfaChallengeService challenge, ISidecarService sidecar, HeartbeatSettingsStore heartbeatSettings, IManagementEventLog eventLog, DeviceRequestBudget requestBudget, DeviceAuthentication authentication) : ControllerBase
 {
     /// <summary>LogEvent EventTypes that are client-side repair outcomes routed to ClientAlerts
     /// (Admin/Alerts) instead of ConnectionLogs. Kept as a set so LogEvent's dispatch and dedupe
@@ -19,45 +20,45 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
     private static readonly HashSet<string> ClientAlertEventTypes =
         new(StringComparer.OrdinalIgnoreCase) { "ConfigRepairFailed", "OwnershipReclaimed" };
 
-    // Keyless-friendly: a first-run device with no installation key yet may register (it becomes a
-    // PENDING client). It receives the installation key only once an admin activates it — see the
-    // keyToAdopt logic in BuildStatusResponseAsync. Auth for the keyed fleet is unchanged.
+    // A new identity receives its own credential exactly once while still PENDING.
+    // Existing identities prove possession, even while inactive. Only the explicit
+    // legacy window admits snapshotted shared-key devices; hostname never proves ownership.
     [ApiKeyExempt]
     [HttpPost("register")]
+    [RequestSizeLimit(65_536)]
     public async Task<IActionResult> Register([FromBody] RegisterRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.ClientKey))
+        if (string.IsNullOrWhiteSpace(request.ClientKey) || request.ClientKey.Length > 36)
             return BadRequest("ClientKey is required.");
 
+        using var control = requestBudget.TryControl(request.ClientKey);
+        if (control is null) return StatusCode(StatusCodes.Status429TooManyRequests);
         var now    = DateTime.UtcNow;
         var client = await db.Clients
             .Include(c => c.Customer).ThenInclude(cu => cu!.TrustedNetworks)
             .FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
+
+        if (client is not null && !await authentication.AuthenticateAsync(client,
+                Request.Headers["X-Api-Key"].ToString(), HttpContext.RequestAborted))
+            return Unauthorized();
+        string? issuedCredential = null;
 
         var isAndroid = string.Equals(request.Platform, "Android", StringComparison.OrdinalIgnoreCase);
         var deviceId = string.IsNullOrWhiteSpace(request.DeviceId) ? null : request.DeviceId.Trim();
         if (deviceId?.Length > 128)
             return BadRequest("DeviceId must not exceed 128 characters.");
 
-        // One-time desktop migration: claim the most-recently-seen non-deleted record for this
-        // hostname that predates the ClientKey scheme (ClientKey == ""). Android model names are
-        // not unique, so they must never be used to claim a legacy record.
-        if (client is null && !isAndroid && !string.IsNullOrEmpty(request.Hostname))
-        {
-            var legacy = await db.Clients
-                .Include(c => c.Customer).ThenInclude(cu => cu!.TrustedNetworks)
-                .Where(c => c.ClientKey == "" && !c.IsDeleted && c.Hostname == request.Hostname)
-                .OrderByDescending(c => c.LastSeenAt)
-                .FirstOrDefaultAsync();
-            if (legacy is not null)
-            {
-                legacy.ClientKey = request.ClientKey;
-                client = legacy;
-            }
-        }
-
         if (client is null)
         {
+            var budget = requestBudget;
+            if (!budget.TryRegister(HttpContext.Connection.RemoteIpAddress?.ToString(), now))
+            {
+                Response.Headers.RetryAfter = "60";
+                return StatusCode(StatusCodes.Status429TooManyRequests);
+            }
+            if (await db.Clients.CountAsync(c => !c.IsActive && !c.IsDeleted) >= 10_000)
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, "Pending-device capacity reached; administrator review is required.");
+            issuedCredential = DeviceCredential.Mint();
             // Identity collision: a non-deleted client already exists under a different
             // ClientKey (typically a reinstall with a fresh key). Desktop clients retain the
             // hostname rule. Android model names are shared by every device of that model, so
@@ -79,13 +80,13 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                     && await db.Clients.AnyAsync(c =>
                         !c.IsDeleted
                         && !c.IsDuplicatePending
-                        && c.ClientKey != ""
                         && c.ClientKey != request.ClientKey
                         && c.Hostname == request.Hostname);
 
             client = new Client
             {
                 ClientKey          = request.ClientKey,
+                DeviceCredentialHash = DeviceCredential.Hash(issuedCredential),
                 Hostname           = request.Hostname,
                 HostSid            = request.HostSid,
                 Username           = request.Username,
@@ -102,24 +103,12 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             };
             db.Clients.Add(client);
         }
-        else if (client.IsDeleted)
-        {
-            // Machine re-registered after being deleted — restore as pending.
-            client.IsDeleted   = false;
-            client.IsActive    = false;
-            client.Hostname    = request.Hostname;
-            client.HostSid     = request.HostSid;
-            client.CustomerId  = await MatchCustomerAsync(request.Hostname);
-            if (!string.IsNullOrEmpty(request.Username)) client.Username = request.Username;
-            if (!string.IsNullOrEmpty(request.UserSid))  client.UserSid  = request.UserSid;
-            if (!string.IsNullOrEmpty(request.Version))  client.ClientVersion = request.Version;
-            if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
-            if (deviceId is not null) client.DeviceId = deviceId;
-            client.KnownProfiles = SerializeProfiles(request.Profiles);
-            client.LastSeenAt = now;
-        }
         else
         {
+            // Only updated clients advertise persistence-before-use support. Old
+            // binaries continue on legacy auth until updated or the window expires.
+            issuedCredential = await authentication.OfferAsync(client, Request.Headers["X-Api-Key"].ToString(),
+                Request.Headers[DeviceAuthentication.UpgradeHeader].ToString(), HttpContext.RequestAborted);
             client.Hostname = request.Hostname;
             client.HostSid  = request.HostSid;
             if (!string.IsNullOrEmpty(request.Username)) client.Username = request.Username;
@@ -148,7 +137,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         // Drain confirmed deletes from the queue: any queued name the client's own reported
         // profile list no longer contains has landed, so stop re-sending it. Every confirmed
         // entry clears in one pass (not just the oldest) — see ClientPendingDelete.
-        if (request.Profiles is not null)
+        if (request.Profiles is not null && !await ClientUpdateHalt.AppliesAsync(db, client))
         {
             var queued = await db.ClientPendingDeletes
                 .Where(d => d.ClientId == client.Id)
@@ -166,18 +155,10 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         }
         catch (DbUpdateException ex) when (IsDuplicateKeyViolation(ex))
         {
-            // Two concurrent first-registrations with the same ClientKey raced — the other
-            // request already inserted the row. Clear the stale tracked entity, re-read the
-            // winner's row, and return its current state.
+            // Never give the losing unauthenticated first-registration the winner's
+            // status/credential. Recovery after a lost first response is administrator-owned.
             db.ChangeTracker.Clear();
-            var existing = await db.Clients
-                .Include(c => c.Customer).ThenInclude(cu => cu!.TrustedNetworks)
-                .FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
-            if (existing is null)
-                return Problem("Registration conflict could not be resolved.", statusCode: 500);
-            var conflictResponse = await BuildStatusResponseAsync(existing);
-            await db.SaveChangesAsync();
-            return Ok(conflictResponse);
+            return Conflict("Device identity already registered; use its credential or administrator recovery.");
         }
 
         // Re-load with Customer + TrustedNetworks to build the full response.
@@ -195,34 +176,43 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         var heartbeatResponse = await BuildStatusResponseAsync(client);
         await db.SaveChangesAsync();
-        return Ok(heartbeatResponse);
+        if (heartbeatResponse is null) return ClientUpdateHalt.Paused(Response);
+        return Ok(heartbeatResponse with { ClientApiKey = issuedCredential });
     }
 
     /// <summary>
     /// Builds the status response AND clears one-shot flags (PendingConnect) on the entity
     /// so the caller must SaveChanges after calling this.
     /// </summary>
-    private async Task<StatusResponse> BuildStatusResponseAsync(Client client)
+    private async Task<StatusResponse?> BuildStatusResponseAsync(Client client)
     {
+        // Denial/status polling must never deliver profiles, enrollment secrets or queued
+        // commands, nor drain those commands while the device is pending/deactivated.
+        if (!client.IsActive || client.IsDeleted)
+            return new StatusResponse(false, DuplicatePending: client.IsDuplicatePending);
+        var halted = await ClientUpdateHalt.AppliesAsync(db, client);
+        var previousPolicy = halted ? ClientUpdateHalt.PreviousPolicy(client) : null;
+        // Never synthesize a successful empty/default policy: old clients would apply it.
+        if (halted && previousPolicy is null) return null;
         var networks = client.Customer?.TrustedNetworks
             .Select(n => new TrustedNetworkDto(n.Subnet, n.PrimaryDns))
             .ToArray() ?? [];
 
         // Capture one-shot flags and clear them — each fires exactly once per trigger.
-        var pendingConnect    = client.PendingConnect;
-        client.PendingConnect = false;
+        var pendingConnect    = !halted && client.PendingConnect;
+        if (!halted) client.PendingConnect = false;
 
         var pendingDisconnect    = client.PendingDisconnect;
         client.PendingDisconnect = false;
 
-        var forceUpdate    = client.ForceUpdate;
-        client.ForceUpdate = false;
+        var forceUpdate    = !halted && client.ForceUpdate;
+        if (!halted) client.ForceUpdate = false;
 
-        var pendingConfigRepair    = client.PendingConfigRepair;
-        client.PendingConfigRepair = false;
+        var pendingConfigRepair    = !halted && client.PendingConfigRepair;
+        if (!halted) client.PendingConfigRepair = false;
 
-        var pendingServiceRestart    = client.PendingServiceRestart;
-        client.PendingServiceRestart = false;
+        var pendingServiceRestart    = !halted && client.PendingServiceRestart;
+        if (!halted) client.PendingServiceRestart = false;
 
         // Deliver the oldest queued delete (see ClientPendingDelete) — not one-shot; only the
         // Register POST above drains confirmed entries (it's the only request that carries the
@@ -358,7 +348,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         // Collect pending foreign configs and clear them atomically (delivered inline).
         // Archive each on the way out so a future reinstall reassign can re-send it.
         var pendingForeignRows = await db.ClientForeignProfiles
-            .Where(p => p.ClientId == client.Id && p.PendingConfigFileName != null)
+            .Where(p => !halted && p.ClientId == client.Id && p.PendingConfigFileName != null)
             .ToListAsync();
         var inlineConfigs = new List<PendingForeignConfigEntry>();
         foreach (var p in pendingForeignRows)
@@ -374,7 +364,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         // including manually-uploaded configs that can't be re-provisioned. Reuses the inline
         // foreign-config channel (all clients already save these to staged).
         var resendRows = await db.ClientConfigArchives
-            .Where(a => a.ClientId == client.Id && a.PendingResend)
+            .Where(a => !halted && a.ClientId == client.Id && a.PendingResend)
             .ToListAsync();
         foreach (var a in resendRows)
         {
@@ -434,18 +424,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         // One-shot: an admin asked this client to upload its logs. Clear on delivery (the caller
         // SaveChanges after this) so it fires exactly once.
-        var logUploadRequested = client.PendingLogRequest;
+        var logUploadRequested = !halted && client.PendingLogRequest;
         if (logUploadRequested) client.PendingLogRequest = false;
 
-        // Hand the client the installation's current API key when it presented a *different* key, in
-        // two cases:
-        //   1. Rotation roll-forward — it presented a still-valid previous key (grace window), so the
-        //      fleet moves to the new key without a hard cutover.
-        //   2. First-run keyless bootstrap — it presented no/blank/invalid key BUT the client is
-        //      active, i.e. an admin has activated this device (register is [ApiKeyExempt]). A
-        //      pending (unactivated) keyless device gets nothing, so an unknown caller can never
-        //      pull the key just by guessing a ClientKey.
-        // Null in the normal case (already on the current key).
         // Per-profile remote LAN CIDR(s), for the client's pre-connect LAN-conflict check. MUST
         // stay scoped to the profile whose sidecar actually reports it — the native server
         // profile gets its own customer's SidecarLanCidrs, each foreign profile gets its OWN
@@ -469,15 +450,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         }
         var remoteLanCidrsByProfile = lanCidrEntries.Count > 0 ? lanCidrEntries.ToArray() : null;
 
-        var presentedKey       = Request.Headers.TryGetValue("X-Api-Key", out var pk) ? pk.ToString() : null;
-        var presentedIsGraceKey = apiKeyStore.IsAccepted(presentedKey);   // current or valid previous
-        var rotatedApiKey = (!string.IsNullOrEmpty(apiKeyStore.Key)
-                             && !string.Equals(presentedKey, apiKeyStore.Key, StringComparison.Ordinal)
-                             && (presentedIsGraceKey || client.IsActive))
-            ? apiKeyStore.Key
-            : null;
-
-        return new StatusResponse(
+        var response = new StatusResponse(
             effectiveIsActive,
             client.PendingConfigFileName != null,
             client.AutoConnectEnabled,
@@ -504,12 +477,30 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             pendingApprovals.Length > 0 ? pendingApprovals : null,
             logUploadRequested,
             string.IsNullOrEmpty(client.UpdateChannel) ? "stable" : client.UpdateChannel,
-            rotatedApiKey,
+            null, // Device credentials are never reissued by a status/heartbeat read.
             remoteLanCidrsByProfile,
             pendingConfigRepair,
             deviceTunnelEnabled,
             fallbackEndpoints.Count > 0 ? fallbackEndpoints.ToArray() : null,
             pendingServiceRestart);
+
+        if (halted)
+            return previousPolicy! with
+            {
+                IsActive = effectiveIsActive,
+                PendingDisconnect = pendingDisconnect,
+                MfaRequired = mfaRequired,
+                MfaAuthorizeUrl = mfaAuthorizeUrl,
+                MfaSessionExpiresAt = mfaSessionExpiresAt,
+                MfaEnrollmentOpen = mfaEnrollmentOpen,
+                MfaEnrollmentUri = mfaEnrollmentUri,
+                MfaApproveNumber = mfaApproveNumber,
+                PendingApprovals = response.PendingApprovals,
+                UpdateChannel = ReleaseChannel.Normalize(client.UpdateChannel)
+            };
+
+        ClientUpdateHalt.Remember(client, response);
+        return response;
     }
 
     [HttpPost("event")]
@@ -640,7 +631,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
                 && !mfa.ResolvePolicy(client, client.Customer).Gated)
             {
                 var added = await sidecar.AddPeerAsync(
-                    client.Customer.SidecarBaseUrl, client.WgPublicKey, $"{client.VpnIpAddress}/32");
+                    client.Customer.SidecarBaseUrl, client.Customer.Id, client.WgPublicKey, $"{client.VpnIpAddress}/32");
                 if (added)
                     client.WgPeerKilled = false;
             }
@@ -696,6 +687,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         return ok ? Ok(new { confirmed = true }) : BadRequest(new { confirmed = false });
     }
 
+    [DeviceStatus]
     [HttpGet("status")]
     public async Task<IActionResult> GetStatus([FromQuery] string clientKey)
     {
@@ -713,6 +705,7 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
 
         var statusResponse = await BuildStatusResponseAsync(client);
         await db.SaveChangesAsync();
+        if (statusResponse is null) return ClientUpdateHalt.Paused(Response);
         return Ok(statusResponse);
     }
 
@@ -743,6 +736,8 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
     /// processes the response identically to a heartbeat, then immediately reopens the poll.
     /// This gives sub-second delivery of PendingConnect, config pushes, profile deletes, etc.
     /// </summary>
+    [DeviceStatus]
+    [DevicePoll]
     [HttpGet("poll")]
     public async Task<IActionResult> LongPoll(
         [FromQuery] string clientKey,
@@ -768,19 +763,23 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         // or the HTTP client disconnects.  Task.WhenAny never throws.
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(55));
         using var linked  = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-        await Task.WhenAny(
-            notifier.WaitAsync(clientKey),
-            Task.Delay(Timeout.Infinite, linked.Token));
+        try { await notifier.WaitAsync(clientKey, linked.Token); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+        ct.ThrowIfCancellationRequested();
 
-        // Re-read fresh state.  Use CancellationToken.None so PendingConnect is always
-        // cleared even if the HTTP client disconnected during the wait.
+        // A disconnected poll must not consume commands or retain notification state.
         var client = await db.Clients
             .Include(c => c.Customer).ThenInclude(cu => cu!.TrustedNetworks)
-            .FirstOrDefaultAsync(c => c.ClientKey == clientKey && !c.IsDeleted, CancellationToken.None);
+            .FirstOrDefaultAsync(c => c.ClientKey == clientKey && !c.IsDeleted, ct);
         if (client is null) return NotFound();
+        // The poll may have waited across credential rotation/reassignment. Revalidate
+        // fresh DB state before consuming commands or returning any private content.
+        if (!authentication.Accepts(client, Request.Headers["X-Api-Key"].ToString()))
+            return Unauthorized();
 
         var response = await BuildStatusResponseAsync(client);      // clears PendingConnect on entity
-        await db.SaveChangesAsync(CancellationToken.None);
+        await db.SaveChangesAsync(ct);
+        if (response is null) return ClientUpdateHalt.Paused(Response);
         return Ok(response);
     }
 
@@ -888,62 +887,74 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         return Ok();
     }
 
-    // Bootstrap: authenticated by the one-time pairing token (not the API key), so a keyless first-run
-    // device can pair. Returns the installation's API key so the device adopts it for all later calls.
+    // Customer-wide pairing codes enroll NEW identities. Existing identities need either
+    // their credential (same customer) or an exact-device recovery code issued by an admin.
     [ApiKeyExempt]
     [HttpPost("pairing/redeem")]
     public async Task<IActionResult> RedeemPairing([FromBody] RedeemPairingRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Token) || string.IsNullOrWhiteSpace(request.ClientKey))
+        if (string.IsNullOrWhiteSpace(request.Token) || string.IsNullOrWhiteSpace(request.ClientKey)
+            || request.ClientKey.Length > 36)
             return BadRequest("Token and ClientKey are required.");
         if (request.DeviceId?.Trim().Length > 128)
             return BadRequest("DeviceId must not exceed 128 characters.");
 
         var now = DateTime.UtcNow;
-        var token = await db.PairingTokens.FirstOrDefaultAsync(t => t.Token == request.Token);
-        if (token is null || token.UsedAt is not null || token.ExpiresAt < now)
+        var token = await db.PairingTokens.AsNoTracking().SingleOrDefaultAsync(t => t.Token == request.Token);
+        if (token is null || token.UsedAt is not null || token.ExpiresAt <= now)
             return BadRequest("Invalid or expired pairing code.");
 
-        var client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
-        if (client is null)
-        {
-            client = new Client
-            {
-                ClientKey    = request.ClientKey,
-                Hostname     = request.Hostname ?? "",
-                HostSid      = "",
-                Username     = "",
-                UserSid      = "",
-                RegisteredAt = now,
-                DeviceId     = string.IsNullOrWhiteSpace(request.DeviceId) ? null : request.DeviceId.Trim(),
-            };
-            db.Clients.Add(client);
-        }
+        // Original startup-created tables store UTC in TIMESTAMP without time zone.
+        // Their values are read as Unspecified; Npgsql's current EF parameter mapping
+        // requires UTC for timestamp-with-time-zone parameters. Preserve the UTC ticks.
+        var expiresAtUtc = DateTime.SpecifyKind(token.ExpiresAt, DateTimeKind.Utc);
 
-        // Pairing explicitly assigns the customer (mobile has no hostname prefix to match on).
-        client.IsActive           = true;
-        client.IsDeleted          = false;
-        client.IsDuplicatePending = false;
-        client.CustomerId         = token.CustomerId;
-        if (!string.IsNullOrEmpty(request.Hostname)) client.Hostname = request.Hostname;
-        if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
-        if (!string.IsNullOrWhiteSpace(request.DeviceId)) client.DeviceId = request.DeviceId.Trim();
-        client.LastSeenAt = now;
-        token.UsedAt      = now;
+        // Claim before activating anything. The database arbitrates concurrent requests,
+        // including requests handled by different backend processes. A failed activation
+        // rolls the claim back, so it cannot burn a code without activating the device.
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            now = DateTime.UtcNow;
+            var claimed = await db.PairingTokens
+                .Where(t => t.Id == token.Id && t.Token == request.Token
+                         && t.CustomerId == token.CustomerId
+                         && t.ClientKey == token.ClientKey
+                         && t.ExpiresAt == expiresAtUtc
+                         && t.UsedAt == null && t.ExpiresAt > now)
+                .ExecuteUpdateAsync(set => set.SetProperty(t => t.UsedAt, now));
+            // A competing transaction may have held the row lock until after expiry.
+            if (claimed != 1 || token.ExpiresAt <= DateTime.UtcNow)
+                return BadRequest("Invalid or expired pairing code.");
 
-        try
-        {
-            await db.SaveChangesAsync();
-        }
-        catch (DbUpdateException ex) when (IsDuplicateKeyViolation(ex))
-        {
-            // Redeem raced a concurrent first registration (same ClientKey) that inserted first —
-            // same recovery as Register() above. Re-read the winner's row and apply this redeem's
-            // activation to it instead of failing the pairing outright.
-            db.ChangeTracker.Clear();
-            client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
+            var client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == request.ClientKey);
+            if (token.ClientKey is not null && (token.ClientKey != request.ClientKey || client is null
+                || client.CustomerId != token.CustomerId))
+                return BadRequest("Pairing code does not match this device.");
+            if (client is not null && token.ClientKey is null
+                && (client.IsDeleted || (client.CustomerId is not null && client.CustomerId != token.CustomerId)
+                    || !DeviceCredential.Matches(Request.Headers["X-Api-Key"].ToString(), client.DeviceCredentialHash)))
+                return Unauthorized();
             if (client is null)
-                return Problem("Pairing conflict could not be resolved.", statusCode: 500);
+            {
+                client = new Client
+                {
+                    ClientKey    = request.ClientKey,
+                    Hostname     = request.Hostname ?? "",
+                    HostSid      = "",
+                    Username     = "",
+                    UserSid      = "",
+                    RegisteredAt = now,
+                };
+                db.Clients.Add(client);
+            }
+
+            var deviceCredential = DeviceCredential.Mint();
+            client.DeviceCredentialHash = DeviceCredential.Hash(deviceCredential);
+            client.LegacyAuthenticationEligible = false;
+            client.PendingDeviceCredentialHash = null;
+            client.PendingDeviceCredentialProtected = null;
+            // Customer assignment comes only from the claimed token.
             client.IsActive           = true;
             client.IsDeleted          = false;
             client.IsDuplicatePending = false;
@@ -952,12 +963,27 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
             if (!string.IsNullOrEmpty(request.Platform)) client.Platform = request.Platform;
             if (!string.IsNullOrWhiteSpace(request.DeviceId)) client.DeviceId = request.DeviceId.Trim();
             client.LastSeenAt = now;
-            token.UsedAt      = now;
-            await db.SaveChangesAsync();
+
+            try
+            {
+                await db.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex) when (attempt == 0 && IsDuplicateKeyViolation(ex))
+            {
+                // A first registration may have inserted this ClientKey after our lookup.
+                // Retry the WHOLE transaction, including a fresh conditional token claim.
+                // Never update a detached token after clearing EF's tracker.
+                await transaction.RollbackAsync();
+                db.ChangeTracker.Clear();
+                continue;
+            }
+
+            await transaction.CommitAsync();
+            // Return this device's credential only after activation/consumption commit.
+            return Ok(new { activated = true, apiKey = deviceCredential });
         }
-        // Pairing both activates the device and hands it the installation's API key, so a keyless
-        // first-run app never needs a hardcoded shared key. The one-time token was the authorization.
-        return Ok(new { activated = true, apiKey = apiKeyStore.Key });
+
+        return Problem("Pairing conflict could not be resolved.", statusCode: 500);
     }
 
     [HttpGet("pending-config")]
@@ -969,6 +995,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         var client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == clientKey && !c.IsDeleted);
         if (client is null)
             return NotFound();
+
+        if (await ClientUpdateHalt.AppliesAsync(db, client))
+            return ClientUpdateHalt.Paused(Response);
 
         if (client.PendingConfigFileName is null)
             return NoContent();
@@ -997,6 +1026,9 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
         var client = await db.Clients.FirstOrDefaultAsync(c => c.ClientKey == clientKey && !c.IsDeleted);
         if (client is null)
             return NotFound();
+
+        if (await ClientUpdateHalt.AppliesAsync(db, client))
+            return ClientUpdateHalt.Paused(Response);
 
         var entries = await db.ClientConfigArchives
             .Where(a => a.ClientId == client.Id)
@@ -1032,15 +1064,15 @@ public class ClientsController(ApplicationDbContext db, ClientNotifier notifier,
     }
 }
 
-public record RegisterRequest(string ClientKey, string Hostname, string HostSid, string Username, string UserSid, string? Version, bool TrayRunning = false, string[]? Profiles = null, string? Platform = null, string? DeviceId = null);
+public record RegisterRequest(string ClientKey, string Hostname, string HostSid, string Username, string UserSid, string? Version, bool TrayRunning = false, string[]? Profiles = null, string? Platform = null, string? DeviceId = null) : IDeviceRequest;
 public record LogEventRequest(string ClientKey, string EventType, string Username, string TunnelName, string LanIp = "", string WanIp = "",
     /// <summary>Free-text detail for non-connection events (e.g. "ConfigRepairFailed"). Null/unused for Connect/Disconnect.</summary>
-    string? Detail = null);
-public record MfaEnrollConfirmRequest(string ClientKey, string Code);
+    string? Detail = null) : IDeviceRequest;
+public record MfaEnrollConfirmRequest(string ClientKey, string Code) : IDeviceRequest;
 public record RedeemPairingRequest(string Token, string ClientKey, string? Hostname = null, string? Platform = null, string? DeviceId = null);
-public record RegisterDeviceRequest(string ClientKey, string? FcmToken);
-public record MfaApproveRequest(string ClientKey, int ChallengeId, int MatchedNumber);
-public record MfaDenyRequest(string ClientKey, int ChallengeId);
+public record RegisterDeviceRequest(string ClientKey, string? FcmToken) : IDeviceRequest;
+public record MfaApproveRequest(string ClientKey, int ChallengeId, int MatchedNumber) : IDeviceRequest;
+public record MfaDenyRequest(string ClientKey, int ChallengeId) : IDeviceRequest;
 public record TrustedNetworkDto(string Subnet, string? PrimaryDns);
 public record StatusResponse(
     bool IsActive,
@@ -1102,11 +1134,9 @@ public record StatusResponse(
     /// <summary>Auto-update channel this client tracks: "stable" (default) or "beta". The updater
     /// polls the matching release stream (…?channel=&lt;this&gt;).</summary>
     string UpdateChannel = "stable",
-    /// <summary>The current client API key, sent ONLY when the requester authenticated with a
-    /// different (previous/rotated) key — the client persists it and uses it for subsequent
-    /// requests, so an admin can rotate the fleet's key without touching each client. Null in
-    /// the normal case (already on the current key). Delivered over the authenticated TLS
-    /// channel.</summary>
+    /// <summary>Individual credential for a new pending identity, or a stable migration
+    /// offer when an eligible legacy device advertises the upgrade protocol. Clients
+    /// persist before first use; normal status/poll reads never reissue it.</summary>
     string? ClientApiKey = null,
     /// <summary>
     /// Per-profile physical LAN CIDR(s) reachable through that profile's sidecar (e.g.
@@ -1158,4 +1188,4 @@ public record PendingForeignConfigEntry(string FileName, string Content);
 public record GatewayProfileEntry(string ProfileName, string GatewayIp, int HealthPort);
 public record FallbackEndpointEntry(string ProfileName, int Port, int TriggerSeconds);
 public record LanCidrProfileEntry(string ProfileName, string[] Cidrs);
-public record ArchiveProfileRequest(string ClientKey, string ProfileName, string Content);
+public record ArchiveProfileRequest(string ClientKey, string ProfileName, string Content) : IDeviceRequest;

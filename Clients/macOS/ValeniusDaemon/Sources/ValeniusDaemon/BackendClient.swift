@@ -36,7 +36,8 @@ private let backendUrlPath = "\(appSupportDir)/backend.dat"
 
 actor BackendClient {
     private(set) var baseUrl: String
-    private var apiKey: String
+    private var credential: DeviceCredentialState
+    private var apiKey: String { credential.value }
     private var channel = "stable" // auto-update channel, refreshed from the heartbeat
     /// True once the user explicitly chose "Use standalone" (no backend at all — see
     /// `DaemonCore.cmdSetStandaloneMode`). Only ever affects update-checking (`getVersion`,
@@ -44,44 +45,44 @@ actor BackendClient {
     /// correctly no-ops against an empty `baseUrl`. Mirrors Windows
     /// RegistrationManager.GetStandaloneModeChosen.
     private var standaloneModeChosen = false
-    private let session = URLSession(configuration: .ephemeral)
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 300
+        config.httpMaximumConnectionsPerHost = 8
+        return URLSession(configuration: config)
+    }()
 
-    init(baseUrl: String, apiKey: String) {
+    init(baseUrl: String, apiKey: String) throws {
         let fallback = baseUrl.hasSuffix("/") ? String(baseUrl.dropLast()) : baseUrl
-        if let persisted = try? String(contentsOfFile: backendUrlPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           !persisted.isEmpty {
-            self.baseUrl = persisted
-        } else {
-            self.baseUrl = fallback
-        }
+        self.baseUrl = try BackendOriginStore.load(path: URL(fileURLWithPath: backendUrlPath), fallback: fallback)
         if let persisted = try? String(contentsOfFile: apiKeyPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            !persisted.isEmpty {
-            self.apiKey = persisted
+            self.credential = DeviceCredentialState(value: persisted)
         } else {
-            self.apiKey = apiKey
+            self.credential = DeviceCredentialState(value: apiKey)
         }
     }
 
     /// True once a non-empty backend URL is available (from backend.dat or appsettings.json).
     var isConfigured: Bool { !baseUrl.isEmpty }
 
-    /// Set the backend URL from a user-entered DNS host (scheme optional). Normalizes to
-    /// `https://host`, persists it, and switches immediately. Returns the normalized URL, or
-    /// nil if the input has no usable host. Mirrors Windows BackendUrlProvider.Set.
-    func setBaseUrl(_ dnsOrUrl: String?) -> String? {
+    /// Administrator-owned initial provisioning. Persist before use; refuse an existing
+    /// origin. nil means invalid input, missing authority, or failed persistence.
+    func setBaseUrl(_ dnsOrUrl: String?, privileged: Bool = false) -> String? {
+        guard privileged, baseUrl.isEmpty else { return nil }
         let normalized = Self.normalizeUrl(dnsOrUrl)
         guard !normalized.isEmpty else { return nil }
-        baseUrl = normalized
         do {
             try FileManager.default.createDirectory(
                 atPath: appSupportDir, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            try normalized.write(toFile: backendUrlPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backendUrlPath)
+            try BackendOriginStore.save(normalized, path: URL(fileURLWithPath: backendUrlPath))
+            baseUrl = normalized
             log("Backend URL set to \(normalized) and persisted.")
         } catch {
-            logError("Could not persist backend URL; using it for this session only: \(error)")
+            logError("Could not persist backend URL; provisioning refused: \(error)")
+            return nil
         }
         return normalized
     }
@@ -123,22 +124,15 @@ actor BackendClient {
         self.channel = (channel?.lowercased() == "beta") ? "beta" : "stable"
     }
 
-    /// Adopt a backend-rotated key (heartbeat ClientApiKey): switch + persist so it
-    /// survives a restart. No-op if empty or unchanged. Only sent by the backend while
-    /// this client is still on the previous key during a rotation grace window.
+    /// Persist an offered credential before its first use confirms backend migration.
+    /// Failed writes retain the current key so the same offer can be retried.
     func setApiKey(_ newKey: String?) {
         guard let newKey, !newKey.isEmpty, newKey != apiKey else { return }
-        apiKey = newKey
         do {
-            try FileManager.default.createDirectory(
-                atPath: appSupportDir, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try newKey.write(toFile: apiKeyPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: apiKeyPath)
-            log("Adopted rotated client API key from backend.")
+            try credential.adopt(newKey, at: URL(fileURLWithPath: apiKeyPath))
+            log("Persisted and adopted individual client API credential.")
         } catch {
-            logError("Could not persist rotated API key: \(error)")
+            logError("Could not persist API credential; retaining current credential for retry.")
         }
     }
 
@@ -151,13 +145,14 @@ actor BackendClient {
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
+        req.setValue("1", forHTTPHeaderField: "X-Valenius-Device-Auth")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
         if let body {
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         }
         do {
-            let (data, response) = try await session.data(for: req)
+            let (data, response) = try await boundedData(req)
             guard let http = response as? HTTPURLResponse else { return nil }
             guard (200..<300).contains(http.statusCode) else {
                 log("HTTP \(http.statusCode) \(method) \(path)")
@@ -230,7 +225,7 @@ actor BackendClient {
         req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
         req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
         do {
-            let (data, response) = try await session.data(for: req)
+            let (data, response) = try await boundedData(req)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
             guard let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return nil }
             return arr.compactMap { dict in
@@ -265,17 +260,51 @@ actor BackendClient {
         }
         var req = URLRequest(url: src, timeoutInterval: 300)
         req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
-        let (tempFile, response) = try await session.download(for: req)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        let (bytes, response) = try await session.bytes(for: req)
+        let maximum = 512 * 1024 * 1024
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              response.expectedContentLength <= maximum else { throw UpdaterError.downloadFailed }
+        let temporary = destination.appendingPathExtension("partial-" + UUID().uuidString)
+        guard FileManager.default.createFile(atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
             throw UpdaterError.downloadFailed
         }
-        let data = try Data(contentsOf: tempFile)
-        let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let output = try FileHandle(forWritingTo: temporary)
+        defer { try? output.close() }
+        var hash = SHA256()
+        var buffer = Data()
+        var received = 0
+        for try await byte in bytes {
+            received += 1
+            guard received <= maximum else { throw UpdaterError.downloadFailed }
+            buffer.append(byte)
+            if buffer.count == 65536 {
+                hash.update(data: buffer)
+                try output.write(contentsOf: buffer)
+                buffer.removeAll(keepingCapacity: true)
+            }
+        }
+        hash.update(data: buffer)
+        try output.write(contentsOf: buffer)
+        let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
         guard actual.caseInsensitiveCompare(expectedSha256) == .orderedSame else {
             throw UpdaterError.shaMismatch(expected: expectedSha256, actual: actual)
         }
+        try output.close()
         try? FileManager.default.removeItem(at: destination)
-        try data.write(to: destination)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+    }
+
+    private func boundedData(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        let maximum = 16 * 1024 * 1024
+        guard response.expectedContentLength <= maximum else { throw UpdaterError.downloadFailed }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maximum else { throw UpdaterError.downloadFailed }
+            data.append(byte)
+        }
+        return (data, response)
     }
 
     /// POST /api/clients/mfa/enroll-confirm — returns true on a 2xx (TOTP code accepted).
@@ -290,7 +319,7 @@ actor BackendClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["ClientKey": clientId.uuidString, "Code": code])
-        guard let (_, response) = try? await session.data(for: req),
+        guard let (_, response) = try? await boundedData(req),
               let http = response as? HTTPURLResponse else { return false }
         return (200..<300).contains(http.statusCode)
     }
@@ -317,7 +346,7 @@ actor BackendClient {
         req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
-        guard let (_, response) = try? await session.data(for: req),
+        guard let (_, response) = try? await boundedData(req),
               let http = response as? HTTPURLResponse else { return false }
         return (200..<300).contains(http.statusCode)
     }
@@ -327,7 +356,7 @@ actor BackendClient {
         guard let url = URL(string: "https://api4.ipify.org") else { return "" }
         var req = URLRequest(url: url, timeoutInterval: 5)
         req.setValue("Valenius-macOS/\(daemonVersion)", forHTTPHeaderField: "User-Agent")
-        guard let (data, _) = try? await session.data(for: req) else { return "" }
+        guard let (data, _) = try? await boundedData(req) else { return "" }
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

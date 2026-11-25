@@ -200,12 +200,12 @@ public class OverviewModel(
     {
         var wtCustomers = await db.Customers
             .Where(c => c.ServerMode == "Valenius" && c.SidecarUrl != null)
-            .Select(c => new { c.SidecarUrl, c.SidecarManagementPort })
+            .Select(c => new { c.Id, c.SidecarUrl, c.SidecarManagementPort })
             .ToListAsync();
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         var tasks = wtCustomers
-            .Select(c => sidecar.GetPeersAsync($"https://{c.SidecarUrl}:{c.SidecarManagementPort}"))
+            .Select(c => sidecar.GetPeersAsync($"https://{c.SidecarUrl}:{c.SidecarManagementPort}", c.Id))
             .ToArray();
 
         try { await Task.WhenAll(tasks); } catch { /* partial failures are ok */ }

@@ -15,6 +15,11 @@ public class PairingToken
     public string Token { get; set; } = "";
 
     public int CustomerId { get; set; }
+
+    /// <summary>Optional exact-device recovery binding. A customer-wide code cannot
+    /// claim or replace an existing device merely by naming its public identifier.</summary>
+    [MaxLength(36)]
+    public string? ClientKey { get; set; }
     public Customer? Customer { get; set; }
 
     public DateTime CreatedAt { get; set; }

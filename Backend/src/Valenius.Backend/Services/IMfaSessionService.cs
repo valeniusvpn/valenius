@@ -50,7 +50,7 @@ public interface IMfaSessionService
     /// <summary>Validates a candidate TOTP code against the client's enrolled secret (replay-protected).</summary>
     Task<bool> ValidateTotpAsync(Client client, string code);
 
-    /// <summary>Creates and persists an MFA session (after successful TOTP) and returns it. Null if the peer is ungated.</summary>
+    /// <summary>Creates an MFA session after successful authorization. Null if ungated, inactive, deleted, reassigned or no longer eligible.</summary>
     Task<MfaSession?> CreateSessionAsync(Client client, Customer? customer, string? fromIp);
 
     /// <summary>Returns the current active, non-expired session for a client, or null.</summary>
@@ -64,7 +64,8 @@ public interface IMfaSessionService
 
     /// <summary>
     /// Reconciles one customer's sidecar against the DB: re-pushes active grants the sidecar
-    /// is missing and revokes orphan grants the sidecar still holds. No-op if unreachable.
+    /// is missing and revokes orphan grants the sidecar still holds. Ineligible device
+    /// sessions are invalidated in the DB even when the sidecar is unreachable.
     /// </summary>
     Task ReconcileSidecarAsync(Customer customer);
 }

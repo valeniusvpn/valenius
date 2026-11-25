@@ -4,8 +4,9 @@ namespace Valenius.Backend.Filters;
 /// "clients:read"). Every action under <c>/api/mgmt/v1/**</c> must carry this or
 /// <see cref="MgmtAnonymousAttribute"/> — enforced at boot by Backend.Pro's startup scope
 /// assertion (docs/design/management-api.md §10.1), so a new endpoint that forgets both
-/// fails the deploy rather than serving unscoped.</summary>
-[AttributeUsage(AttributeTargets.Method)]
+/// fails the deploy rather than serving unscoped. Multiple declarations require ALL
+/// listed scopes; write permission never implies read permission.</summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
 public sealed class RequireScopeAttribute(string scope) : Attribute
 {
     public string Scope { get; } = scope;

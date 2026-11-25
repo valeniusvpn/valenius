@@ -13,6 +13,13 @@ namespace Valenius.Backend.Services;
 public sealed class EmailService(IServiceScopeFactory scopeFactory, ILogger<EmailService> logger)
     : IEmailService
 {
+    private readonly Func<SmtpClient> _createClient = static () => new SmtpClient();
+
+    // Test-only construction seam for a fixture-local trust root. Production DI
+    // uses the public constructor and MailKit's normal certificate validation.
+    internal EmailService(IServiceScopeFactory scopeFactory, ILogger<EmailService> logger,
+        Func<SmtpClient> createClient) : this(scopeFactory, logger) => _createClient = createClient;
+
     public Task SendAsync(string to, string subject, string htmlBody, CancellationToken ct = default)
         => SendAsync(to, subject, htmlBody, [], ct);
 
@@ -59,14 +66,25 @@ public sealed class EmailService(IServiceScopeFactory scopeFactory, ILogger<Emai
 
         var secureOption = settings.SmtpUseSsl
             ? SecureSocketOptions.SslOnConnect
-            : SecureSocketOptions.StartTlsWhenAvailable;
+            : SecureSocketOptions.StartTls;
 
-        using var smtp = new SmtpClient();
+        using var smtp = _createClient();
 
-        logger.LogDebug("SMTP connecting to {Host}:{Port} (ssl={Ssl})",
-            settings.SmtpHost, settings.SmtpPort, settings.SmtpUseSsl);
+        logger.LogDebug("SMTP connecting to {Host}:{Port} (security={Security})",
+            settings.SmtpHost, settings.SmtpPort, secureOption);
 
-        await smtp.ConnectAsync(settings.SmtpHost, settings.SmtpPort, secureOption, ct);
+        try
+        {
+            await smtp.ConnectAsync(settings.SmtpHost, settings.SmtpPort, secureOption, ct);
+        }
+        catch (NotSupportedException ex) when (!settings.SmtpUseSsl)
+        {
+            throw new InvalidOperationException(
+                "SMTP requires STARTTLS. Configure a TLS-capable relay, or use implicit TLS with its matching port. No e-mail was sent.", ex);
+        }
+
+        if (!smtp.IsSecure)
+            throw new InvalidOperationException("SMTP encryption is required. No e-mail was sent.");
 
         if (!string.IsNullOrEmpty(settings.SmtpUsername))
             await smtp.AuthenticateAsync(settings.SmtpUsername, settings.SmtpPassword ?? "", ct);

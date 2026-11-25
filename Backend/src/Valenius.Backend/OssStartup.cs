@@ -42,19 +42,35 @@ public static class OssStartup
 
         // --- Caching (used by rate limiter, TOTP replay protection, etc.) ---
         builder.Services.AddMemoryCache();
+        builder.Services.AddSingleton<DeviceRequestBudget>();
 
         // --- Per-IP rate limiter for login (5 attempts per minute) ---
         builder.Services.AddRateLimiter(opts =>
         {
+            opts.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+            {
+                var poll = ctx.Request.Path.Equals("/api/clients/poll", StringComparison.OrdinalIgnoreCase);
+                var management = ctx.Request.Path.StartsWithSegments("/api/mgmt");
+                return RateLimitPartition.GetConcurrencyLimiter(poll ? "poll" : management ? "management" : "control",
+                    _ => new ConcurrencyLimiterOptions { PermitLimit = poll ? 2048 : management ? 128 : 256, QueueLimit = 0 });
+            });
             opts.AddPolicy("login", ctx =>
-                RateLimitPartition.GetFixedWindowLimiter(
-                    ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            {
+                // Razor Pages require rate-limit metadata on the page model, not its
+                // individual handlers. Count submissions only: viewing the password/TOTP
+                // forms must not consume attempts or prevent reopening a throttled form.
+                if (!HttpMethods.IsPost(ctx.Request.Method))
+                    return RateLimitPartition.GetNoLimiter("login-read");
+
+                return RateLimitPartition.GetFixedWindowLimiter(
+                    ((uint)StringComparer.Ordinal.GetHashCode(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown") % 2048).ToString(),
                     _ => new FixedWindowRateLimiterOptions
                     {
                         PermitLimit = 5,
                         Window      = TimeSpan.FromMinutes(1),
                         QueueLimit  = 0,
-                    }));
+                    });
+            });
             // Management API (docs/design/management-api.md §9) — partitioned by token id,
             // not IP: automation usually sits behind one NAT address, so an IP partition
             // would make several integrations starve each other. Parsed straight from the
@@ -64,8 +80,9 @@ public static class OssStartup
             // bucket (§9, 60/min) is added in Phase 3 alongside the endpoints that need it.
             opts.AddPolicy("mgmt-api", ctx =>
                 RateLimitPartition.GetSlidingWindowLimiter(
-                    ApiTokenGenerator.TryParseAuthorizationHeader(ctx.Request.Headers.Authorization.ToString())?.TokenId
-                        ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    ((uint)StringComparer.Ordinal.GetHashCode(
+                        ApiTokenGenerator.TryParseAuthorizationHeader(ctx.Request.Headers.Authorization.ToString())?.TokenId
+                        ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown") % 2048).ToString(),
                     _ => new SlidingWindowRateLimiterOptions
                     {
                         PermitLimit       = 600,
@@ -79,8 +96,9 @@ public static class OssStartup
             // without opening the door to a scrape storm.
             opts.AddPolicy("monitoring", ctx =>
                 RateLimitPartition.GetSlidingWindowLimiter(
-                    ApiTokenGenerator.TryParseAuthorizationHeader(ctx.Request.Headers.Authorization.ToString())?.TokenId
-                        ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    ((uint)StringComparer.Ordinal.GetHashCode(
+                        ApiTokenGenerator.TryParseAuthorizationHeader(ctx.Request.Headers.Authorization.ToString())?.TokenId
+                        ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown") % 2048).ToString(),
                     _ => new SlidingWindowRateLimiterOptions
                     {
                         PermitLimit       = 12,
@@ -96,8 +114,12 @@ public static class OssStartup
 
         // --- Controllers ---
         builder.Services.AddControllers();
-        builder.Services.AddScoped<ApiKeyFilter>();
+        builder.Services.AddScoped<DeviceCredentialFilter>();
         builder.Services.AddSingleton<ApiKeyStore>();
+        var deviceAuthentication = builder.Configuration.GetSection("DeviceAuthentication").Get<DeviceAuthenticationPolicy>() ?? new();
+        deviceAuthentication.Validate();
+        builder.Services.AddSingleton(deviceAuthentication);
+        builder.Services.AddScoped<DeviceAuthentication>();
         // Management API (Pro controllers) — the auth core lives in OSS so it can be called
         // both by ApiTokenFilter (over HTTP) and, later, by an in-process MCP tool handler
         // (docs/design/management-api.md §17.3), with one implementation of the logic.
@@ -105,6 +127,7 @@ public static class OssStartup
         builder.Services.AddScoped<ApiCallerResolver>();
         builder.Services.AddScoped<ApiTokenFilter>();
         builder.Services.AddSingleton<HeartbeatSettingsStore>();
+        builder.Services.AddScoped<DatabaseBackupService>();
         builder.Services.AddSingleton<ClientNotifier>();
         builder.Services.AddSingleton<ClientPresenceTracker>();
         builder.Services.AddSingleton<WgTunnelTracker>();
@@ -123,7 +146,12 @@ public static class OssStartup
 
         // Audit log
         builder.Services.AddHttpContextAccessor();
+        builder.Services.AddSingleton<AuditWriteStatus>();
         builder.Services.AddSingleton<IAuditService, AuditService>();
+        var historyRetention = builder.Configuration.GetSection("HistoryRetention").Get<HistoryRetentionPolicy>() ?? new();
+        historyRetention.Validate();
+        builder.Services.AddSingleton(historyRetention);
+        builder.Services.AddHostedService<HistoryRetentionService>();
 
         // E-mail (OSS — real implementation, uses SMTP settings stored in ServerSettings)
         builder.Services.AddSingleton<IEmailService, EmailService>();
@@ -132,6 +160,7 @@ public static class OssStartup
         // The Pro project calls builder.Services.Replace(...) to substitute real implementations.
         builder.Services.AddSingleton<ICaService, NullCaService>();
         builder.Services.AddSingleton<ISidecarService, NullSidecarService>();
+        builder.Services.AddSingleton<ISidecarEnrollmentTokens, NullSidecarEnrollmentTokens>();
         builder.Services.AddScoped<IPeerProvisioningService, NullPeerProvisioningService>();
         builder.Services.AddScoped<IMfaSessionService, NullMfaSessionService>();
         builder.Services.AddScoped<IMfaChallengeService, NullMfaChallengeService>();
@@ -174,7 +203,11 @@ public static class OssStartup
                     .UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"))
                     .Options;
                 using var tempDb = new ApplicationDbContext(tempOpts);
-                var s = tempDb.ServerSettings.OrderBy(x => x.Id).FirstOrDefault();
+                // Read only historical columns before schema revisions run. A newly added
+                // setting must not disable existing OIDC on the first upgrade startup.
+                var s = tempDb.ServerSettings.OrderBy(x => x.Id)
+                    .Select(x => new { x.OidcAuthority, x.OidcClientId, x.OidcClientSecret, x.OidcRedirectUri })
+                    .FirstOrDefault();
                 if (s is not null)
                 {
                     oidcAuthority    = s.OidcAuthority;
@@ -324,368 +357,397 @@ public static class OssStartup
     /// Runs DB schema migrations, seeds required rows, and bootstraps the CA.
     /// Called after builder.Build(), before the middleware pipeline.
     /// </summary>
-    public static async Task InitialiseOssAsync(this WebApplication app)
+    public static async Task InitialiseOssAsync(this WebApplication app, CancellationToken cancellationToken = default)
     {
         using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
+        var lockSeconds = app.Configuration.GetValue<int?>("Valenius:StartupLockTimeoutSeconds") ?? 120;
+        if (lockSeconds is < 1 or > 900)
+            throw new InvalidOperationException("Valenius:StartupLockTimeoutSeconds must be between 1 and 900.");
+        app.Logger.LogInformation("Waiting for exclusive database initialization (up to {Seconds} seconds).", lockSeconds);
+        await using var schemaLease = await StartupSchemaLease.AcquireAsync(db, TimeSpan.FromSeconds(lockSeconds), cancellationToken);
+        app.Logger.LogInformation("Exclusive database initialization acquired.");
+
         // All tables are EF-managed; EnsureCreated creates the full current schema on fresh installs.
-        db.Database.EnsureCreated();
-
-        // Schema patches run immediately after EnsureCreated — before any EF query that SELECTs
-        // these columns. EF includes every mapped property in its SELECT list, so a new column must
-        // exist in the DB before the first FirstAsync / Any call on that table.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "AppUsers" ADD COLUMN IF NOT EXISTS "TotpLastUsedInterval" BIGINT NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiKey" VARCHAR(128) NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "PreviousApiKey" VARCHAR(128) NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiKeyRotatedAt" TIMESTAMP NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "TrafficRetentionDays" INTEGER NOT NULL DEFAULT 90""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "DefaultHeartbeatIntervalMinutes" INTEGER NOT NULL DEFAULT 1""");
-        // WireGuard traffic accounting: reset-aware lifetime counters on the client + a per-interval sample table.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgRxLastRaw" BIGINT NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgTxLastRaw" BIGINT NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgRxLifetime" BIGINT NOT NULL DEFAULT 0""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgTxLifetime" BIGINT NOT NULL DEFAULT 0""");
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientTrafficSamples" (
-                "Id"        BIGSERIAL PRIMARY KEY,
-                "ClientId"  INTEGER   NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "SampledAt" TIMESTAMP NOT NULL,
-                "RxBytes"   BIGINT    NOT NULL,
-                "TxBytes"   BIGINT    NOT NULL
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_ClientTrafficSamples_Client_SampledAt" ON "ClientTrafficSamples" ("ClientId", "SampledAt")""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "LicenseLastValidatedAt" TIMESTAMP NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "LicenseStatus" VARCHAR(20) NOT NULL DEFAULT 'Valid'""");
-
-        // MFA session gating (Pro) — columns inert in OSS (NullMfaSessionService). See
-        // docs/design/mfa-session-gating.md. Existing peers default to User/Disabled so
-        // nothing auto-enables enforcement.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PeerType" VARCHAR(10) NOT NULL DEFAULT 'User'""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaPolicy" INT NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaSessionLifetimeHours" INT NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaTotpSecret" VARCHAR(64) NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaTotpEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaEnrollmentOpen" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaTotpLastUsedInterval" BIGINT NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "IsDuplicatePending" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceId" VARCHAR(128) NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_Clients_DeviceId" ON "Clients" ("DeviceId")""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DefaultMfaPolicy" INT NOT NULL DEFAULT 0""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "MfaSessionLifetimeHours" INT NOT NULL DEFAULT 12""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceTunnelEnabled" BOOLEAN NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DeviceTunnelDefaultEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
-        // Port-443 fallback (docs/design/port-443-fallback.md).
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPortEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPort" INT NOT NULL DEFAULT 443""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPortActive" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackTriggerSeconds" INT NOT NULL DEFAULT 20""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ConnectionLogs" ADD COLUMN IF NOT EXISTS "Detail" VARCHAR(255) NOT NULL DEFAULT ''""");
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "MfaSessions" (
-                "Id"            SERIAL PRIMARY KEY,
-                "ClientId"      INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "CustomerId"    INT NULL,
-                "SessionId"     UUID NOT NULL,
-                "Nonce"         VARCHAR(64) NOT NULL DEFAULT '',
-                "IssuedAt"      TIMESTAMP NOT NULL,
-                "ExpiresAt"     TIMESTAMP NOT NULL,
-                "Status"        VARCHAR(10) NOT NULL DEFAULT 'Active',
-                "CreatedFromIp" VARCHAR(45) NULL,
-                "RevokedAt"     TIMESTAMP NULL,
-                "RevokedBy"     VARCHAR(200) NULL
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_MfaSessions_SessionId" ON "MfaSessions" ("SessionId")""");
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_MfaSessions_ClientId_Status" ON "MfaSessions" ("ClientId", "Status")""");
-
-        // Cross-customer sidecar sharing (Pro) — inert in OSS.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "AllowShareSidecar" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "AllowReceiveForeignProfiles" BOOLEAN NOT NULL DEFAULT FALSE""");
-
-        // DNS search domains — appended to the DNS line as NRPT split-DNS rules so multiple
-        // simultaneous tunnels can each own their own DNS without colliding.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DnsSearchDomains" VARCHAR(255) NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DnsSearchDomains" VARCHAR(255) NULL""");
-
-        // Client platform/OS ("Windows"/"Linux"/"Android"/"iOS") so the admin UI can
-        // identify mobile devices and the backend can skip desktop-only assumptions.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "Platform" VARCHAR(20) NULL""");
-
-        // Admin-set friendly name shown in place of the hostname when present.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(255) NULL""");
-
-        // FCM token for push-to-approve MFA (mobile).
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "FcmToken" VARCHAR(255) NULL""");
-
-        // Per-client push-to-approve approver device.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaApproverClientId" INT NULL""");
-
-        // Cross-device push-to-approve MFA challenges.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "MfaChallenges" (
-                "Id"                SERIAL PRIMARY KEY,
-                "RequesterClientId" INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "ApproverClientId"  INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "MatchNumber"       INT NOT NULL,
-                "Choices"           VARCHAR(32) NOT NULL DEFAULT '',
-                "Status"            VARCHAR(20) NOT NULL DEFAULT 'Pending',
-                "RequesterIp"       VARCHAR(45) NULL,
-                "CreatedAt"         TIMESTAMP NOT NULL,
-                "ExpiresAt"         TIMESTAMP NOT NULL
-            )
-            """);
-
-        // QR pairing codes — a device scans one to activate + join a customer in one step.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "PairingTokens" (
-                "Id"         SERIAL PRIMARY KEY,
-                "Token"      VARCHAR(32) NOT NULL,
-                "CustomerId" INT NOT NULL REFERENCES "Customers"("Id") ON DELETE CASCADE,
-                "CreatedAt"  TIMESTAMP NOT NULL,
-                "ExpiresAt"  TIMESTAMP NOT NULL,
-                "UsedAt"     TIMESTAMP NULL
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_PairingTokens_Token" ON "PairingTokens"("Token")""");
-
-        // Sidecar transit-network CIDR — must be globally disjoint so sidecar gateway IPs are
-        // unique, which makes the gateway /health verification safe across multiple tunnels.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "SidecarVpnSubnet" VARCHAR(45) NULL""");
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientForeignProfiles" (
-                "Id"                    SERIAL PRIMARY KEY,
-                "ClientId"              INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "SourceCustomerId"      INT NOT NULL REFERENCES "Customers"("Id") ON DELETE CASCADE,
-                "WgPublicKey"           VARCHAR(50) NULL,
-                "WgPrivateKey"          VARCHAR(50) NULL,
-                "VpnIpAddress"          VARCHAR(45) NULL,
-                "PendingConfigFileName" VARCHAR(260) NULL,
-                "PendingConfigContent"  TEXT NULL,
-                "ConfigProvisionedAt"   TIMESTAMP NULL
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientForeignProfiles_ClientId_SourceCustomerId" ON "ClientForeignProfiles" ("ClientId", "SourceCustomerId")""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ClientForeignProfiles" ADD COLUMN IF NOT EXISTS "ProfileName" VARCHAR(50) NULL""");
-
-        // Set by the admin "Kill Tunnel" action; cleared + peer re-added on the client's next Connect event.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgPeerKilled" BOOLEAN NOT NULL DEFAULT FALSE""");
-
-        // Retained copy of every config delivered to a client (keyed by client + profile
-        // name) so a reinstall reassign can re-send all profiles — see ClientConfigArchive.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientConfigArchives" (
-                "Id"            SERIAL PRIMARY KEY,
-                "ClientId"      INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "ProfileName"   VARCHAR(50) NOT NULL,
-                "Content"       TEXT NOT NULL,
-                "PendingResend" BOOLEAN NOT NULL DEFAULT FALSE,
-                "UpdatedAt"     TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientConfigArchives_ClientId_ProfileName" ON "ClientConfigArchives" ("ClientId", "ProfileName")""");
-
-        // Diagnostics: one-shot admin "Request logs" flag + uploaded (gzipped, redacted) log bundles.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingLogRequest" BOOLEAN NOT NULL DEFAULT FALSE""");
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientLogBundles" (
-                "Id"          SERIAL PRIMARY KEY,
-                "ClientId"    INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "UploadedAt"  TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
-                "Trigger"     VARCHAR(20) NOT NULL DEFAULT 'Admin',
-                "FileName"    VARCHAR(260) NOT NULL DEFAULT '',
-                "ContentType" VARCHAR(100) NOT NULL DEFAULT 'application/gzip',
-                "SizeBytes"   INT NOT NULL DEFAULT 0,
-                "Content"     BYTEA NOT NULL DEFAULT ''::bytea
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_ClientLogBundles_ClientId_UploadedAt" ON "ClientLogBundles" ("ClientId", "UploadedAt")""");
-
-        // Per-OS client release streams (windows / linux / macos / android). Replaces the single
-        // shared versions.json manifest — see Admin/Releases + GET /api/version{,/os}.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientReleases" (
-                "Id"           SERIAL PRIMARY KEY,
-                "Os"           VARCHAR(20) NOT NULL,
-                "Version"      VARCHAR(40) NOT NULL,
-                "FileName"     VARCHAR(260) NOT NULL,
-                "Sha256"       VARCHAR(64) NOT NULL DEFAULT '',
-                "SizeBytes"    BIGINT NOT NULL DEFAULT 0,
-                "ReleaseNotes" TEXT NOT NULL DEFAULT '',
-                "UploadedAt"   TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
-                "IsPublished"  BOOLEAN NOT NULL DEFAULT FALSE
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_ClientReleases_Os_UploadedAt" ON "ClientReleases" ("Os", "UploadedAt")""");
-        // Beta channel: per (Os, Channel) publishing + per-client channel selection.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ClientReleases" ADD COLUMN IF NOT EXISTS "Channel" VARCHAR(10) NOT NULL DEFAULT 'stable'""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "UpdateChannel" VARCHAR(10) NOT NULL DEFAULT 'stable'""");
-        // Sidecar-reported physical LAN CIDR(s) behind the host, cached from /info — lets clients
-        // detect a pre-connect LAN conflict even for full-tunnel (0.0.0.0/0) profiles.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "SidecarLanCidrs" VARCHAR(500) NULL""");
-        // One-shot admin "Repair client config" flag — remotely triggers the Windows client's
-        // local repair checks (currently the data-directory ACL self-heal) without waiting for a
-        // service restart. Generic name/column so future client-side repairs can join this same hook.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingConfigRepair" BOOLEAN NOT NULL DEFAULT FALSE""");
-        // One-shot admin "Restart client service" flag — recovery hatch for a client whose
-        // in-memory tunnel state has gone stale (reports Connected with no tunnel present).
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingServiceRestart" BOOLEAN NOT NULL DEFAULT FALSE""");
-        // Networks reachable behind this client (e.g. a Home Assistant LAN), routed to it via
-        // the sidecar's peer AllowedIPs in addition to its own /32 — see Client.RemoteLanCidrs.
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "RemoteLanCidrs" VARCHAR(255) NULL""");
-        // Client-reported problems it couldn't self-resolve (e.g. the ACL self-heal ran and
-        // failed) — surfaced on Admin/Alerts. "Kind" is generic so future failure kinds reuse
-        // this same table instead of a new one each time.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientAlerts" (
-                "Id"             SERIAL PRIMARY KEY,
-                "ClientId"       INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "Kind"           VARCHAR(50) NOT NULL,
-                "Detail"         TEXT NULL,
-                "CreatedAt"      TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
-                "IsAcknowledged" BOOLEAN NOT NULL DEFAULT FALSE,
-                "AcknowledgedAt" TIMESTAMP NULL,
-                "AcknowledgedBy" VARCHAR(255) NULL
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_ClientAlerts_ClientId_Kind_IsAcknowledged" ON "ClientAlerts" ("ClientId", "Kind", "IsAcknowledged")""");
-
-        // Queue of profile-name deletions pending delivery to a client. Replaces the old single
-        // "Clients.PendingDeleteProfileName" scalar, which three independent triggers (foreign
-        // deprovision, native deprovision, admin "Delete profile") could race and silently clobber
-        // — see ClientPendingDelete. The old column is left in place (unused) rather than dropped.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ClientPendingDeletes" (
-                "Id"          SERIAL PRIMARY KEY,
-                "ClientId"    INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
-                "ProfileName" VARCHAR(50) NOT NULL,
-                "CreatedAt"   TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientPendingDeletes_ClientId_ProfileName" ON "ClientPendingDeletes" ("ClientId", "ProfileName")""");
-        // Fold any in-flight scalar delete (set before the queue table above existed) into the new
-        // queue so it isn't silently dropped by this deploy. Cheap and idempotent — once folded,
-        // the scalar is null and this is a no-op on every later startup.
-        foreach (var legacy in await db.Clients.Where(c => c.PendingDeleteProfileName != null).ToListAsync())
+        await db.Database.EnsureCreatedAsync(cancellationToken);
+        // Existing compatibility patches form one atomic repair batch under the startup lease.
+        await using (var patches = await db.Database.BeginTransactionAsync(cancellationToken))
         {
-            await ClientPendingDeleteQueue.QueueAsync(db, legacy.Id, legacy.PendingDeleteProfileName);
-            legacy.PendingDeleteProfileName = null;
+            await SidecarEnrollmentSchema.ApplyAsync(db);
+            await TotpAttemptSchema.ApplyAsync(db);
+
+            // Schema patches run immediately after EnsureCreated — before any EF query that SELECTs
+            // these columns. EF includes every mapped property in its SELECT list, so a new column must
+            // exist in the DB before the first FirstAsync / Any call on that table.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "AppUsers" ADD COLUMN IF NOT EXISTS "TotpLastUsedInterval" BIGINT NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiKey" VARCHAR(128) NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "PreviousApiKey" VARCHAR(128) NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiKeyRotatedAt" TIMESTAMP NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "TrafficRetentionDays" INTEGER NOT NULL DEFAULT 90""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "DefaultHeartbeatIntervalMinutes" INTEGER NOT NULL DEFAULT 1""");
+            // WireGuard traffic accounting: reset-aware lifetime counters on the client + a per-interval sample table.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgRxLastRaw" BIGINT NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgTxLastRaw" BIGINT NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgRxLifetime" BIGINT NOT NULL DEFAULT 0""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgTxLifetime" BIGINT NOT NULL DEFAULT 0""");
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientTrafficSamples" (
+                    "Id"        BIGSERIAL PRIMARY KEY,
+                    "ClientId"  INTEGER   NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "SampledAt" TIMESTAMP NOT NULL,
+                    "RxBytes"   BIGINT    NOT NULL,
+                    "TxBytes"   BIGINT    NOT NULL
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_ClientTrafficSamples_Client_SampledAt" ON "ClientTrafficSamples" ("ClientId", "SampledAt")""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "LicenseLastValidatedAt" TIMESTAMP NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "LicenseStatus" VARCHAR(20) NOT NULL DEFAULT 'Valid'""");
+
+            // MFA session gating (Pro) — columns inert in OSS (NullMfaSessionService). See
+            // docs/design/mfa-session-gating.md. Existing peers default to User/Disabled so
+            // nothing auto-enables enforcement.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PeerType" VARCHAR(10) NOT NULL DEFAULT 'User'""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaPolicy" INT NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaSessionLifetimeHours" INT NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaTotpSecret" VARCHAR(64) NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaTotpEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaEnrollmentOpen" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaTotpLastUsedInterval" BIGINT NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "IsDuplicatePending" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceId" VARCHAR(128) NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_Clients_DeviceId" ON "Clients" ("DeviceId")""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DefaultMfaPolicy" INT NOT NULL DEFAULT 0""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "MfaSessionLifetimeHours" INT NOT NULL DEFAULT 12""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DeviceTunnelEnabled" BOOLEAN NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DeviceTunnelDefaultEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
+            // Port-443 fallback (docs/design/port-443-fallback.md).
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPortEnabled" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPort" INT NOT NULL DEFAULT 443""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackPortActive" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "FallbackTriggerSeconds" INT NOT NULL DEFAULT 20""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ConnectionLogs" ADD COLUMN IF NOT EXISTS "Detail" VARCHAR(255) NOT NULL DEFAULT ''""");
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "MfaSessions" (
+                    "Id"            SERIAL PRIMARY KEY,
+                    "ClientId"      INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "CustomerId"    INT NULL,
+                    "SessionId"     UUID NOT NULL,
+                    "Nonce"         VARCHAR(64) NOT NULL DEFAULT '',
+                    "IssuedAt"      TIMESTAMP NOT NULL,
+                    "ExpiresAt"     TIMESTAMP NOT NULL,
+                    "Status"        VARCHAR(10) NOT NULL DEFAULT 'Active',
+                    "CreatedFromIp" VARCHAR(45) NULL,
+                    "RevokedAt"     TIMESTAMP NULL,
+                    "RevokedBy"     VARCHAR(200) NULL
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE UNIQUE INDEX IF NOT EXISTS "IX_MfaSessions_SessionId" ON "MfaSessions" ("SessionId")""");
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_MfaSessions_ClientId_Status" ON "MfaSessions" ("ClientId", "Status")""");
+
+            // Cross-customer sidecar sharing (Pro) — inert in OSS.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "AllowShareSidecar" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "AllowReceiveForeignProfiles" BOOLEAN NOT NULL DEFAULT FALSE""");
+
+            // DNS search domains — appended to the DNS line as NRPT split-DNS rules so multiple
+            // simultaneous tunnels can each own their own DNS without colliding.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "DnsSearchDomains" VARCHAR(255) NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DnsSearchDomains" VARCHAR(255) NULL""");
+
+            // Client platform/OS ("Windows"/"Linux"/"Android"/"iOS") so the admin UI can
+            // identify mobile devices and the backend can skip desktop-only assumptions.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "Platform" VARCHAR(20) NULL""");
+
+            // Admin-set friendly name shown in place of the hostname when present.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(255) NULL""");
+
+            // FCM token for push-to-approve MFA (mobile).
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "FcmToken" VARCHAR(255) NULL""");
+
+            // Per-client push-to-approve approver device.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "MfaApproverClientId" INT NULL""");
+
+            // Cross-device push-to-approve MFA challenges.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "MfaChallenges" (
+                    "Id"                SERIAL PRIMARY KEY,
+                    "RequesterClientId" INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "ApproverClientId"  INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "MatchNumber"       INT NOT NULL,
+                    "Choices"           VARCHAR(32) NOT NULL DEFAULT '',
+                    "Status"            VARCHAR(20) NOT NULL DEFAULT 'Pending',
+                    "RequesterIp"       VARCHAR(45) NULL,
+                    "CreatedAt"         TIMESTAMP NOT NULL,
+                    "ExpiresAt"         TIMESTAMP NOT NULL
+                )
+                """);
+
+            // QR pairing codes — a device scans one to activate + join a customer in one step.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "PairingTokens" (
+                    "Id"         SERIAL PRIMARY KEY,
+                    "Token"      VARCHAR(32) NOT NULL,
+                    "CustomerId" INT NOT NULL REFERENCES "Customers"("Id") ON DELETE CASCADE,
+                    "CreatedAt"  TIMESTAMP NOT NULL,
+                    "ExpiresAt"  TIMESTAMP NOT NULL,
+                    "UsedAt"     TIMESTAMP NULL
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE UNIQUE INDEX IF NOT EXISTS "IX_PairingTokens_Token" ON "PairingTokens"("Token")""");
+            await DeviceCredentialSchema.ApplyAsync(db);
+
+            // Sidecar transit-network CIDR — must be globally disjoint so sidecar gateway IPs are
+            // unique, which makes the gateway /health verification safe across multiple tunnels.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "SidecarVpnSubnet" VARCHAR(45) NULL""");
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientForeignProfiles" (
+                    "Id"                    SERIAL PRIMARY KEY,
+                    "ClientId"              INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "SourceCustomerId"      INT NOT NULL REFERENCES "Customers"("Id") ON DELETE CASCADE,
+                    "WgPublicKey"           VARCHAR(50) NULL,
+                    "WgPrivateKey"          VARCHAR(50) NULL,
+                    "VpnIpAddress"          VARCHAR(45) NULL,
+                    "PendingConfigFileName" VARCHAR(260) NULL,
+                    "PendingConfigContent"  TEXT NULL,
+                    "ConfigProvisionedAt"   TIMESTAMP NULL
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientForeignProfiles_ClientId_SourceCustomerId" ON "ClientForeignProfiles" ("ClientId", "SourceCustomerId")""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ClientForeignProfiles" ADD COLUMN IF NOT EXISTS "ProfileName" VARCHAR(50) NULL""");
+
+            // Set by the admin "Kill Tunnel" action; cleared + peer re-added on the client's next Connect event.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "WgPeerKilled" BOOLEAN NOT NULL DEFAULT FALSE""");
+
+            // Retained copy of every config delivered to a client (keyed by client + profile
+            // name) so a reinstall reassign can re-send all profiles — see ClientConfigArchive.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientConfigArchives" (
+                    "Id"            SERIAL PRIMARY KEY,
+                    "ClientId"      INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "ProfileName"   VARCHAR(50) NOT NULL,
+                    "Content"       TEXT NOT NULL,
+                    "PendingResend" BOOLEAN NOT NULL DEFAULT FALSE,
+                    "UpdatedAt"     TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientConfigArchives_ClientId_ProfileName" ON "ClientConfigArchives" ("ClientId", "ProfileName")""");
+
+            // Diagnostics: one-shot admin "Request logs" flag + uploaded (gzipped, redacted) log bundles.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingLogRequest" BOOLEAN NOT NULL DEFAULT FALSE""");
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientLogBundles" (
+                    "Id"          SERIAL PRIMARY KEY,
+                    "ClientId"    INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "UploadedAt"  TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    "Trigger"     VARCHAR(20) NOT NULL DEFAULT 'Admin',
+                    "FileName"    VARCHAR(260) NOT NULL DEFAULT '',
+                    "ContentType" VARCHAR(100) NOT NULL DEFAULT 'application/gzip',
+                    "SizeBytes"   INT NOT NULL DEFAULT 0,
+                    "Content"     BYTEA NOT NULL DEFAULT ''::bytea
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_ClientLogBundles_ClientId_UploadedAt" ON "ClientLogBundles" ("ClientId", "UploadedAt")""");
+
+            // Per-OS client release streams (windows / linux / macos / android). Replaces the single
+            // shared versions.json manifest — see Admin/Releases + GET /api/version{,/os}.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientReleases" (
+                    "Id"           SERIAL PRIMARY KEY,
+                    "Os"           VARCHAR(20) NOT NULL,
+                    "Version"      VARCHAR(40) NOT NULL,
+                    "FileName"     VARCHAR(260) NOT NULL,
+                    "Sha256"       VARCHAR(64) NOT NULL DEFAULT '',
+                    "SizeBytes"    BIGINT NOT NULL DEFAULT 0,
+                    "ReleaseNotes" TEXT NOT NULL DEFAULT '',
+                    "UploadedAt"   TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    "IsPublished"  BOOLEAN NOT NULL DEFAULT FALSE
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_ClientReleases_Os_UploadedAt" ON "ClientReleases" ("Os", "UploadedAt")""");
+            // Beta channel: per (Os, Channel) publishing + per-client channel selection.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ClientReleases" ADD COLUMN IF NOT EXISTS "Channel" VARCHAR(10) NOT NULL DEFAULT 'stable'""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "UpdateChannel" VARCHAR(10) NOT NULL DEFAULT 'stable'""");
+            // Sidecar-reported physical LAN CIDR(s) behind the host, cached from /info — lets clients
+            // detect a pre-connect LAN conflict even for full-tunnel (0.0.0.0/0) profiles.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Customers" ADD COLUMN IF NOT EXISTS "SidecarLanCidrs" VARCHAR(500) NULL""");
+            // One-shot admin "Repair client config" flag — remotely triggers the Windows client's
+            // local repair checks (currently the data-directory ACL self-heal) without waiting for a
+            // service restart. Generic name/column so future client-side repairs can join this same hook.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingConfigRepair" BOOLEAN NOT NULL DEFAULT FALSE""");
+            // One-shot admin "Restart client service" flag — recovery hatch for a client whose
+            // in-memory tunnel state has gone stale (reports Connected with no tunnel present).
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "PendingServiceRestart" BOOLEAN NOT NULL DEFAULT FALSE""");
+            // Networks reachable behind this client (e.g. a Home Assistant LAN), routed to it via
+            // the sidecar's peer AllowedIPs in addition to its own /32 — see Client.RemoteLanCidrs.
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Clients" ADD COLUMN IF NOT EXISTS "RemoteLanCidrs" VARCHAR(255) NULL""");
+            // Client-reported problems it couldn't self-resolve (e.g. the ACL self-heal ran and
+            // failed) — surfaced on Admin/Alerts. "Kind" is generic so future failure kinds reuse
+            // this same table instead of a new one each time.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientAlerts" (
+                    "Id"             SERIAL PRIMARY KEY,
+                    "ClientId"       INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "Kind"           VARCHAR(50) NOT NULL,
+                    "Detail"         TEXT NULL,
+                    "CreatedAt"      TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    "IsAcknowledged" BOOLEAN NOT NULL DEFAULT FALSE,
+                    "AcknowledgedAt" TIMESTAMP NULL,
+                    "AcknowledgedBy" VARCHAR(255) NULL
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_ClientAlerts_ClientId_Kind_IsAcknowledged" ON "ClientAlerts" ("ClientId", "Kind", "IsAcknowledged")""");
+
+            // Queue of profile-name deletions pending delivery to a client. Replaces the old single
+            // "Clients.PendingDeleteProfileName" scalar, which three independent triggers (foreign
+            // deprovision, native deprovision, admin "Delete profile") could race and silently clobber
+            // — see ClientPendingDelete. The old column is left in place (unused) rather than dropped.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ClientPendingDeletes" (
+                    "Id"          SERIAL PRIMARY KEY,
+                    "ClientId"    INT NOT NULL REFERENCES "Clients"("Id") ON DELETE CASCADE,
+                    "ProfileName" VARCHAR(50) NOT NULL,
+                    "CreatedAt"   TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ClientPendingDeletes_ClientId_ProfileName" ON "ClientPendingDeletes" ("ClientId", "ProfileName")""");
+            // Fold any in-flight scalar delete (set before the queue table above existed) into the new
+            // queue so it isn't silently dropped by this deploy. Cheap and idempotent — once folded,
+            // the scalar is null and this is a no-op on every later startup.
+            // Project only historical columns: new model columns are installed by
+            // versioned revisions after this compatibility transaction commits.
+            foreach (var legacy in await db.Clients.Where(c => c.PendingDeleteProfileName != null)
+                         .Select(c => new { c.Id, c.PendingDeleteProfileName }).ToListAsync())
+            {
+                await ClientPendingDeleteQueue.QueueAsync(db, legacy.Id, legacy.PendingDeleteProfileName);
+                await db.Clients.Where(c => c.Id == legacy.Id).ExecuteUpdateAsync(s =>
+                    s.SetProperty(c => c.PendingDeleteProfileName, (string?)null));
+            }
+            await db.SaveChangesAsync();
+
+            // Management API (Pro) — token table + ClientKey exposure toggle. Table lives in
+            // OSS because ApplicationDbContext/EnsureCreated are OSS; the controllers that use
+            // it are Pro-only. See docs/design/management-api.md §4.2.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ApiTokens" (
+                    "Id"          SERIAL PRIMARY KEY,
+                    "TokenId"     VARCHAR(20)  NOT NULL,
+                    "SecretHash"  VARCHAR(64)  NOT NULL,
+                    "Name"        VARCHAR(100) NOT NULL DEFAULT '',
+                    "Description" VARCHAR(500),
+                    "Scopes"      VARCHAR(500) NOT NULL DEFAULT '',
+                    "CustomerId"  INTEGER REFERENCES "Customers"("Id") ON DELETE CASCADE,
+                    "IpAllowlist" VARCHAR(500),
+                    "CreatedAt"   TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    "CreatedBy"   VARCHAR(200) NOT NULL DEFAULT '',
+                    "ExpiresAt"   TIMESTAMP,
+                    "LastUsedAt"  TIMESTAMP,
+                    "LastUsedIp"  VARCHAR(45),
+                    "RevokedAt"   TIMESTAMP
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ApiTokens_TokenId" ON "ApiTokens" ("TokenId")""");
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiExposeClientKey" BOOLEAN NOT NULL DEFAULT FALSE""");
+
+            // Management API event feed (docs/design/management-api.md phase 4) — Pro-only writer
+            // (NullManagementEventLog no-ops in OSS), but the table lives here so EF's model and the
+            // idempotent-SQL-patch convention stay in one place regardless of edition.
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TABLE IF NOT EXISTS "ManagementEvents" (
+                    "Id"         BIGSERIAL PRIMARY KEY,
+                    "Type"       VARCHAR(40)  NOT NULL,
+                    "ClientId"   INTEGER,
+                    "CustomerId" INTEGER,
+                    "OccurredAt" TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    "Detail"     VARCHAR(500)
+                )
+                """);
+            await db.Database.ExecuteSqlRawAsync(
+                """CREATE INDEX IF NOT EXISTS "IX_ManagementEvents_CustomerId" ON "ManagementEvents" ("CustomerId")""");
+
+            await patches.CommitAsync(cancellationToken);
         }
-        await db.SaveChangesAsync();
-
-        // Management API (Pro) — token table + ClientKey exposure toggle. Table lives in
-        // OSS because ApplicationDbContext/EnsureCreated are OSS; the controllers that use
-        // it are Pro-only. See docs/design/management-api.md §4.2.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ApiTokens" (
-                "Id"          SERIAL PRIMARY KEY,
-                "TokenId"     VARCHAR(20)  NOT NULL,
-                "SecretHash"  VARCHAR(64)  NOT NULL,
-                "Name"        VARCHAR(100) NOT NULL DEFAULT '',
-                "Description" VARCHAR(500),
-                "Scopes"      VARCHAR(500) NOT NULL DEFAULT '',
-                "CustomerId"  INTEGER REFERENCES "Customers"("Id") ON DELETE CASCADE,
-                "IpAllowlist" VARCHAR(500),
-                "CreatedAt"   TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
-                "CreatedBy"   VARCHAR(200) NOT NULL DEFAULT '',
-                "ExpiresAt"   TIMESTAMP,
-                "LastUsedAt"  TIMESTAMP,
-                "LastUsedIp"  VARCHAR(45),
-                "RevokedAt"   TIMESTAMP
-            )
+        await PeerAddressReservationSchema.ApplyAsync(db);
+        await LegacyDeviceAuthenticationSchema.ApplyAsync(db);
+        await ClientUpdateHaltSchema.ApplyAsync(db);
+        await SchemaChangeRunner.ApplyAsync(db, "20261029-02-history-retention-indexes", """
+            CREATE INDEX IF NOT EXISTS "IX_AuditLogs_Timestamp" ON "AuditLogs" ("Timestamp");
+            CREATE INDEX IF NOT EXISTS "IX_ConnectionLogs_OccurredAt" ON "ConnectionLogs" ("OccurredAt");
+            CREATE INDEX IF NOT EXISTS "IX_ErrorLogs_OccurredAt" ON "ErrorLogs" ("OccurredAt");
+            CREATE INDEX IF NOT EXISTS "IX_ClientLogBundles_UploadedAt" ON "ClientLogBundles" ("UploadedAt");
             """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_ApiTokens_TokenId" ON "ApiTokens" ("TokenId")""");
-        await db.Database.ExecuteSqlRawAsync(
-            """ALTER TABLE "ServerSettings" ADD COLUMN IF NOT EXISTS "ApiExposeClientKey" BOOLEAN NOT NULL DEFAULT FALSE""");
-
-        // Management API event feed (docs/design/management-api.md phase 4) — Pro-only writer
-        // (NullManagementEventLog no-ops in OSS), but the table lives here so EF's model and the
-        // idempotent-SQL-patch convention stay in one place regardless of edition.
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            CREATE TABLE IF NOT EXISTS "ManagementEvents" (
-                "Id"         BIGSERIAL PRIMARY KEY,
-                "Type"       VARCHAR(40)  NOT NULL,
-                "ClientId"   INTEGER,
-                "CustomerId" INTEGER,
-                "OccurredAt" TIMESTAMP    NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
-                "Detail"     VARCHAR(500)
-            )
-            """);
-        await db.Database.ExecuteSqlRawAsync(
-            """CREATE INDEX IF NOT EXISTS "IX_ManagementEvents_CustomerId" ON "ManagementEvents" ("CustomerId")""");
 
         // Seed ServerSettings row (Id = 1).
         if (!db.ServerSettings.Any())
@@ -743,6 +805,9 @@ public static class OssStartup
             }
             catch (Exception ex)
             {
+                // A swallowed optional file-import error must never reconnect after
+                // losing the session that serialized initialization.
+                schemaLease.EnsureHeld();
                 app.Logger.LogWarning(ex, "versions.json -> ClientReleases migration skipped.");
             }
         }
@@ -779,6 +844,13 @@ public static class OssStartup
             var store = app.Services.GetRequiredService<ApiKeyStore>();
             store.Key         = s.ApiKey!;
             store.PreviousKey = s.PreviousApiKey;
+            var migration = app.Services.GetRequiredService<DeviceAuthenticationPolicy>();
+            if (migration.LegacyEnabled)
+            {
+                var remaining = await db.Clients.CountAsync(c => !c.IsDeleted && c.DeviceCredentialHash == null && c.LegacyAuthenticationEligible);
+                app.Logger.LogWarning("Temporary shared-key device authentication enabled until {UntilUtc}; {EligibleDevices} legacy devices remain. Shared-key impersonation risk remains for these devices.",
+                    migration.LegacyUntilUtc, remaining);
+            }
         }
 
         // Load the system-wide default heartbeat interval into its in-memory cache.
@@ -788,41 +860,14 @@ public static class OssStartup
                 s.DefaultHeartbeatIntervalMinutes is >= 1 and <= 60 ? s.DefaultHeartbeatIntervalMinutes : 1;
         }
 
+
         // Bootstrap internal CA (no-op in OSS; Pro CaService generates key material).
         var caService = app.Services.GetRequiredService<ICaService>();
-        await caService.EnsureBootstrappedAsync();
+        await caService.EnsureBootstrappedAsync(db);
 
-        // Bootstrap admin user from env vars.
-        {
-            var adminEmail    = app.Configuration["Valenius:AdminEmail"];
-            if (string.IsNullOrEmpty(adminEmail))
-                adminEmail    = app.Configuration["ADMIN_EMAIL"];
-            var adminPassword = app.Configuration["Valenius:AdminPassword"];
-            if (string.IsNullOrEmpty(adminPassword))
-                adminPassword = app.Configuration["ADMIN_PASSWORD"];
-            if (!string.IsNullOrEmpty(adminEmail) && !string.IsNullOrEmpty(adminPassword))
-            {
-                const string bootstrapSubject = "local:bootstrap";
-                var bootstrap = await db.AppUsers.FirstOrDefaultAsync(u => u.Subject == bootstrapSubject);
-                if (bootstrap is null)
-                {
-                    bootstrap = new Models.AppUser { Subject = bootstrapSubject, Role = "Admin" };
-                    db.AppUsers.Add(bootstrap);
-                }
-                bootstrap.DisplayName = "Admin";
-                bootstrap.Email       = adminEmail;
-                // Only re-hash when the password actually changed (avoids unnecessary write on every restart).
-                // When it DOES change (admin set a new ADMIN_PASSWORD in env vars), also clear TOTP so the
-                // admin is never locked out of the bootstrap account after a phone loss.
-                if (bootstrap.PasswordHash is null || !PasswordHasher.Verify(adminPassword, bootstrap.PasswordHash))
-                {
-                    bootstrap.PasswordHash = PasswordHasher.Hash(adminPassword);
-                    bootstrap.TotpSecret   = null;
-                    bootstrap.TotpEnabled  = false;
-                }
-                await db.SaveChangesAsync();
-            }
-        }
+        // Deployment credentials initialize an empty user database only.
+        await BootstrapAdminSeeder.SeedAsync(db, app.Configuration);
+        schemaLease.EnsureHeld();
     }
 
     /// <summary>
@@ -962,15 +1007,30 @@ public static class OssStartup
         var rawAssets    = app.Configuration["Valenius:DownloadAssetsPath"] ?? "download-assets";
         var assetsPath   = Path.IsPathRooted(rawAssets) ? rawAssets : Path.Combine(appDir, rawAssets);
 
-        static string DownloadUrlFor(string fileName) => $"/api/download/{Uri.EscapeDataString(fileName)}";
+        static string DownloadUrlFor(string fileName, string channel) =>
+            $"/api/download/{Uri.EscapeDataString(fileName)}" + (channel == Models.ReleaseChannel.Beta ? "?channel=beta" : "");
+
+        // Deployed clients (including Beta devices) probe the unqualified /api/version
+        // URL for reachability. Keep that probe successful while advertising no update.
+        // 0.0.0 cannot upgrade an installed client; no installer URL/hash is disclosed.
+        static VersionManifest HaltedManifest() => new()
+        {
+            Version = "0.0.0",
+            ReleaseNotes = "Client updates are paused by the administrator."
+        };
 
         // Legacy combined manifest — kept byte-compatible for the deployed Windows/Linux fleet:
         // Windows fields from the published Windows release, Linux fields from the published Linux one.
         // ?channel=beta selects the beta stream (falling back to stable when no beta exists); no
         // channel param ⇒ stable, so existing clients are unaffected.
-        app.MapGet("/api/version", async (string? channel, ApplicationDbContext db) =>
+        app.MapGet("/api/version", async (string? channel, ApplicationDbContext db, HttpContext ctx) =>
         {
+            ctx.Response.Headers.CacheControl = "no-store";
             var ch  = Models.ReleaseChannel.Normalize(channel);
+            if (ch != Models.ReleaseChannel.Beta && await ClientUpdateHalt.IsEnabledAsync(db))
+            {
+                return Results.Ok(HaltedManifest());
+            }
             var win = await ResolvePublishedReleaseAsync(db, Models.ReleaseOs.Windows, ch);
             var lin = await ResolvePublishedReleaseAsync(db, Models.ReleaseOs.Linux, ch);
             if (win is null && lin is null)
@@ -978,34 +1038,50 @@ public static class OssStartup
             return Results.Ok(new VersionManifest
             {
                 Version      = win?.Version ?? "",
-                DownloadUrl  = win is not null ? DownloadUrlFor(win.FileName) : "",
+                DownloadUrl  = win is not null ? DownloadUrlFor(win.FileName, ch) : "",
                 Sha256       = win?.Sha256 ?? "",
                 ReleaseNotes = win?.ReleaseNotes ?? "",
-                LinuxUrl     = lin is not null ? DownloadUrlFor(lin.FileName) : null,
+                LinuxUrl     = lin is not null ? DownloadUrlFor(lin.FileName, ch) : null,
                 LinuxSha256  = lin?.Sha256,
             });
         });
 
         // Per-OS stream — windows | linux | macos | android. Independent version per OS + channel.
         // ?channel=beta with beta→stable fallback; no param ⇒ stable.
-        app.MapGet("/api/version/{os}", async (string os, string? channel, ApplicationDbContext db) =>
+        app.MapGet("/api/version/{os}", async (string os, string? channel, ApplicationDbContext db, HttpContext ctx) =>
         {
+            ctx.Response.Headers.CacheControl = "no-store";
             os = os.ToLowerInvariant();
             if (!Models.ReleaseOs.IsValid(os)) return Results.NotFound("Unknown OS stream.");
-            var rel = await ResolvePublishedReleaseAsync(db, os, Models.ReleaseChannel.Normalize(channel));
+            var ch = Models.ReleaseChannel.Normalize(channel);
+            if (ch != Models.ReleaseChannel.Beta && await ClientUpdateHalt.IsEnabledAsync(db))
+            {
+                return Results.Ok(HaltedManifest());
+            }
+            var rel = await ResolvePublishedReleaseAsync(db, os, ch);
             if (rel is null) return Results.NotFound($"No published {os} release.");
             return Results.Ok(new VersionManifest
             {
                 Version      = rel.Version,
-                DownloadUrl  = DownloadUrlFor(rel.FileName),
+                DownloadUrl  = DownloadUrlFor(rel.FileName, ch),
                 Sha256       = rel.Sha256,
                 ReleaseNotes = rel.ReleaseNotes,
             });
         });
 
-        app.MapGet("/api/download/{fileName}", (string fileName, HttpContext ctx) =>
+        app.MapGet("/api/download/{fileName}", async (string fileName, string? channel, ApplicationDbContext db, HttpContext ctx) =>
         {
+            ctx.Response.Headers.CacheControl = "no-store";
             var safeName = Path.GetFileName(fileName);
+            // Also stop downloads from previously fetched stable manifests. Beta manifests
+            // carry their channel into the URL, including when falling back to stable.
+            if (Models.ReleaseChannel.Normalize(channel) != Models.ReleaseChannel.Beta
+                && await ClientUpdateHalt.IsEnabledAsync(db)
+                && await db.ClientReleases.AnyAsync(r => r.FileName == safeName))
+            {
+                ctx.Response.Headers.RetryAfter = "60";
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
             // Prefer an admin-uploaded file on the volume; fall back to a baked-in asset.
             var filePath = Path.Combine(downloadsPath, safeName);
             if (!File.Exists(filePath))

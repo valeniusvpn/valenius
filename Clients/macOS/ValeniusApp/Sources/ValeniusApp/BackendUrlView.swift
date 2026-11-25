@@ -24,7 +24,7 @@ struct BackendUrlView: View {
 
             Text("Connect to your Valenius server")
                 .font(.headline)
-            Text("Enter the address of your Valenius server. Your administrator provided this — just the server name, for example vpn.company.com.")
+            Text("Enter the address of your Valenius server. Administrator provisioning is required; use your organization's setup instructions.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

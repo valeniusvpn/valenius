@@ -110,6 +110,10 @@ public class TunnelStatus
     /// </summary>
     public ConnectedTunnelInfo[] ConnectedTunnels { get; set; } = [];
     public bool? RegistrationIsActive { get; set; }
+    /// <summary>Last backend check result; null until this service instance has checked.</summary>
+    public bool? BackendReachable { get; set; }
+    /// <summary>Expiry of cached device activation; does not extend an MFA session.</summary>
+    public DateTime? OfflineAccessExpiresAt { get; set; }
     public bool HasStagedConfig { get; set; }
     public bool UpdateAvailable { get; set; }
 

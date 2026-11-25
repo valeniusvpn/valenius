@@ -228,8 +228,17 @@ internal sealed class TrayPopupForm : Form
     public void RefreshStatus(TunnelStatus status)
     {
         if (!Visible) return;
+        var previousRight = Right;
+        var previousBottom = Bottom;
         BuildRows(status);
+        ComputeWidth();
         ApplyLayout();
+        var screen = Screen.FromControl(this).WorkingArea;
+        int height = _padTop + _rows.Sum(r => r.Bounds.Height) + _padBottom;
+        Bounds = new Rectangle(
+            Math.Clamp(previousRight - _w, screen.Left, Math.Max(screen.Left, screen.Right - _w)),
+            Math.Clamp(previousBottom - height, screen.Top, Math.Max(screen.Top, screen.Bottom - height)),
+            _w, height);
         Invalidate();
     }
 
@@ -268,6 +277,20 @@ internal sealed class TrayPopupForm : Form
         _rows.Clear();
 
         _rows.Add(new Row { Kind = RowKind.Header, Text = "Valenius" });
+
+        if (!status.StandaloneMode && status.BackendReachable == false)
+        {
+            _rows.Add(new Row { Kind = RowKind.Action, Text = "Management server unavailable", Enabled = false });
+            if (status.OfflineAccessExpiresAt is { } offlineExpiry)
+                _rows.Add(new Row
+                {
+                    Kind = RowKind.Action,
+                    Text = offlineExpiry > DateTime.UtcNow
+                        ? $"Cached access until {offlineExpiry.ToLocalTime():g}"
+                        : "Cached access expired — reconnect to server",
+                    Enabled = false
+                });
+        }
 
         // Standalone has no backend to register against — RegistrationIsActive is always
         // false/null there, so it must be excluded here or "Register Client" shows permanently.
@@ -421,6 +444,10 @@ internal sealed class TrayPopupForm : Form
             var sz = TextRenderer.MeasureText(header.Text, _fHeader);
             _w = Math.Max(_minW, textStart + sz.Width + _padLeft);
         }
+        // In particular, the outage/expiry messages must remain readable. Profile
+        // names retain their existing ellipsis behavior; action text is bounded UI copy.
+        foreach (var row in _rows.Where(r => r.Kind == RowKind.Action))
+            _w = Math.Max(_w, TextRenderer.MeasureText(row.Text, _fAction).Width + 2 * _padLeft);
     }
 
     private void ApplyLayout()

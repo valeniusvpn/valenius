@@ -13,7 +13,7 @@ public class LogoutModel(IWebHostEnvironment env, IAuthenticationSchemeProvider 
 {
     public async Task<IActionResult> OnPostAsync()
     {
-        _ = audit.LogAsync(Audit.Auth, "Logout",
+        await audit.LogAsync(Audit.Auth, "Logout",
             $"User: {User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value ?? User.FindFirst("sub")?.Value ?? "Unknown"}");
 
         if (env.IsDevelopment())

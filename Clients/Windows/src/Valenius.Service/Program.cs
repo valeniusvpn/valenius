@@ -1,6 +1,29 @@
 using Microsoft.Extensions.Logging.EventLog;
 using Valenius.Service;
 
+// Read-only release validation also exercises the trimmed production verifier without
+// starting a service, loading device state, disconnecting tunnels or installing anything.
+if (args.Length > 0 && args[0] == "--verify-update")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("Usage: Valenius.Service.exe --verify-update <installer> <version> <sha256>");
+        Environment.ExitCode = 2;
+        return;
+    }
+    try
+    {
+        using var verified = VerifiedUpdateInstaller.Open(args[1], args[3], args[2], "0.0.0");
+        Console.WriteLine($"Verified Windows installer {args[2]}; signer {verified.SignerThumbprint}.");
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine("Update validation refused: " + error.Message);
+        Environment.ExitCode = 1;
+    }
+    return;
+}
+
 IHost host = Host.CreateDefaultBuilder(args)
     .UseWindowsService(options =>
     {
@@ -44,6 +67,7 @@ IHost host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<TunnelStateManager>();
         services.AddSingleton<WireGuardController>();
         services.AddSingleton<ConfigManager>();
+        services.AddSingleton(TimeProvider.System);
         services.AddSingleton<RegistrationManager>();
         services.AddSingleton<AutoConnectManager>();
 
@@ -57,9 +81,9 @@ IHost host = Host.CreateDefaultBuilder(args)
         // (set via the tray first-run prompt when the installer provided no URL) always wins.
         services.AddSingleton<BackendUrlProvider>();
 
-        services.AddHttpClient("Update");          // anonymous client for update manifest + installer download
+        services.AddHttpClient("Update", client => client.MaxResponseContentBufferSize = 16 * 1024 * 1024);          // anonymous client for update manifest + installer download
         services.AddSingleton<UpdateChecker>();    // singleton so ClientRegistrationService can trigger it
-        services.AddHttpClient("Registration")
+        services.AddHttpClient("Registration", client => client.MaxResponseContentBufferSize = 16 * 1024 * 1024)
             .AddHttpMessageHandler<ApiKeyHandler>();
         // Separate client for long-poll: explicit 70-second timeout to outlast the
         // server's 55-second hold without the default 100-second global timeout causing
@@ -67,6 +91,7 @@ IHost host = Host.CreateDefaultBuilder(args)
         services.AddHttpClient("LongPoll", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(70);
+            client.MaxResponseContentBufferSize = 16 * 1024 * 1024;
         }).AddHttpMessageHandler<ApiKeyHandler>();
 
         services.AddSingleton<ConnectivityVerifier>();

@@ -7,7 +7,11 @@ public class SidecarCertificate
 
     public int CustomerId { get; set; }
 
-    /// <summary>CN from the CSR, e.g. "wg-sidecar-wg0".</summary>
+    /// <summary>
+    /// Issued customer identity (wg-sidecar-{CustomerId}) for new enrollments.
+    /// Legacy records may have interface CNs or inaccurate labels; the enrolled
+    /// certificate fingerprint and CustomerId are the authorization authority.
+    /// </summary>
     public string SubjectCn { get; set; } = "";
 
     /// <summary>Full certificate PEM.</summary>

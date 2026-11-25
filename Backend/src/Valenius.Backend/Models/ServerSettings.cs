@@ -60,7 +60,7 @@ public class ServerSettings
     [MaxLength(500)]
     public string? SmtpPassword { get; set; }
 
-    /// <summary>When true uses implicit SSL (port 465). When false uses STARTTLS (port 587).</summary>
+    /// <summary>True: implicit TLS (usually port 465). False: required STARTTLS (usually port 587). Plaintext fallback is never allowed.</summary>
     public bool SmtpUseSsl { get; set; }
 
     /// <summary>
@@ -95,6 +95,10 @@ public class ServerSettings
     /// register cadence / presence refresh; admin-triggered actions (Connect, config push, etc.)
     /// are delivered independently via the long-poll (~1 s-55 s), not gated by this value.</summary>
     public int DefaultHeartbeatIntervalMinutes { get; set; } = 1;
+
+    /// <summary>Pause delivery of client configuration and software updates, except Beta.
+    /// Authentication, revocation and MFA remain live.</summary>
+    public bool ClientUpdateHaltEnabled { get; set; }
 
     // ── Operational metadata ──────────────────────────────────────────────
     public DateTime? LastBackupAt { get; set; }

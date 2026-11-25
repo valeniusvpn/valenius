@@ -5,7 +5,7 @@ namespace Valenius.Backend.Filters;
 
 /// <summary>
 /// Authenticates and authorizes Management API (<c>/api/mgmt/v1/**</c>) requests via
-/// <c>Authorization: Bearer vlnm_...</c> tokens. Mirrors <see cref="ApiKeyFilter"/>'s
+/// <c>Authorization: Bearer vlnm_...</c> tokens. Mirrors <see cref="DeviceCredentialFilter"/>'s
 /// fail-closed shape, but for a different credential plane (docs/design/management-api.md
 /// §2) with per-action scope requirements instead of one shared key: every action must
 /// declare <see cref="RequireScopeAttribute"/> or opt out of the scope check with
@@ -40,16 +40,19 @@ public sealed class ApiTokenFilter(ApiCallerResolver resolver) : IAsyncActionFil
             return;
         }
 
-        var requiredScope = context.ActionDescriptor.EndpointMetadata.OfType<RequireScopeAttribute>().FirstOrDefault();
+        var requiredScopes = context.ActionDescriptor.EndpointMetadata.OfType<RequireScopeAttribute>().ToArray();
         var scopeExempt = context.ActionDescriptor.EndpointMetadata.OfType<MgmtAnonymousAttribute>().Any();
 
-        if (requiredScope is not null)
+        if (requiredScopes.Length > 0)
         {
-            if (!caller.HasScope(requiredScope.Scope))
+            foreach (var requiredScope in requiredScopes)
             {
-                context.Result = ManagementProblem.Forbidden(
-                    "insufficient_scope", $"This token lacks the required scope '{requiredScope.Scope}'.");
-                return;
+                if (!caller.HasScope(requiredScope.Scope))
+                {
+                    context.Result = ManagementProblem.Forbidden(
+                        "insufficient_scope", $"This token lacks the required scope '{requiredScope.Scope}'.");
+                    return;
+                }
             }
         }
         else if (!scopeExempt)

@@ -48,6 +48,9 @@ public class AppUser
     /// </summary>
     public long? TotpLastUsedInterval { get; set; }
 
+    public int TotpFailureCount { get; set; }
+    public DateTime? TotpFailureWindowEndsAt { get; set; }
+
     /// <summary>True if this is a local (non-OIDC) user (Subject starts with "local:").</summary>
     public bool IsLocalUser => Subject.StartsWith("local:", StringComparison.Ordinal);
 }

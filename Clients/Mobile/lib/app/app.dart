@@ -37,7 +37,34 @@ class _RootGate extends ConsumerWidget {
         body: Center(child: CircularProgressIndicator(color: ValeniusColors.dotOn)),
       );
     }
+    if (urlState.storageError != null) return const _StorageErrorScreen();
     if (!urlState.configured) return const SetupScreen();
     return const HomeScreen();
+  }
+}
+
+/// Secure storage couldn't be read this launch (see SecureKeyStore). Deliberately a
+/// dead end rather than the setup screen: setting the device up again would create a
+/// second identity. Reopening the app retries.
+class _StorageErrorScreen extends StatelessWidget {
+  const _StorageErrorScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: ValeniusColors.bg,
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Text(
+            'Valenius could not open its secure storage.\n\n'
+            'Please close the app completely and open it again. '
+            'If this keeps happening, contact your administrator.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: ValeniusColors.profileText, fontSize: 16),
+          ),
+        ),
+      ),
+    );
   }
 }

@@ -21,12 +21,22 @@ public class UpdateChecker : BackgroundService
     /// forever. Cleared when a path is successfully deleted, so a future recurrence warns again.</summary>
     private readonly HashSet<string> _warnedStuckInstallers = new(StringComparer.OrdinalIgnoreCase);
 
-    private static readonly string UpdatesDir =
+    private static readonly string DefaultUpdatesDir =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "Valenius", "updates");
+    private readonly string UpdatesDir;
+    private readonly Action<string> _launchInstaller;
+    private readonly Func<CancellationToken, Task> _disconnectTunnels;
+    private readonly Action<string, string> _runProcess;
 
     public UpdateChecker(IHttpClientFactory httpFactory, ILogger<UpdateChecker> logger,
         WireGuardController wg, TunnelStateManager state, RegistrationManager registration, BackendUrlProvider backendUrl)
+        : this(httpFactory, logger, wg, state, registration, backendUrl, DefaultUpdatesDir) { }
+
+    internal UpdateChecker(IHttpClientFactory httpFactory, ILogger<UpdateChecker> logger,
+        WireGuardController wg, TunnelStateManager state, RegistrationManager registration, BackendUrlProvider backendUrl,
+        string updatesDir, Action<string>? launchInstaller = null, Func<CancellationToken, Task>? disconnectTunnels = null,
+        Action<string, string>? runProcess = null)
     {
         _httpFactory  = httpFactory;
         _logger       = logger;
@@ -34,6 +44,10 @@ public class UpdateChecker : BackgroundService
         _state        = state;
         _registration = registration;
         _backendUrl   = backendUrl;
+        UpdatesDir = updatesDir;
+        _launchInstaller = launchInstaller ?? LaunchInstallerDetached;
+        _disconnectTunnels = disconnectTunnels ?? DisconnectRunningTunnelsAsync;
+        _runProcess = runProcess ?? RunProcess;
         Directory.CreateDirectory(UpdatesDir);
     }
 
@@ -77,7 +91,8 @@ public class UpdateChecker : BackgroundService
         if (backendUrl is null)
             return new VersionCheckResult { CurrentVersion = GetCurrentVersion() };
 
-        var manifest = await CreateHttp().GetFromJsonAsync(VersionUrl(backendUrl), ValeniusJsonContext.Default.VersionManifest, ct);
+        using var http = CreateHttp();
+        var manifest = await http.GetFromJsonAsync(VersionUrl(backendUrl), ValeniusJsonContext.Default.VersionManifest, ct);
         if (manifest is null)
             throw new InvalidOperationException("Server returned an empty version manifest.");
 
@@ -109,7 +124,8 @@ public class UpdateChecker : BackgroundService
 
         try
         {
-            var manifest = await CreateHttp().GetFromJsonAsync(VersionUrl(backendUrl), ValeniusJsonContext.Default.VersionManifest, ct);
+            using var http = CreateHttp();
+            var manifest = await http.GetFromJsonAsync(VersionUrl(backendUrl), ValeniusJsonContext.Default.VersionManifest, ct);
             if (manifest is null || !IsNewer(manifest.Version, GetCurrentVersion()))
                 return;
 
@@ -119,7 +135,10 @@ public class UpdateChecker : BackgroundService
             // disk is never executed as SYSTEM.
             if (File.Exists(installerPath))
             {
-                var cachedHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(installerPath, ct))).ToLowerInvariant();
+                using var cached = File.OpenRead(installerPath);
+                if (cached.Length > 512L * 1024 * 1024) throw new InvalidDataException("Cached update exceeds 512 MiB.");
+                var cachedHash = Convert.ToHexString(await SHA256.HashDataAsync(cached, ct)).ToLowerInvariant();
+                cached.Close();
                 if (!cachedHash.Equals(manifest.Sha256.ToLowerInvariant(), StringComparison.Ordinal))
                 {
                     _logger.LogWarning("Cached installer hash mismatch — re-downloading. Expected {Expected}, got {Actual}", manifest.Sha256, cachedHash);
@@ -127,7 +146,7 @@ public class UpdateChecker : BackgroundService
                 }
                 else
                 {
-                    _logger.LogInformation("Installer already present and verified, launching: {Path}", installerPath);
+                    _logger.LogInformation("Installer already present with matching hash: {Path}", installerPath);
                 }
             }
 
@@ -138,18 +157,36 @@ public class UpdateChecker : BackgroundService
                 var downloadUrl = Uri.IsWellFormedUriString(manifest.DownloadUrl, UriKind.Absolute)
                     ? manifest.DownloadUrl
                     : $"{backendUrl}{manifest.DownloadUrl}";
-                var data = await CreateHttp().GetByteArrayAsync(downloadUrl, ct);
-
-                var actualHash = Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
-                if (!actualHash.Equals(manifest.Sha256.ToLowerInvariant(), StringComparison.Ordinal))
+                var temporary = installerPath + ".partial";
+                try
                 {
-                    _logger.LogError("Update hash mismatch. Expected {Expected}, got {Actual}", manifest.Sha256, actualHash);
-                    return;
+                    using var downloadDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    downloadDeadline.CancelAfter(TimeSpan.FromMinutes(5));
+                    var downloadToken = downloadDeadline.Token;
+                    using var response = await http.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, downloadToken);
+                    response.EnsureSuccessStatusCode();
+                    if (response.Content.Headers.ContentLength > 512L * 1024 * 1024)
+                        throw new InvalidDataException("Update exceeds 512 MiB.");
+                    await using (var input = await response.Content.ReadAsStreamAsync(downloadToken))
+                    await using (var output = File.Create(temporary))
+                        await CopyBoundedAsync(input, output, 512L * 1024 * 1024, downloadToken);
+                    using var downloaded = File.OpenRead(temporary);
+                    var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(downloaded, ct)).ToLowerInvariant();
+                    if (!actualHash.Equals(manifest.Sha256, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("Update hash mismatch.");
+                    downloaded.Close();
+                    File.Move(temporary, installerPath, overwrite: true);
                 }
-
-                await File.WriteAllBytesAsync(installerPath, data, ct);
-                _logger.LogInformation("Update downloaded and verified: {Path}", installerPath);
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
+                _logger.LogInformation("Update downloaded with matching hash: {Path}", installerPath);
             }
+
+            // Backend-provided hashes alone are not publisher authorization. This gate
+            // applies equally to downloads and cached files, before any disruptive action.
+            using var verified = VerifiedUpdateInstaller.Open(installerPath, manifest.Sha256,
+                manifest.Version, Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? GetCurrentVersion());
+            ct.ThrowIfCancellationRequested();
+            _logger.LogInformation("Installer signature, publisher and signed release version verified: {Path}", installerPath);
 
             // Delete older installers before launching — the service will be killed
             // by the installer shortly after, so this is the last chance to clean up.
@@ -163,26 +200,8 @@ public class UpdateChecker : BackgroundService
             // wireguard.exe is bundled in the installer and cannot be overwritten while
             // any WireGuardTunnel$ service holds it locked.
             // The installer's CurStepChanged also does this as a safety net.
-            try
-            {
-                var running = _wg.GetRunningTunnels().ToList();
-                foreach (var tunnelName in running)
-                {
-                    _logger.LogInformation("Update: stopping WireGuard tunnel '{Tunnel}'.", tunnelName);
-                    await _wg.DisconnectAsync(tunnelName);
-                }
-                if (running.Count > 0)
-                {
-                    _state.SetDisconnected();
-                    _logger.LogInformation("Update: all tunnels disconnected ({Count}). Launching installer.", running.Count);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Update: could not fully disconnect VPN tunnels; installer will handle it.");
-            }
-
-            LaunchInstallerDetached(installerPath);
+            await _disconnectTunnels(ct);
+            _launchInstaller(installerPath);
         }
         catch (Exception ex)
         {
@@ -192,6 +211,41 @@ public class UpdateChecker : BackgroundService
         finally
         {
             _downloadLock.Release();
+        }
+    }
+
+    internal static async Task CopyBoundedAsync(Stream input, Stream output, long maximum, CancellationToken ct)
+    {
+        var buffer = new byte[65536];
+        long received = 0;
+        int count;
+        while ((count = await input.ReadAsync(buffer, ct)) != 0)
+        {
+            received += count;
+            if (received > maximum) throw new InvalidDataException("Download exceeds its size limit.");
+            await output.WriteAsync(buffer.AsMemory(0, count), ct);
+        }
+    }
+
+    private async Task DisconnectRunningTunnelsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var running = _wg.GetRunningTunnels().ToList();
+            foreach (var tunnelName in running)
+            {
+                _logger.LogInformation("Update: stopping WireGuard tunnel '{Tunnel}'.", tunnelName);
+                await _wg.DisconnectAsync(tunnelName);
+            }
+            if (running.Count > 0)
+            {
+                _state.SetDisconnected();
+                _logger.LogInformation("Update: all tunnels disconnected ({Count}). Launching installer.", running.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Update: could not fully disconnect VPN tunnels; installer will handle it.");
         }
     }
 
@@ -274,7 +328,10 @@ public class UpdateChecker : BackgroundService
     /// /LOG so a failed silent install leaves a diagnosable trail, and deletes the task
     /// after the installer exits.
     /// </summary>
-    private void LaunchInstallerDetached(string installerPath)
+    internal void LaunchInstallerDetached(string installerPath) =>
+        ServiceFileAccess.Run(() => LaunchInstallerDetachedCore(installerPath));
+
+    private void LaunchInstallerDetachedCore(string installerPath)
     {
         // Write a UNIQUELY-NAMED launch script each run rather than overwriting a fixed
         // run-update.cmd. A leftover copy can be read-only, locked by a still-running task,
@@ -290,14 +347,25 @@ public class UpdateChecker : BackgroundService
             $"\"{installerPath}\" /SILENT /NORESTART /LOG=\"{logPath}\"\r\n" +
             $"schtasks /Delete /TN {UpdateTaskName} /F\r\n" +
             "del /f /q \"%~f0\"\r\n";   // one-shot: self-delete the launch script when done
-        File.WriteAllText(cmdPath, script);
+        ServiceFileAccess.WritePrivateText(cmdPath, script);
 
-        // UpdatesDir lives under C:\ProgramData (no spaces), so a single quote layer is
-        // enough for the /TR value.
-        RunProcess("schtasks.exe",
-            $"/Create /TN {UpdateTaskName} /TR \"{cmdPath}\" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F");
-        RunProcess("schtasks.exe", $"/Run /TN {UpdateTaskName}");
-        _logger.LogInformation("Update: installer launched via scheduled task '{Task}'.", UpdateTaskName);
+        // schtasks /Create's default battery restrictions prevent laptop updates.
+        // Import an explicit demand-start definition; keep the installer detached
+        // as SYSTEM and allow both starting and continuing on battery power.
+        var taskXmlPath = cmdPath + ".xml";
+        try
+        {
+            ServiceFileAccess.WritePrivateText(taskXmlPath, UpdateTaskDefinition.Create(cmdPath));
+            _runProcess("schtasks.exe", $"/Create /TN {UpdateTaskName} /XML \"{taskXmlPath}\" /F");
+            _runProcess("schtasks.exe", $"/Run /TN {UpdateTaskName}");
+            _logger.LogInformation("Update: scheduler accepted installer task '{Task}' (battery power allowed).", UpdateTaskName);
+        }
+        finally
+        {
+            try { File.Delete(taskXmlPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     /// <summary>
@@ -336,16 +404,19 @@ public class UpdateChecker : BackgroundService
         };
         using var p = System.Diagnostics.Process.Start(psi);
         if (p is null)
+            throw new InvalidOperationException($"Update: could not start {fileName}.");
+        var stdout = p.StandardOutput.ReadToEndAsync();
+        var stderr = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(15_000))
         {
-            _logger.LogWarning("Update: could not start {File}.", fileName);
-            return;
+            p.Kill(entireProcessTree: true);
+            throw new TimeoutException($"Update: {fileName} timed out.");
         }
-        var stdout = p.StandardOutput.ReadToEnd();
-        var stderr = p.StandardError.ReadToEnd();
-        p.WaitForExit(15_000);
+        if (!Task.WhenAll(new Task[] { stdout, stderr }).Wait(15_000))
+            throw new TimeoutException($"Update: could not finish reading {fileName} output.");
         if (p.ExitCode != 0)
-            _logger.LogWarning("Update: {File} {Args} exited {Code}. {Out} {Err}",
-                fileName, arguments, p.ExitCode, stdout.Trim(), stderr.Trim());
+            throw new InvalidOperationException($"Update: {fileName} exited {p.ExitCode}. " +
+                stdout.GetAwaiter().GetResult().Trim() + " " + stderr.GetAwaiter().GetResult().Trim());
     }
 
     public static string GetCurrentVersion()

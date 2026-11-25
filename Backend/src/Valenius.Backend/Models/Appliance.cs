@@ -61,5 +61,6 @@ public enum ApplianceStatus
     Offline,
     Updating,
     UpdateFailed,
-    RolledBack
+    RolledBack,
+    UpdateBlocked
 }

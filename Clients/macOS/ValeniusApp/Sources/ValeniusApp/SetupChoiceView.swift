@@ -19,7 +19,7 @@ struct SetupChoiceView: View {
 
             Text("Set up Valenius")
                 .font(.headline)
-            Text("Connect to a Valenius server your administrator runs, or use Valenius standalone with your own WireGuard configuration files.")
+            Text("Connect to a Valenius server your administrator runs, or use Valenius standalone with your own WireGuard configuration files. An administrator must provision the initial choice.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -47,7 +47,7 @@ struct SetupChoiceView: View {
             }
             .frame(width: 260)
 
-            Text("You can switch to a server later from the About window without losing your local profiles.")
+            Text("An administrator can enroll a standalone client later. Changing an existing backend requires a separate migration.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

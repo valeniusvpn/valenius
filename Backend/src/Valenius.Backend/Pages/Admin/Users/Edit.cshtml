@@ -187,12 +187,10 @@
                                 <button type="submit" class="btn btn-success btn-sm">
                                     <i class="bi bi-shield-check me-1"></i>Activate 2FA
                                 </button>
-                                <form method="post" asp-page-handler="GenerateTotp" class="m-0">
-                                    <input type="hidden" name="id" value="@Model.AppUser.Id" />
-                                    <button type="submit" class="btn btn-outline-secondary btn-sm">
-                                        <i class="bi bi-arrow-repeat me-1"></i>New QR code
-                                    </button>
-                                </form>
+                                <button type="submit" asp-page-handler="GenerateTotp" formnovalidate
+                                        class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-arrow-repeat me-1"></i>New QR code
+                                </button>
                             </div>
                         </form>
                     }

@@ -1221,10 +1221,11 @@
                             </div>
                             <div class="card-body">
 
-                                @if (TempData["EnrollmentToken"] is string newToken)
+                                @if (Model.NewEnrollmentToken is string newToken)
                                 {
                                     <div class="alert alert-warning" role="alert">
                                         <strong><i class="bi bi-exclamation-triangle me-1"></i>Copy this token now -- it will not be shown again.</strong>
+                                        <div class="small">Single use; expires 15 minutes after generation.</div>
                                         <div class="input-group mt-2">
                                             <input type="text" id="enrollTokenInput" class="form-control form-control-sm font-monospace"
                                                    value="@newToken" readonly />
@@ -1242,10 +1243,13 @@ HEALTH_PORT=@_healthPort</pre>
                                             After enrollment, set <strong>Server address</strong> above and click Save.
                                         </div>
                                         <div class="mt-2">
-                                            <a asp-page-handler="DownloadEnv" asp-route-id="@c.Id"
-                                               class="btn btn-sm btn-warning">
-                                                <i class="bi bi-download me-1"></i>Download .env file
-                                            </a>
+                                            <form method="post" asp-page-handler="DownloadEnv">
+                                                <input type="hidden" name="id" value="@c.Id" />
+                                                <input type="hidden" name="token" value="@newToken" />
+                                                <button type="submit" class="btn btn-sm btn-warning">
+                                                    <i class="bi bi-download me-1"></i>Download .env file
+                                                </button>
+                                            </form>
                                         </div>
                                     </div>
                                 }
@@ -1260,10 +1264,6 @@ HEALTH_PORT=@_healthPort</pre>
                                     </form>
                                     @if (Model.EnrollmentTokenIsSet)
                                     {
-                                        <a asp-page-handler="DownloadEnv" asp-route-id="@c.Id"
-                                           class="btn btn-outline-primary btn-sm">
-                                            <i class="bi bi-download me-1"></i>Download .env
-                                        </a>
                                         <form method="post" asp-page-handler="RevokeEnrollmentToken">
                                             <input type="hidden" name="id" value="@c.Id" />
                                             <button type="submit" class="btn btn-outline-danger btn-sm">
@@ -1273,7 +1273,7 @@ HEALTH_PORT=@_healthPort</pre>
                                     }
                                 </div>
                                 <p class="small text-muted mt-2 mb-0">
-                                    The token is single-use and consumed on first sidecar boot. After enrollment, the
+                                    The token is single-use, expires after 15 minutes and is consumed on first sidecar boot. After enrollment, the
                                     sidecar's certificate is renewed automatically from the volume.
                                 </p>
 
@@ -1603,14 +1603,14 @@ sudo sh prepare-sidecar-host.sh</textarea>
                 </div>
 
                 <h6 class="fw-semibold">2. Enrollment token</h6>
-                @if (!string.IsNullOrEmpty(c.EnrollmentToken))
+                @if (Model.NewEnrollmentToken is string setupToken)
                 {
                     <p class="small text-muted mb-1">
-                        Current pending token for @c.Name (cleared automatically once the sidecar enrolls):
+                        New token for @c.Name (single use; valid for 15 minutes):
                     </p>
                     <div class="input-group mb-3">
                         <input type="text" id="sidecarStep2Token" class="form-control form-control-sm font-monospace"
-                               value="@c.EnrollmentToken" readonly />
+                               value="@setupToken" readonly />
                         <button class="btn btn-outline-secondary btn-sm" type="button"
                                 onclick="navigator.clipboard.writeText(document.getElementById('sidecarStep2Token').value)">
                             <i class="bi bi-clipboard"></i>
@@ -1620,8 +1620,8 @@ sudo sh prepare-sidecar-host.sh</textarea>
                 else
                 {
                     <p class="small text-muted mb-3">
-                        No token is currently set. Click <strong>Generate enrollment token</strong> above first,
-                        then reopen this dialog — the token will appear here.
+                        Tokens cannot be retrieved later. Click <strong>Generate enrollment token</strong>,
+                        then copy or download it before leaving the page. Generating a token replaces any unused one.
                     </p>
                 }
 
@@ -1647,7 +1647,7 @@ sudo sh prepare-sidecar-host.sh</textarea>
                 <div class="input-group mb-3">
                     <textarea id="sidecarStep4" class="form-control form-control-sm font-monospace" rows="4" readonly>SIDECAR_IMAGE=ghcr.io/valeniusvpn/valenius-sidecar:latest
 WG_INTERFACE=wg99
-ENROLLMENT_TOKEN=@(string.IsNullOrEmpty(c.EnrollmentToken) ? "<generate one in step 2 first>" : c.EnrollmentToken)
+ENROLLMENT_TOKEN=@(Model.NewEnrollmentToken ?? "<generate a fresh token in step 2 first>")
 BACKEND_URL=@Model.BackendUrl</textarea>
                     <button class="btn btn-outline-secondary btn-sm" type="button"
                             onclick="navigator.clipboard.writeText(document.getElementById('sidecarStep4').value)">

@@ -19,7 +19,8 @@ public class ApplianceRelease
 
     public DateTime PublishedAt { get; set; } = DateTime.UtcNow;
 
-    /// <summary>False = held back (draft or rollout halted); True = agents can receive it.</summary>
+    /// <summary>Release metadata approval. Global F14 containment still prevents
+    /// automatic delivery, even for published releases.</summary>
     public bool IsPublished { get; set; }
 
     /// <summary>Appliances with RolloutRing >= this value receive the release.</summary>

@@ -24,6 +24,7 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
     /// <summary>True while a rotation grace window is open (a previous key is still accepted).</summary>
     public bool      RotationInProgress { get; private set; }
     public DateTime? ApiKeyRotatedAt    { get; private set; }
+    public int ClientsWithoutUpdatePolicy { get; private set; }
 
     public async Task OnGetAsync()
     {
@@ -33,47 +34,36 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
         RotationInProgress      = !string.IsNullOrEmpty(apiKeyStore.PreviousKey);
         ApiKeyRotatedAt         = Settings.ApiKeyRotatedAt;
         BackendUrl              = $"{Request.Scheme}://{Request.Host}";
+        var stableClients = await db.Clients.AsNoTracking()
+            .Where(c => c.IsActive && !c.IsDeleted && c.UpdateChannel.ToLower() != ReleaseChannel.Beta)
+            .Select(c => new Client { ClientKey = c.ClientKey, CustomerId = c.CustomerId, LastDeliveredPolicyJson = c.LastDeliveredPolicyJson })
+            .ToListAsync();
+        ClientsWithoutUpdatePolicy = stableClients.Count(c => ClientUpdateHalt.PreviousPolicy(c) is null);
     }
 
-    /// <summary>
-    /// Rotate the client API key: generate a new one, keep the current key valid as the
-    /// "previous" key during a grace window, and hand the new key to clients in their next
-    /// heartbeat (see ClientsController). This lets an admin rotate the whole fleet's key
-    /// remotely without editing each client. Retire the previous key once the fleet migrates.
-    /// </summary>
-    public async Task<IActionResult> OnPostRotateApiKeyAsync()
+    public async Task<IActionResult> OnPostSaveUpdateHaltAsync()
     {
         var current = await db.ServerSettings.FirstAsync();
-        if (string.IsNullOrEmpty(current.ApiKey))
-        {
-            TempData["ApiKeyError"] = "No current API key to rotate.";
-            TempData["SettingsTab"] = "#tab-auth";
-            return RedirectToPage();
-        }
-
-        current.PreviousApiKey  = current.ApiKey;   // old key stays valid until retired
-        current.ApiKey          = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-        current.ApiKeyRotatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
-
-        apiKeyStore.Key         = current.ApiKey;
-        apiKeyStore.PreviousKey = current.PreviousApiKey;
-
-        _ = audit.LogAsync(Audit.Settings, "API key rotated",
-            "Settings: Authentication — previous key remains valid until retired");
-        TempData["Success"] = "API key rotated. Deployed clients roll forward on their next heartbeat; "
-                            + "retire the previous key once the fleet has migrated.";
-        TempData["SettingsTab"] = "#tab-auth";
+        current.ClientUpdateHaltEnabled = Settings.ClientUpdateHaltEnabled;
+        await audit.SaveChangesWithAuditAsync(db, Audit.Settings,
+            current.ClientUpdateHaltEnabled ? "Client update halt enabled" : "Client update halt disabled",
+            "Beta clients are exempt; authentication, revocation and MFA remain active.");
+        TempData["Success"] = current.ClientUpdateHaltEnabled
+            ? "Client updates halted. Beta clients continue receiving updates."
+            : "Client updates resumed. Queued changes will be delivered.";
+        TempData["SettingsTab"] = "#tab-connectivity";
         return RedirectToPage();
     }
+
+    // Old automation must fail explicitly instead of claiming fleet keys still authorize devices.
+    public IActionResult OnPostRotateApiKey() => BadRequest("Installation-wide device keys are retired. Rotate a credential from Client Details / Access.");
 
     /// <summary>Save the traffic-sample retention window (days).</summary>
     public async Task<IActionResult> OnPostSaveTrafficAsync()
     {
         var current = await db.ServerSettings.FirstAsync();
         current.TrafficRetentionDays = Math.Clamp(Settings.TrafficRetentionDays, 1, 365);
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Settings, "Traffic retention saved", $"{current.TrafficRetentionDays} days");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Settings, "Traffic retention saved", $"{current.TrafficRetentionDays} days");
         TempData["Success"]     = "Traffic retention saved.";
         TempData["SettingsTab"] = "#tab-connectivity";
         return RedirectToPage();
@@ -90,25 +80,13 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
         current.DefaultHeartbeatIntervalMinutes = Math.Clamp(Settings.DefaultHeartbeatIntervalMinutes, 1, 60);
         await db.SaveChangesAsync();
         heartbeatSettings.DefaultIntervalMinutes = current.DefaultHeartbeatIntervalMinutes;
-        _ = audit.LogAsync(Audit.Settings, "Default heartbeat interval saved", $"{current.DefaultHeartbeatIntervalMinutes} min");
+        await audit.LogAsync(Audit.Settings, "Default heartbeat interval saved", $"{current.DefaultHeartbeatIntervalMinutes} min");
         TempData["Success"]     = "Default heartbeat interval saved.";
         TempData["SettingsTab"] = "#tab-connectivity";
         return RedirectToPage();
     }
 
-    /// <summary>Retire the previous API key immediately — only the current key is accepted afterward.</summary>
-    public async Task<IActionResult> OnPostRetireApiKeyAsync()
-    {
-        var current = await db.ServerSettings.FirstAsync();
-        current.PreviousApiKey = null;
-        await db.SaveChangesAsync();
-        apiKeyStore.PreviousKey = null;
-
-        _ = audit.LogAsync(Audit.Settings, "Previous API key retired", "Settings: Authentication");
-        TempData["Success"]     = "Previous API key retired — only the current key is now accepted.";
-        TempData["SettingsTab"] = "#tab-auth";
-        return RedirectToPage();
-    }
+    public IActionResult OnPostRetireApiKey() => BadRequest("Installation-wide device keys are retired. Rotate a credential from Client Details / Access.");
 
     public async Task<IActionResult> OnPostSaveOidcConfigAsync()
     {
@@ -123,8 +101,7 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
         if (!string.IsNullOrWhiteSpace(Settings.OidcClientSecret))
             current.OidcClientSecret = Settings.OidcClientSecret.Trim();
 
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Settings, "OIDC settings saved", "Settings: Authentication");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Settings, "OIDC settings saved", "Settings: Authentication");
         TempData["Success"]     = "OIDC settings saved. Restart the container to apply.";
         TempData["SettingsTab"] = "#tab-auth";
         return RedirectToPage();
@@ -142,8 +119,7 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
             current.SmtpPassword = Settings.SmtpPassword.Trim();
         current.SmtpUseSsl = Settings.SmtpUseSsl;
         current.EmailFrom  = string.IsNullOrWhiteSpace(Settings.EmailFrom) ? null : Settings.EmailFrom.Trim();
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Settings, "SMTP settings saved", "Settings: E-mail");
+        await audit.SaveChangesWithAuditAsync(db, Audit.Settings, "SMTP settings saved", "Settings: E-mail");
         TempData["Success"]     = "SMTP settings saved.";
         TempData["SettingsTab"] = "#tab-email";
         return RedirectToPage();
@@ -190,8 +166,7 @@ public class SettingsModel(ApplicationDbContext db, IAuthenticationSchemeProvide
 
         current.OidcEnabled      = Settings.OidcEnabled;
         current.LocalAuthEnabled = Settings.LocalAuthEnabled;
-        await db.SaveChangesAsync();
-        _ = audit.LogAsync(Audit.Settings, "Auth methods saved",
+        await audit.SaveChangesWithAuditAsync(db, Audit.Settings, "Auth methods saved",
             $"Settings: OIDC={current.OidcEnabled}, Local={current.LocalAuthEnabled}");
         TempData["Success"]     = "Authentication settings saved.";
         TempData["SettingsTab"] = "#tab-auth";

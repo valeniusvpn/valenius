@@ -50,7 +50,7 @@ internal sealed class BackendUrlForm : Form
         _intro = new Label
         {
             Text      = "Enter the address of your Valenius server. Your administrator provided this — " +
-                        "just the server name, for example vpn.company.com.",
+                        "just the server name, for example vpn.company.com. Administrator provisioning is required.",
             AutoSize  = true,
             TextAlign = ContentAlignment.TopLeft
         };

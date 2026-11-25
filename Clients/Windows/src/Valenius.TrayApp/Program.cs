@@ -8,13 +8,20 @@ static class Program
     private const string MutexName = "Local\\Valenius.TrayApp";
 
     [STAThread]
-    static void Main()
+    static int Main(string[] args)
     {
+        // Administrator helper must run before the ordinary tray's per-session mutex.
+        if (args.Length > 0 && args[0].StartsWith("--provision", StringComparison.Ordinal))
+        {
+            ApplicationConfiguration.Initialize();
+            return ProvisioningCommand.RunAsync(args).GetAwaiter().GetResult();
+        }
         using var mutex = new Mutex(initiallyOwned: true, MutexName, out bool createdNew);
         if (!createdNew)
-            return;
+            return 0;
 
         ApplicationConfiguration.Initialize();
         Application.Run(new TrayApplicationContext());
+        return 0;
     }
 }

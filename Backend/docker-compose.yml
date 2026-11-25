@@ -16,10 +16,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # Not exposed on the host by default — only reachable by the backend container.
-    # Uncomment the next two lines if you need direct psql access from the host:
-    ports:
-      - "5432:5432"
+    # No host port publication. Use `docker compose exec db psql -U valenius -d valenius`
+    # for administration. If a host-side tool is essential, add a reviewed local
+    # override bound to 127.0.0.1; never publish 5432 on all interfaces.
 
   # ── Valenius Backend ──────────────────────────────────────────────
   backend:
@@ -44,6 +43,10 @@ services:
       # Data Protection key ring (survives container re-creates)
       DataProtection__KeysPath: /app/keys
 
+      # Optional legacy-device migration window. Empty disables shared-key auth.
+      # Choose an explicit UTC expiry within 90 days; never leave this enabled indefinitely.
+      DeviceAuthentication__LegacyUntilUtc: ${LEGACY_DEVICE_AUTH_UNTIL_UTC:-}
+
       # API key is intentionally NOT set here — a literal $ in a compose value is treated
       # as variable substitution, corrupting keys that contain $. The key from appsettings.json
       # baked into the image is used instead. To change it, update appsettings.json and rebuild.
@@ -65,9 +68,9 @@ services:
       Valenius__ManifestPath:  /app/data/versions.json
       Valenius__DownloadsPath: /app/data/downloads
 
-      # Bootstrap admin — always-available local login for initial setup and emergency access.
+      # Bootstrap admin — created only when the user database is empty.
       # Set ADMIN_EMAIL and ADMIN_PASSWORD in .env (or Portainer stack env vars).
-      # Changing the password takes effect on the next container restart — no DB edit needed.
+      # Later password/MFA changes belong in Admin -> Users; restarts preserve them.
       # The backend also accepts ADMIN_EMAIL / ADMIN_PASSWORD set directly (without the
       # Valenius__ prefix) as a fallback, which is simpler in Portainer.
       Valenius__AdminEmail:    ${ADMIN_EMAIL:-}

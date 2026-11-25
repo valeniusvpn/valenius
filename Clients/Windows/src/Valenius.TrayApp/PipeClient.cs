@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Security.Principal;
 using System.Text.Json;
 using Valenius.Shared;
 
@@ -11,7 +12,8 @@ public class PipeClient
 
     public async Task<PipeResponse> SendAsync(PipeCommand command)
     {
-        using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
+            TokenImpersonationLevel.Impersonation);
         await pipe.ConnectAsync(TimeoutMs);
 
         var json = JsonSerializer.Serialize(command, ValeniusJsonContext.Default.PipeCommand);
